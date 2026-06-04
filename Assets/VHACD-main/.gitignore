@@ -1,0 +1,9 @@
+data/
+data2/
+build/
+**/*.vs
+**/*.pdb
+CMakeFiles
+**/.DS_Store
+**/.vscode/
+**/.idea/

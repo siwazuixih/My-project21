@@ -1,0 +1,73 @@
+name: C/C++ CI
+
+on: [push]
+
+jobs:
+
+  build:
+    strategy:
+      matrix:
+        platform: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - platform: windows-latest
+            cmake_type: "Visual Studio 16 2019"
+            dll_name: "Release/libvhacd.dll"
+            target_dll_name: "libvhacd.dll"
+          - platform: ubuntu-latest
+            cmake_type: "Unix Makefiles"
+            dll_name: "liblibvhacd.so"
+            target_dll_name: "liblibvhacd.so"
+          - platform: macos-latest
+            cmake_type: "Unix Makefiles"
+            dll_name: "liblibvhacd.dylib"
+            target_dll_name: "liblibvhacd.bundle"
+
+    runs-on: ${{ matrix.platform }}
+    
+    steps:
+    - uses: actions/checkout@v1
+    - uses: ilammy/msvc-dev-cmd@v1.5.0
+      
+    - name: configure
+      run: |
+        mkdir build
+        cd build
+        cmake -G "${{ matrix.cmake_type }}" ../src
+    - name: build
+      run: cmake --build build --config Release
+
+    - uses: actions/upload-artifact@v1
+      with:
+        name: ${{ matrix.platform }}
+        path: build/dll/${{ matrix.dll_name }}
+
+  create_release:
+    runs-on: ubuntu-latest
+    
+    needs: [build]
+    
+    steps:
+    - uses: actions/checkout@v1
+      
+    - name: make release
+      uses: actions/create-release@v1.0.0
+      id: create_release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        draft: true
+        tag_name: ${{ github.ref }}
+        release_name: build of ${{ github.sha }}
+        
+    - uses: actions/download-artifact@v1
+      with:
+          name: ubuntu-latest
+        
+    - uses: actions/download-artifact@v1
+      with:
+          name: windows-latest
+        
+    - uses: actions/download-artifact@v1
+      with:
+          name: macos-latest
+      

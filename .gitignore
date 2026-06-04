@@ -1,0 +1,27 @@
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+UserSettings/
+
+.vscode/
+
+*.csproj
+*.sln
+*.user
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db*.csproj
+*.sln
+Assets/dipan2.fbx
+Assets/dipan2.fbx.meta
+Assets/微软雅黑 SDF.asset
+Assets/微软雅黑 SDF.asset.meta
+Assets/机舱.fbx
+Assets/机舱.fbx.meta
