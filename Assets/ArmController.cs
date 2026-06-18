@@ -11,6 +11,7 @@ public class ArmController : MonoBehaviour
     private Vector3 lockedArmTargetPos;
     private Quaternion lockedArmTargetRot;
     private Coroutine currentArmTask;
+    public bool externalControlActive { get; private set; }
 
     public void Init(MissionController manager) { mgr = manager; }
 
@@ -44,6 +45,7 @@ public class ArmController : MonoBehaviour
 
     public void StartArmSequence()
     {
+        if (externalControlActive) return;
         CalculateObservationPose(mgr.refs.targetObject.position, mgr.chassisCtrl.GetRobotPosition(), transform.forward, out lockedArmTargetPos, out lockedArmTargetRot);
         
         double[] runtimeResult = mgr.arm.enableLookAt ? 
@@ -94,6 +96,7 @@ public class ArmController : MonoBehaviour
 
     IEnumerator ExecutePath(List<double[]> path, bool simpleLerp = false)
     {
+        if (externalControlActive) yield break;
         mgr.currentState = MissionState.ArmMoving;
         List<MjActuator> actuators = mgr.refs.ikSolver.actuators; 
         int nv = actuators.Count;
@@ -102,6 +105,7 @@ public class ArmController : MonoBehaviour
 
         foreach (var fullQposState in path) 
         {
+            if (externalControlActive) yield break;
             double[] targetControls = new double[nv];
             int safeLength = Mathf.Min(fullQposState.Length, nv);
             for (int i = 0; i < safeLength; i++) targetControls[i] = fullQposState[i];
@@ -113,6 +117,7 @@ public class ArmController : MonoBehaviour
                 float duration = EstimateMoveDuration(startVals, targetControls, nv);
                 float t = 0;
                 while (t < 1.0f) {
+                    if (externalControlActive) yield break;
                     t += Time.deltaTime / duration;
                     float cv = mgr.arm.motionCurve.Evaluate(Mathf.Clamp01(t));
                     for (int i = 0; i < nv; i++) actuators[i].Control = Mathf.Lerp(startVals[i], (float)targetControls[i], cv);
@@ -120,6 +125,7 @@ public class ArmController : MonoBehaviour
                 }
             } else {
                 while (!HasReached(currentQ, targetControls, nv)) {
+                    if (externalControlActive) yield break;
                     StepTowards(ref currentQ, targetControls, mgr.arm.jointSpeed * Time.deltaTime, nv);
                     for (int j = 0; j < nv; j++) actuators[j].Control = (float)currentQ[j];
                     yield return null;
@@ -232,6 +238,20 @@ public class ArmController : MonoBehaviour
                 if (acts[i].Joint is MjHingeJoint) target *= Mathf.Deg2Rad;
                 acts[i].Control = target;
             }
+        }
+    }
+
+    public void SetExternalControlActive(bool active)
+    {
+        externalControlActive = active;
+        if (active)
+        {
+            StopAllCoroutines();
+            debug_PlannerStatus = "Real Robot Follow";
+        }
+        else
+        {
+            debug_PlannerStatus = "Ready";
         }
     }
 }

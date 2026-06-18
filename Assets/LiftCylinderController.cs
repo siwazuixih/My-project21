@@ -24,6 +24,7 @@ public class LiftCylinderController : MonoBehaviour
     public float currentVelocityMmPerSec = 0f;
     public float actualTorque = 0f;
     public float commandedVelocityMmPerSec = 0f;
+    public float lastFeedbackTime = -1f;
 
     [Header("UI 显示绑定")]
     public TextMeshProUGUI heightTextDisplay;
@@ -139,10 +140,17 @@ public class LiftCylinderController : MonoBehaviour
             ushort[] vals = modbusMaster.ReadHoldingRegisters(slaveId, 2013, 2);
             float heightMm = CDABRegistersToFloat(vals);
             UpdatePositionState(heightMm);
+            lastFeedbackTime = Time.realtimeSinceStartup;
             return heightMm;
         } catch { 
             return 0f; 
         }
+    }
+
+    public bool HasFreshFeedback(float timeoutSeconds)
+    {
+        return lastFeedbackTime >= 0f &&
+               Time.realtimeSinceStartup - lastFeedbackTime <= timeoutSeconds;
     }
 
     public float ReadCurrentVelocity()
