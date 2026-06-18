@@ -179,6 +179,19 @@ public class ArmController : MonoBehaviour
         r = Quaternion.LookRotation(look) * Quaternion.FromToRotation(mgr.arm.faceAxis, Vector3.forward);
     }
 
+    public static Vector3 CalculateObservationPosition(
+        Vector3 target,
+        Vector3 robot,
+        bool useManualObservation,
+        Vector3 manualObservationVector,
+        float observationDistance)
+    {
+        Vector3 direction = useManualObservation
+            ? manualObservationVector.normalized
+            : (robot - target).normalized;
+        return target + direction * observationDistance;
+    }
+
     private bool HasReached(double[] cur, double[] tar, int nv) {
         for (int i = 0; i < nv; i++) if (Mathf.Abs((float)(cur[i] - tar[i])) > 0.01f) return false;
         return true;

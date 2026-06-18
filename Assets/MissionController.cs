@@ -341,4 +341,47 @@ public class MissionController : MonoBehaviour
 
         currentMissionIndex = 0; currentState = MissionState.Idle;
     }
+
+    public unsafe void ControlMission(List<Transform> seletectedObjects, float? chassisSpeed, float? armSpeed, float? distance, float? x, float? y, float? z)
+    {
+        if (seletectedObjects == null || seletectedObjects.Count == 0)
+        {
+            return;
+        }
+        mission.targets.Clear();
+        mission.targets.AddRange(seletectedObjects);
+        if (chassisSpeed != null)
+        {
+            chassis.moveSpeed = chassisSpeed.Value;
+        }
+        if (armSpeed != null)
+        {
+            arm.jointSpeed = armSpeed.Value;
+        }
+        if (distance != null)
+        {
+            arm.observationDistance = distance.Value;
+        }
+        if (x != null && y != null && z != null)
+        {
+            arm.manualObservationVec = new Vector3(x.Value, y.Value, z.Value);
+        }
+
+        switch (currentState)
+        {
+            case MissionState.Idle:
+                StartMissionSequence();
+                break;
+            case MissionState.WaitingToStartPath:
+                currentState = MissionState.ChassisMoving;
+                chassisCtrl.CalculateAndStartPath(true);
+                break;
+            case MissionState.WaitingForNextTarget:
+                ExecuteNextTargetLogic();
+                break;
+            case MissionState.WaitingForInput:
+                StartArmWork();
+                break;
+        }
+    }
 }

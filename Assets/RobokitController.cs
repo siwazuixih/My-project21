@@ -32,6 +32,10 @@ public class NavigationStatus
 // ==========================================
 public class RobokitController : MonoBehaviour
 {
+    #region 事件定义
+    public event DobotEventHandler OnRobokitEvent;
+    #endregion
+
     [Header("底盘网络配置")]
     public string robotIP = "192.168.1.100";
 
@@ -163,8 +167,20 @@ public class RobokitController : MonoBehaviour
         try {
             c = new TcpClient();  c.Connect(robotIP, p); s = c.GetStream(); ok = true;
             Debug.Log($"<color=green>已连接底盘端口: {p}</color>");
-        } catch { 
+            
+            // 触发连接成功事件
+            OnRobokitEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(true, 
+                $"成功连接到底盘端口 {p}", "Chassis"));
+        } catch (Exception e) { 
             ok = false; Debug.LogError($"端口 {p} 连接失败"); 
+            
+            // 触发连接失败事件
+            OnRobokitEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(false, 
+                $"底盘端口 {p} 连接失败: {e.Message}", "Chassis"));
+            
+            // 触发错误事件
+            OnRobokitEvent?.Invoke(this, DobotEventArgs.CreateErrorEvent(e.Message, 
+                $"ConnectPort_{p}"));
         }
     }
 
@@ -222,6 +238,10 @@ public class RobokitController : MonoBehaviour
             currentX = loc.x;
             currentY = loc.y;
             Debug.Log($"最新坐标更新: X={currentX}, Y={currentY}");
+            
+            // 触发底盘位置更新事件
+            OnRobokitEvent?.Invoke(this, DobotEventArgs.CreateChassisPositionEvent(
+                currentX, currentY, loc.angle));
         }
         // 如果是查询导航状态的回复 (11020)
         else if (apiNum == 11020)
@@ -230,6 +250,10 @@ public class RobokitController : MonoBehaviour
             currentNavState = nav.task_status;
             remainDistance = nav.distance;
             Debug.Log($"导航状态更新: {currentNavState}, 剩余距离: {remainDistance}");
+            
+            // 触发底盘导航状态更新事件
+            OnRobokitEvent?.Invoke(this, DobotEventArgs.CreateChassisNavStatusEvent(
+                currentNavState, remainDistance));
         }
         else
         {
@@ -251,6 +275,10 @@ public class RobokitController : MonoBehaviour
         controlStream?.Close(); controlClient?.Close();
         navStream?.Close(); navClient?.Close();
         Debug.Log("<color=red>已断开底盘所有连接</color>");
+        
+        // 触发断开连接事件
+        OnRobokitEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(false, 
+            "已断开底盘所有连接", "Chassis"));
     }
     void OnDestroy()
     {
@@ -258,5 +286,9 @@ public class RobokitController : MonoBehaviour
         statusStream?.Close(); statusClient?.Close();
         controlStream?.Close(); controlClient?.Close();
         navStream?.Close(); navClient?.Close();
+        
+        // 触发断开连接事件
+        OnRobokitEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(false, 
+            "脚本销毁，已断开底盘所有连接", "Chassis"));
     }
 }

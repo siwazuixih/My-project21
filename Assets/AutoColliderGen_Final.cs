@@ -3,7 +3,8 @@ using System.Collections.Generic;
 using UnityMeshSimplifier; 
 using Mujoco; 
 using MeshProcess; 
-using System.Threading.Tasks; 
+using System.Threading.Tasks;
+using System;
 
 #if UNITY_EDITOR
 using UnityEditor; 
@@ -55,7 +56,7 @@ public class AutoColliderGen_Final : MonoBehaviour
     }
 
     [ContextMenu("🚀 开始生成 (带进度条)")]
-    public async void Generate()
+    public async Task Generate()
     {
         if (targetObject == null) return;
         
@@ -118,10 +119,11 @@ public class AutoColliderGen_Final : MonoBehaviour
                 root.transform.localRotation = Quaternion.identity;
                 
                 MjBody mjBody = root.AddComponent<MjBody>();
+                ModelTool.AddMeshCollidersToModel(root, true);
 
                 // 只要这个零件被你拖进了 hollowParts 列表里，就对它进行 V-HACD 切割
                 bool doVHACD = hollowParts.Contains(filter.gameObject);
-
+                doVHACD = true;
                 if (doVHACD)
                 {
                     // === 走 V-HACD 高级通道===
@@ -174,7 +176,12 @@ public class AutoColliderGen_Final : MonoBehaviour
                 successCount++;
 
                 // 让出线程，防止卡死
-                await Task.Yield();
+                if (i % 10 == 0)
+                {
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                }
+                await Task.Delay(1);
             }
         }
         finally
@@ -232,6 +239,17 @@ public class AutoColliderGen_Final : MonoBehaviour
         MjMeshShape shape = new MjMeshShape();
         shape.Mesh = mesh;
         mjGeom.Mesh = shape;
+
+        MeshCollider meshCollider = geomObj.AddComponent<MeshCollider>();
+        meshCollider.sharedMesh = mesh;
+
+        Rigidbody rigidbody = geomObj.AddComponent<Rigidbody>();
+        rigidbody.isKinematic = true;
+        rigidbody.useGravity = false;
+        rigidbody.constraints = RigidbodyConstraints.FreezeAll;
+
+        ModelCollisionHighlighter highlighter = geomObj.AddComponent<ModelCollisionHighlighter>();
+
 
         if (visualizeColliders)
         {

@@ -1,0 +1,12 @@
+diff a/Assets/SimulationPlatform/Scripts/Manage/PathPointManager.cs b/Assets/SimulationPlatform/Scripts/Manage/PathPointManager.cs	(rejected hunks)
+@@ -28,8 +28,8 @@
+         // å­˜å…¥æ¨¡åž‹åˆ—è¡¨
+         _pointObjList.Add(targetObj);
+ 
+-        // å®žä¾‹åŒ–æ ‡è®°é¢„åˆ¶ä½“
+-        PathPointMarker newMarker = Instantiate(markerPrefab, uiParent);
++        // å®žä¾‹åŒ–æ ‡è®°é¢„åˆ¶ä½“ï¼Œä¸æŒ‡å®šçˆ¶å¯¹è±¡ï¼Œä½¿å…¶åœ¨ä¸–ç•Œç©ºé—´ä¸­ç‹¬ç«‹å­˜åœ¨
++        PathPointMarker newMarker = Instantiate(markerPrefab);
+         newMarker.Init(targetObj.transform, _pointObjList.Count);
+         _markerList.Add(newMarker);
+     }

@@ -7,6 +7,11 @@ using System.Threading.Tasks; // 用于异步任务
 
 public class DobotController : MonoBehaviour
 {
+    #region 事件定义
+    // 统一的事件委托和事件
+    public event DobotEventHandler OnDobotEvent;
+    #endregion
+
     [Header("TCP 配置")]
     public string robotIP = "127.0.0.1"; // 默认指向本机，配合虚拟服务端测试
     public int dashboardPort = 29999;
@@ -43,6 +48,7 @@ public class DobotController : MonoBehaviour
 
     void Update()
     {
+        if (UIUtil.IsPointerOverUI()) return;
         // 测试按键 1：连接机械臂并请求控制权
         if (Input.GetKeyDown(KeyCode.Alpha1))
         {
@@ -72,27 +78,44 @@ public class DobotController : MonoBehaviour
         robotIP = newIP;
         Debug.Log("后台 IP 已被 UI 动态修改为: " + robotIP);
     }
-
-
-	public void Connect()
-	{
-	    try
-	    {
-	        tcpClient = new TcpClient(robotIP, dashboardPort);
-	        networkStream = tcpClient.GetStream();
-	        Debug.Log("<color=green>TCP 连接成功！</color>");
-        
-        // 🌟 新增：连接成功后，启动独立的异步监听任务！
-        _ = ReceiveLoopAsync(); 
-	        
-	        SendCommand("RequestControl()");
-            ConnectFeedback();
-	    }
-	    catch (Exception e)
-	    {
-	        Debug.LogError("<color=red>TCP 连接失败: </color>" + e.Message);
+    public void SetRobotPort(int newPort)
+    {
+        dashboardPort = newPort;
+        Debug.Log("后台 端口 已被 UI 动态修改为: " + dashboardPort);
     }
-}
+
+
+    public void Connect()
+    {
+        try
+        {
+            tcpClient = new TcpClient(robotIP, dashboardPort);
+            networkStream = tcpClient.GetStream();
+            Debug.Log("<color=green>TCP 连接成功！</color>");
+
+            // 触发连接成功事件
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(
+                true, $"成功连接到 {robotIP}:{dashboardPort}", "Dashboard"));
+
+
+            // 🌟 新增：连接成功后，启动独立的异步监听任务！
+            _ = ReceiveLoopAsync();
+
+            SendCommand("RequestControl()");
+            ConnectFeedback();
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("<color=red>TCP 连接失败: </color>" + e.Message);
+
+            // 触发连接失败事件
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(
+                false, $"连接失败: {e.Message}", "Dashboard"));
+
+            // 触发错误事件
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateErrorEvent(e.Message, "Connect"));
+        }
+    }
     public void PowerOn()
     {
         SendCommand("PowerOn()");
@@ -121,10 +144,17 @@ public class DobotController : MonoBehaviour
 
             bool isConnected = false;
             Debug.Log("<color=yellow>TCP 连接已安全断开。</color>");
+
+            // 触发断开连接事件
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(
+                false, "连接已安全断开", "Dashboard"));
         }
         catch (System.Exception e)
         {
             Debug.LogError($"断开连接时发生错误: {e.Message}");
+
+            // 触发错误事件
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateErrorEvent(e.Message, "Disconnect"));
         }
     }
 
@@ -146,7 +176,7 @@ public class DobotController : MonoBehaviour
         SendCommand(cmd);
         if (speedTextDisplay != null)
         {
-            speedTextDisplay.text = "Speed: " + speed + "%";
+            speedTextDisplay.text = "速度: " + speed + "%";
         }
     }
     public void MoveJoints(double[] joints)
@@ -191,6 +221,10 @@ public class DobotController : MonoBehaviour
         if (networkStream == null || !tcpClient.Connected)
         {
             Debug.LogWarning("未连接到 TCP 服务端，请先按 1 建立连接！");
+
+            // 触发命令发送失败事件
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateCommandEvent(
+                cmd, false, "未连接到 TCP 服务端"));
             return;
         }
         
@@ -200,10 +234,19 @@ public class DobotController : MonoBehaviour
             networkStream.Write(data, 0, data.Length);
             Debug.Log($"<color=#00FFFF>Unity 发送指令:</color> {cmd}");
 
+            // 触发命令发送成功事件
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateCommandEvent(cmd, true));
+
         }
         catch (Exception e)
         {
             Debug.LogError("发送指令失败: " + e.Message);
+
+            // 触发命令发送失败事件
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateCommandEvent(cmd, false, e.Message));
+
+            // 触发错误事件
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateErrorEvent(e.Message, "SendCommand"));
         }
     }
 
@@ -234,11 +277,18 @@ public class DobotController : MonoBehaviour
                     // 去掉末尾多余的换行符，保持日志干净
                     response = response.TrimEnd('\r', '\n'); 
                     Debug.Log($"<color=yellow>服务端返回:</color> {response}");
+
+                    // 触发响应接收事件
+                    OnDobotEvent?.Invoke(this, DobotEventArgs.CreateResponseEvent(response, "Dashboard"));
                 }
                 else
                 {
                     // 如果读到 0 字节，说明服务端主动断开了连接
                     Debug.LogWarning("服务端主动断开了连接。");
+
+                    // 触发连接断开事件
+                    OnDobotEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(
+                        false, "服务端主动断开了连接", "Dashboard"));
                     break;
                 }
             }
@@ -246,6 +296,9 @@ public class DobotController : MonoBehaviour
         catch (System.Exception e)
         {
             Debug.LogWarning("接收任务结束或连接异常: " + e.Message);
+
+            // 触发错误事件
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateErrorEvent(e.Message, "ReceiveLoopAsync"));
         }
     }
 
@@ -259,10 +312,21 @@ public class DobotController : MonoBehaviour
             feedbackLoopRunning = true;
             _ = FeedbackLoopAsync();
             Debug.Log($"<color=green>机械臂反馈端口 {feedbackPort} 连接成功。</color>");
+
+            // 触发反馈连接成功事件
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(
+                true, $"成功连接到反馈端口 {robotIP}:{feedbackPort}", "Feedback"));
         }
         catch (Exception e)
         {
             Debug.LogError($"<color=red>机械臂反馈端口 {feedbackPort} 连接失败: </color>{e.Message}");
+
+            // 触发反馈连接失败事件
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(
+                false, $"反馈端口连接失败: {e.Message}", "Feedback"));
+
+            // 触发错误事件
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateErrorEvent(e.Message, "ConnectFeedback"));
         }
     }
 
@@ -278,6 +342,10 @@ public class DobotController : MonoBehaviour
                 if (bytesRead != packet.Length)
                 {
                     Debug.LogWarning("机械臂反馈数据长度异常，反馈循环结束。");
+
+                    // 触发错误事件
+                    OnDobotEvent?.Invoke(this, DobotEventArgs.CreateErrorEvent(
+                        "机械臂反馈数据长度异常", "FeedbackLoopAsync"));
                     break;
                 }
 
@@ -287,6 +355,9 @@ public class DobotController : MonoBehaviour
         catch (Exception e)
         {
             Debug.LogWarning("机械臂反馈监听结束或连接异常: " + e.Message);
+
+            // 触发错误事件
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateErrorEvent(e.Message, "FeedbackLoopAsync"));
         }
     }
 
@@ -323,6 +394,11 @@ public class DobotController : MonoBehaviour
 
             feedbackSequence++;
             lastFeedbackUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+
+            // 触发反馈数据更新事件
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateFeedbackEvent(
+                currentRobotMode, currentRobotModeText, speedScaling, velocityRatio,
+                (double[])actualJoints.Clone(), (double[])actualJointSpeeds.Clone()));
         }
     }
 
