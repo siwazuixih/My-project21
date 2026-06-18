@@ -36,6 +36,8 @@ public class DobotController : MonoBehaviour
     public byte velocityRatio = 0;
     public double[] actualJoints = new double[6];
     public double[] actualJointSpeeds = new double[6];
+    public long feedbackSequence = 0;
+    public double lastFeedbackUnixSeconds = 0;
 
 
 
@@ -155,6 +157,16 @@ public class DobotController : MonoBehaviour
 
         string cmd = $"MovJ(joint={{{jointStr}}}, cp=50)";
         SendCommand(cmd);
+    }
+
+    public void StartSimulatorFollowDemo()
+    {
+        SendCommand("StartFollowDemo()");
+    }
+
+    public void StopSimulatorFollowDemo()
+    {
+        SendCommand("StopFollowDemo()");
     }
 
     // 专门给 Unity UI 按钮调用的测试方法（无参数，按钮能识别它）
@@ -308,6 +320,35 @@ public class DobotController : MonoBehaviour
                 actualJoints[i] = BitConverter.ToDouble(packet, 432 + i * 8);
                 actualJointSpeeds[i] = BitConverter.ToDouble(packet, 480 + i * 8);
             }
+
+            feedbackSequence++;
+            lastFeedbackUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        }
+    }
+
+    public bool HasFreshFeedback(float timeoutSeconds)
+    {
+        lock (feedbackLock)
+        {
+            if (lastFeedbackUnixSeconds <= 0) return false;
+            double now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+            return now - lastFeedbackUnixSeconds <= timeoutSeconds;
+        }
+    }
+
+    public bool TryCopyActualJoints(double[] destination, float timeoutSeconds)
+    {
+        if (destination == null || destination.Length < 6) return false;
+
+        lock (feedbackLock)
+        {
+            if (lastFeedbackUnixSeconds <= 0) return false;
+            double now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+            if (now - lastFeedbackUnixSeconds > timeoutSeconds) return false;
+
+            EnsureFeedbackArrays();
+            Array.Copy(actualJoints, destination, 6);
+            return true;
         }
     }
 
