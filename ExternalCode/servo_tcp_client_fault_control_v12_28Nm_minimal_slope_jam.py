@@ -21,6 +21,8 @@ PC 控制帧：55 AA 07 01 00 数据发送模式 启停指令 CRC低 CRC高 0D 0
 """
 
 import csv
+import json
+import os
 import socket
 import threading
 import time
@@ -28,17 +30,30 @@ from collections import deque
 from pathlib import Path
 
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-from matplotlib.widgets import Button
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.animation as animation
+    from matplotlib.widgets import Button
+    PLOT_AVAILABLE = True
+    PLOT_IMPORT_ERROR = ""
+except Exception as e:
+    plt = None
+    animation = None
+    Button = None
+    PLOT_AVAILABLE = False
+    PLOT_IMPORT_ERROR = str(e)
 
 # =========================
 # TCP 参数
 # =========================
-IP = "192.168.192.21"
-PORT = 1200
-CONNECT_TIMEOUT = 3.0
+IP = os.environ.get("SERVO_TOOL_IP", "192.168.192.21")
+PORT = int(os.environ.get("SERVO_TOOL_PORT", "1200"))
+CONNECT_TIMEOUT = float(os.environ.get("SERVO_CONNECT_TIMEOUT", "3.0"))
 RECONNECT_DELAY = 2.0
+
+# Unity 内部控制口：Unity 只连这个端口，不直接连电批。
+UNITY_BRIDGE_HOST = os.environ.get("SERVO_BRIDGE_HOST", "127.0.0.1")
+UNITY_BRIDGE_PORT = int(os.environ.get("SERVO_BRIDGE_PORT", "9100"))
 
 # =========================
 # 保存目录
@@ -150,6 +165,8 @@ last_print_recv_time = 0.0
 last_save_time = 0.0
 run_id = time.strftime("%Y%m%d_%H%M%S")
 save_done = False
+last_saved_csv = ""
+last_saved_png = ""
 
 # =========================
 # CRC16/MODBUS
@@ -587,7 +604,7 @@ def save_run_outputs(force: bool = False):
     2. CSV 和 PNG 使用同一个 base_name；
     3. 默认每次拧紧只保存一次，避免 OK 后复位/停止重复保存。
     """
-    global save_done, last_save_time
+    global save_done, last_save_time, last_saved_csv, last_saved_png
 
     try:
         with lock:
@@ -621,23 +638,32 @@ def save_run_outputs(force: bool = False):
             w.writerows(zip(x, raw, filt, speed, angle, states))
 
         # 2) 用同一份数据快照生成 PNG，确保曲线和 CSV 一一对应
-        fig_save, ax_save = plt.subplots(figsize=(9, 5))
-        ax_save.plot(x, filt, lw=2, label="filtered")
-        ax_save.plot(x, raw, lw=1, alpha=0.35, label="raw")
-        ax_save.axhline(OK_TORQUE_TH, linestyle="--", linewidth=1, label=f"OK threshold {OK_TORQUE_TH:.1f} N.m")
-        ax_save.set_title(f"Time-Torque Curve | STATE: {current_state} | Target={TARGET_TORQUE:.0f} N.m")
-        ax_save.set_xlabel("Time (s)")
-        ax_save.set_ylabel("Torque (N.m)")
-        ax_save.set_ylim(0, 36)
-        ax_save.grid(True)
-        ax_save.legend(loc="upper left")
-        fig_save.tight_layout()
-        fig_save.savefig(png_path, dpi=200)
-        plt.close(fig_save)
+        if PLOT_AVAILABLE:
+            fig_save, ax_save = plt.subplots(figsize=(9, 5))
+            ax_save.plot(x, filt, lw=2, label="filtered")
+            ax_save.plot(x, raw, lw=1, alpha=0.35, label="raw")
+            ax_save.axhline(OK_TORQUE_TH, linestyle="--", linewidth=1, label=f"OK threshold {OK_TORQUE_TH:.1f} N.m")
+            ax_save.set_title(f"Time-Torque Curve | STATE: {current_state} | Target={TARGET_TORQUE:.0f} N.m")
+            ax_save.set_xlabel("Time (s)")
+            ax_save.set_ylabel("Torque (N.m)")
+            ax_save.set_ylim(0, 36)
+            ax_save.grid(True)
+            ax_save.legend(loc="upper left")
+            fig_save.tight_layout()
+            fig_save.savefig(png_path, dpi=200)
+            plt.close(fig_save)
+            last_saved_png = str(png_path)
+        else:
+            png_path = None
+            last_saved_png = ""
 
         print(f"数据和曲线已保存到同一文件夹：{day_dir}")
         print(f"CSV: {csv_path}")
-        print(f"PNG: {png_path}")
+        if png_path is not None:
+            print(f"PNG: {png_path}")
+        else:
+            print(f"PNG: 未生成，matplotlib 不可用: {PLOT_IMPORT_ERROR}")
+        last_saved_csv = str(csv_path)
         return csv_path, png_path
 
     except Exception as e:
@@ -721,66 +747,173 @@ def tcp_receive():
             time.sleep(RECONNECT_DELAY)
 
 # =========================
-# 绘图与按钮
+# Unity 内部控制口
 # =========================
-fig, ax = plt.subplots()
-plt.subplots_adjust(bottom=0.22)
-line, = ax.plot([], [], lw=2, label="filtered")
-raw_line, = ax.plot([], [], lw=1, alpha=0.35, label="raw")
-ax.legend(loc="upper left")
-
-ax.set_title("Time-Torque Curve | 28 N.m FSM V12")
-ax.set_xlabel("Time (s)")
-ax.set_ylabel("Torque (N.m)")
-ax.grid(True)
-ax.set_ylim(0, 36)
-
-ax_forward = plt.axes([0.12, 0.05, 0.18, 0.075])
-ax_reverse = plt.axes([0.41, 0.05, 0.18, 0.075])
-ax_stop = plt.axes([0.70, 0.05, 0.18, 0.075])
-
-btn_forward = Button(ax_forward, "Forward")
-btn_reverse = Button(ax_reverse, "Reverse")
-btn_stop = Button(ax_stop, "Reset/Stop")
-
-btn_forward.on_clicked(start_forward)
-btn_reverse.on_clicked(start_reverse)
-btn_stop.on_clicked(stop_driver)
+def _latest_or_none(values):
+    return None if len(values) == 0 else values[-1]
 
 
-def update(frame):
+def unity_status(ok: bool = True, message: str = "status"):
     with lock:
         current_state = state
-        if len(time_data) == 0:
-            ax.set_title(f"Time-Torque Curve | STATE: {current_state}")
-            return line, raw_line
-        x = list(time_data)
-        y = list(torque_data)
-        y_raw = [abs(v) for v in torque_raw_data]
+        latest_raw = _latest_or_none(torque_raw_data)
+        latest_torque = _latest_or_none(torque_data)
+        latest_speed = _latest_or_none(speed_data)
+        latest_angle = _latest_or_none(angle_data)
+        samples = len(time_data)
+        current_run_id = run_id
+        saved_csv = last_saved_csv
+        saved_png = last_saved_png
 
-    line.set_data(x, y)
-    raw_line.set_data(x, y_raw)
-    if len(x) > 1:
-        ax.set_xlim(max(0, x[-1] - 8), max(8, x[-1] + 0.2))
-    ax.set_title(f"Time-Torque Curve | STATE: {current_state} | Target={TARGET_TORQUE:.0f} N.m")
-    return line, raw_line
+    with sock_lock:
+        connected = client_socket is not None
+
+    return {
+        "ok": ok,
+        "message": message,
+        "tool_connected": connected,
+        "state": current_state,
+        "run_id": current_run_id,
+        "samples": samples,
+        "raw_torque": latest_raw,
+        "filtered_torque": latest_torque,
+        "speed": latest_speed,
+        "angle": latest_angle,
+        "csv": saved_csv,
+        "png": saved_png,
+    }
 
 
-ani = animation.FuncAnimation(fig, update, interval=80, cache_frame_data=False)
+def run_unity_command(cmd: str):
+    normalized = (cmd or "").strip().lower()
 
-print("\n命令说明：")
-print(f"复位/停止: {hexstr(CMD_RESET)}")
-print(f"正转:     {hexstr(CMD_FORWARD)}")
-print(f"反转:     {hexstr(CMD_REVERSE)}")
-print("\nV12_28Nm 判据：")
-print(f"拧紧完成: torque >= {OK_TORQUE_TH:.2f} Nm 且 {OK_HOLD_TIME:.1f}s 内波动 <= {OK_STABLE_BAND:.2f} Nm")
-print(f"滑牙: peak >= {SLIP_MIN_PEAK:.2f} Nm，峰值回落 >= {SLIP_DROP_TH:.2f} Nm，连续 {SLIP_CONFIRM_N} 次")
-print(f"卡滞: torque >= {JAM_TORQUE_TH:.2f} Nm，speed <= {JAM_SPEED_TH}，{JAM_WINDOW_TIME:.1f}s 上升 <= {JAM_RISE_MAX:.2f} Nm")
-print(f"卡滞斜率辅助: slope_mean <= {JAM_SLOPE_MIN:.2f} Nm/s，slope_std <= {JAM_SLOPE_STD_MAX:.2f}，fluct {JAM_FLUCT_MIN:.2f}~{JAM_FLUCT_MAX:.2f} Nm")
-print(f"卡滞自动停机: {JAM_AUTO_STOP}")
-print(f"成功指令: {SUCCESS_CMD_TEXT}，滑牙NG指令: {SLIP_NG_CMD_TEXT}，TCP发送: {SEND_RESULT_TO_TCP_DEVICE}")
-print(f"保存目录: {BASE_SAVE_DIR}")
+    if normalized == "connect":
+        # tcp_receive 线程会自动连接电批；这里用复位指令验证当前连接是否可写。
+        ok = reset_driver()
+        return unity_status(ok, "connected" if ok else "connect_failed")
 
-threading.Thread(target=tcp_receive, daemon=True).start()
+    if normalized == "forward":
+        start_forward()
+        return unity_status(True, "forward_started")
 
-plt.show()
+    if normalized == "reverse":
+        start_reverse()
+        return unity_status(True, "reverse_started")
+
+    if normalized in ("stop", "reset"):
+        stop_driver()
+        return unity_status(True, "stopped")
+
+    if normalized in ("status", ""):
+        return unity_status(True, "status")
+
+    return unity_status(False, f"unknown_cmd:{cmd}")
+
+
+def handle_unity_client(conn: socket.socket, addr):
+    with conn:
+        file = conn.makefile("rwb")
+        for raw in file:
+            try:
+                request = json.loads(raw.decode("utf-8"))
+                response = run_unity_command(request.get("cmd", ""))
+            except Exception as e:
+                response = unity_status(False, f"bridge_error:{e}")
+
+            file.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+            file.flush()
+
+
+def unity_command_server():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((UNITY_BRIDGE_HOST, UNITY_BRIDGE_PORT))
+    server.listen(5)
+    print(f"Unity控制口已启动：{UNITY_BRIDGE_HOST}:{UNITY_BRIDGE_PORT}")
+
+    while True:
+        conn, addr = server.accept()
+        threading.Thread(target=handle_unity_client, args=(conn, addr), daemon=True).start()
+
+def print_startup_info():
+    print("\n命令说明：")
+    print(f"复位/停止: {hexstr(CMD_RESET)}")
+    print(f"正转:     {hexstr(CMD_FORWARD)}")
+    print(f"反转:     {hexstr(CMD_REVERSE)}")
+    print("\nV12_28Nm 判据：")
+    print(f"拧紧完成: torque >= {OK_TORQUE_TH:.2f} Nm 且 {OK_HOLD_TIME:.1f}s 内波动 <= {OK_STABLE_BAND:.2f} Nm")
+    print(f"滑牙: peak >= {SLIP_MIN_PEAK:.2f} Nm，峰值回落 >= {SLIP_DROP_TH:.2f} Nm，连续 {SLIP_CONFIRM_N} 次")
+    print(f"卡滞: torque >= {JAM_TORQUE_TH:.2f} Nm，speed <= {JAM_SPEED_TH}，{JAM_WINDOW_TIME:.1f}s 上升 <= {JAM_RISE_MAX:.2f} Nm")
+    print(f"卡滞斜率辅助: slope_mean <= {JAM_SLOPE_MIN:.2f} Nm/s，slope_std <= {JAM_SLOPE_STD_MAX:.2f}，fluct {JAM_FLUCT_MIN:.2f}~{JAM_FLUCT_MAX:.2f} Nm")
+    print(f"卡滞自动停机: {JAM_AUTO_STOP}")
+    print(f"成功指令: {SUCCESS_CMD_TEXT}，滑牙NG指令: {SLIP_NG_CMD_TEXT}，TCP发送: {SEND_RESULT_TO_TCP_DEVICE}")
+    print(f"保存目录: {BASE_SAVE_DIR}")
+    print(f"电批目标: {IP}:{PORT}")
+    print(f"Unity控制口: {UNITY_BRIDGE_HOST}:{UNITY_BRIDGE_PORT}")
+    if not PLOT_AVAILABLE:
+        print(f"曲线窗口: 已禁用，matplotlib 不可用: {PLOT_IMPORT_ERROR}")
+
+
+def start_background_services():
+    threading.Thread(target=tcp_receive, daemon=True).start()
+    threading.Thread(target=unity_command_server, daemon=True).start()
+
+
+def run_plot_window():
+    fig, ax = plt.subplots()
+    plt.subplots_adjust(bottom=0.22)
+    line, = ax.plot([], [], lw=2, label="filtered")
+    raw_line, = ax.plot([], [], lw=1, alpha=0.35, label="raw")
+    ax.legend(loc="upper left")
+
+    ax.set_title("Time-Torque Curve | 28 N.m FSM V12")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Torque (N.m)")
+    ax.grid(True)
+    ax.set_ylim(0, 36)
+
+    ax_forward = plt.axes([0.12, 0.05, 0.18, 0.075])
+    ax_reverse = plt.axes([0.41, 0.05, 0.18, 0.075])
+    ax_stop = plt.axes([0.70, 0.05, 0.18, 0.075])
+
+    btn_forward = Button(ax_forward, "Forward")
+    btn_reverse = Button(ax_reverse, "Reverse")
+    btn_stop = Button(ax_stop, "Reset/Stop")
+
+    btn_forward.on_clicked(start_forward)
+    btn_reverse.on_clicked(start_reverse)
+    btn_stop.on_clicked(stop_driver)
+
+    def update(frame):
+        with lock:
+            current_state = state
+            if len(time_data) == 0:
+                ax.set_title(f"Time-Torque Curve | STATE: {current_state}")
+                return line, raw_line
+            x = list(time_data)
+            y = list(torque_data)
+            y_raw = [abs(v) for v in torque_raw_data]
+
+        line.set_data(x, y)
+        raw_line.set_data(x, y_raw)
+        if len(x) > 1:
+            ax.set_xlim(max(0, x[-1] - 8), max(8, x[-1] + 0.2))
+        ax.set_title(f"Time-Torque Curve | STATE: {current_state} | Target={TARGET_TORQUE:.0f} N.m")
+        return line, raw_line
+
+    animation.FuncAnimation(fig, update, interval=80, cache_frame_data=False)
+    plt.show()
+
+
+def main():
+    print_startup_info()
+    start_background_services()
+    if PLOT_AVAILABLE:
+        run_plot_window()
+    else:
+        while True:
+            time.sleep(1)
+
+
+if __name__ == "__main__":
+    main()
