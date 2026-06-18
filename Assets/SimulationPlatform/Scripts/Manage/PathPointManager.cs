@@ -147,7 +147,7 @@ public class PathPointManager : MonoBehaviour
             float guiX = screenPos.x - bubbleWidth / 2;
             float guiY = Screen.height - screenPos.y - bubbleHeight / 2;
 
-            Debug.Log($"[PathPoint {i+1}] world={worldPos}, screen={screenPos}, GUI=({guiX:F1},{guiY:F1}), 相机={currentCamera.name}");
+            //Debug.Log($"[PathPoint {i+1}] world={worldPos}, screen={screenPos}, GUI=({guiX:F1},{guiY:F1}), 相机={currentCamera.name}");
 
             // 设置样式
             GUIStyle boxStyle = new GUIStyle(GUI.skin.box);
