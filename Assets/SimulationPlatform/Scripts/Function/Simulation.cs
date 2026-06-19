@@ -13,6 +13,7 @@ using Unity.AI.Navigation;
 public class Simulation : ModelImport
 {
     public Dropdown JointSelectDropdown;
+    public JointParamInfo JointParam;
     public Button CloseDropdownButton;
     public Button SelectJointButton;
     private List<JointModel> jointList = new List<JointModel>();
@@ -848,6 +849,11 @@ public class Simulation : ModelImport
         {
             SelectJointButton.gameObject.SetActive(false);
         }
+        // 隐藏JointParam
+        if (JointParam != null)
+        {
+            JointParam.gameObject.SetActive(false);
+        }
     }
 
     private void OnCloseDropdownClicked()
@@ -860,6 +866,11 @@ public class Simulation : ModelImport
         if (SelectJointButton != null)
         {
             SelectJointButton.gameObject.SetActive(false);
+        }
+        // 隐藏JointParam
+        if (JointParam != null)
+        {
+            JointParam.gameObject.SetActive(false);
         }
         Debug.Log("已关闭接头选择下拉框");
     }
@@ -902,6 +913,13 @@ public class Simulation : ModelImport
         {
             JointModel selectedJoint = jointList[value];
             Debug.Log("选择了接头: " + selectedJoint.Name);
+            
+            // 显示JointParam并设置接头信息
+            if (JointParam != null)
+            {
+                JointParam.gameObject.SetActive(true);
+                JointParam.SetJoint(selectedJoint);
+            }
         }
     }
 
