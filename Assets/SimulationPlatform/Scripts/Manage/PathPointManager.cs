@@ -52,6 +52,11 @@ public class PathPointManager : MonoBehaviour
         Debug.Log($"[PathPointManager] 最终使用相机: {_cachedCamera?.name}, 位置: {_cachedCamera?.transform.position}, forward: {_cachedCamera?.transform.forward}");
     }
 
+    public int GetIndex(GameObject targetObj)
+    {
+        return _pointObjList.IndexOf(targetObj);
+    }
+
     public void AddPoint(GameObject targetObj)
     {
         Vector3 worldPos = targetObj.transform.position + Vector3.up * modelTopOffset;
@@ -66,6 +71,14 @@ public class PathPointManager : MonoBehaviour
 
         _pointObjList.Add(targetObj);
         _worldPosList.Add(worldPos);
+
+        // 设置 TransformJointDataComponent 的索引
+        int pointIndex = _pointObjList.Count - 1;
+        TransformJointDataComponent tjdc = targetObj.GetComponent<TransformJointDataComponent>();
+        if (tjdc != null)
+        {
+            tjdc.index = pointIndex;
+        }
 
         Debug.Log($"[PathPointManager] 添加路径点: {targetObj.name}, 世界坐标: {worldPos}, 当前数量: {_pointObjList.Count}");
     }
@@ -93,6 +106,16 @@ public class PathPointManager : MonoBehaviour
         if (index < _worldPosList.Count)
         {
             _worldPosList.RemoveAt(index);
+        }
+
+        // 更新剩余物体的 TransformJointDataComponent 索引
+        for (int i = index; i < _pointObjList.Count; i++)
+        {
+            TransformJointDataComponent tjdc = _pointObjList[i].GetComponent<TransformJointDataComponent>();
+            if (tjdc != null)
+            {
+                tjdc.index = i;
+            }
         }
     }
 

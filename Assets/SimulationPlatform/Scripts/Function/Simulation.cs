@@ -832,7 +832,7 @@ public class Simulation : ModelImport
         {
             GameObject oldObject = ModelCollisionHighlighter.selectedObject.gameObject;           
             
-            StartCoroutine(InstantiateReplacedModel(fullModelPath, position, rotation, scale, parent, oldObject, selectedJoint.Name));
+            StartCoroutine(InstantiateReplacedModel(fullModelPath, position, rotation, scale, parent, oldObject, selectedJoint, JointParam, MissionController));
             Debug.Log($"正在替换物体 {oldObjectName} 为 {selectedJoint.Name}");
         }
         else

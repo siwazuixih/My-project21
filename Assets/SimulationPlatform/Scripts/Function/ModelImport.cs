@@ -425,7 +425,7 @@ public class ModelImport : MonoBehaviour
     /// <summary>
     /// 实例化替换后的模型
     /// </summary>
-    protected IEnumerator InstantiateReplacedModel(string filePath, Vector3 position, Quaternion rotation, Vector3 scale, Transform parent, GameObject oldObject, string modelName = null)
+    protected IEnumerator InstantiateReplacedModel(string filePath, Vector3 position, Quaternion rotation, Vector3 scale, Transform parent, GameObject oldObject, JointModel jointModel = null, JointParamInfo jointParam = null, MissionController missionController = null)
     {
         var gltf = new GLTFast.GltfImport();
 
@@ -475,9 +475,9 @@ public class ModelImport : MonoBehaviour
                     }
 
                     // 设置模型名称为JointModel.Name
-                    if (!string.IsNullOrEmpty(modelName))
+                    if (jointModel != null && !string.IsNullOrEmpty(jointModel.Name))
                     {
-                        newModel.name = modelName;
+                        newModel.name = jointModel.Name;
                     }
 
                     // 禁用模型自带相机
@@ -528,8 +528,23 @@ public class ModelImport : MonoBehaviour
                         // 设置模型的位置、旋转和缩放与原高亮物体相同
                         newModel.transform.localPosition = Vector3.zero;
                         newModel.transform.localRotation = Quaternion.identity;
-                    }
 
+                        // 绑定 TransformJointDataComponent 并赋值
+                        if (jointModel != null)
+                        {
+                            TransformJointDataComponent tjdc = newModel.GetComponent<TransformJointDataComponent>();
+                            if (tjdc == null)
+                            {
+                                tjdc = newModel.AddComponent<TransformJointDataComponent>();
+                            }
+                            tjdc.jointModel = jointModel;
+                            tjdc.paramInfo = jointParam;
+                            tjdc.transformRef = newModel.transform;
+                            tjdc.position = new Vector3D(newModel.transform.position);
+                            tjdc.missionController = missionController;
+                            tjdc.RefreshData();
+                        }
+                    }
                     Debug.Log($"模型替换成功: {newModel.name}");
                 }
                 else

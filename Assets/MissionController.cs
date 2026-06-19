@@ -18,7 +18,24 @@ public class MissionController : MonoBehaviour
     public Connect connect;
 
     [HideInInspector] public MissionState currentState = MissionState.Initializing;
-    [HideInInspector] public int currentMissionIndex = 0;
+    [HideInInspector] private int _currentMissionIndex = 0;
+
+    /// <summary>
+    /// currentMissionIndex 值发生变化时触发的事件
+    /// 参数：旧值, 新值
+    /// </summary>
+    public event System.Action<int, int> OnMissionIndexChanged;
+
+    public int currentMissionIndex
+    {
+        get => _currentMissionIndex;
+        set
+        {
+            int oldValue = _currentMissionIndex;
+            _currentMissionIndex = value;
+            OnMissionIndexChanged?.Invoke(oldValue, value);
+        }
+    }
     [HideInInspector] public List<Vector3[]> globalPathCache = new List<Vector3[]>();
     [HideInInspector] public List<DiagnosisSnapshot> snapshots = new List<DiagnosisSnapshot>();
     [HideInInspector] public bool hasPrecalculated = false;
