@@ -227,24 +227,34 @@ public class JointEdit : ModelImport
 
         // 复制文件到uuid命名的文件夹下
         string physicalModelPath = PathTool.ResolvePhysicalPath(modelFilePath);
+        bool needCopy = false;
+        
         if (!string.IsNullOrEmpty(physicalModelPath) && System.IO.File.Exists(physicalModelPath))
         {
-            // 使用Joint.Id作为文件夹名
+            if (Joint.Glb == null || string.IsNullOrEmpty(Joint.Glb.FilePath))
+            {
+                needCopy = true;
+            }
+            else
+            {
+                string existingFilePath = PathTool.ResolvePhysicalPath(Joint.Glb.FilePath);
+                needCopy = !System.IO.File.Exists(existingFilePath);
+            }
+        }
+
+        if (needCopy && !string.IsNullOrEmpty(physicalModelPath) && System.IO.File.Exists(physicalModelPath))
+        {
             string folderName = Joint.Id;
             string targetPath = FileManager.CopyFileToProjectFiles(folderName, physicalModelPath);
 
             if (!string.IsNullOrEmpty(targetPath))
             {
-                // 确保Joint.GlbModel不为空
                 if (Joint.Glb == null)
                 {
                     Joint.Glb = new GlbModel();
                 }
 
-                // 计算相对于项目的路径
                 string relativePath = PathTool.GetRelativePathFromExecutableDir(targetPath);
-
-                // 设置GlbModel的FilePath为相对路径
                 Joint.Glb.FilePath = relativePath;
                 Debug.Log($"设置Joint.Glb.FilePath为相对路径: {relativePath}");
                 Debug.Log($"原始完整路径: {targetPath}");
