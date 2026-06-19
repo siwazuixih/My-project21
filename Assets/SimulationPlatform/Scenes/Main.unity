@@ -9213,12 +9213,12 @@ MonoBehaviour:
   JointNameInput: {fileID: 1798585852}
   JointModelInput: {fileID: 87917529}
   JointCommentInput: {fileID: 192327135}
-  LeadInput: {fileID: 0}
-  PictchDiameterInput: {fileID: 0}
-  TorqueInput: {fileID: 0}
-  ThresholdInput: {fileID: 0}
-  AngleInput: {fileID: 0}
-  TravelInput: {fileID: 0}
+  LeadInput: {fileID: 386672139}
+  PictchDiameterInput: {fileID: 776987860}
+  TorqueInput: {fileID: 352149520}
+  ThresholdInput: {fileID: 587231579}
+  AngleInput: {fileID: 1279185923}
+  TravelInput: {fileID: 1867146462}
 --- !u!1 &1151497612
 GameObject:
   m_ObjectHideFlags: 0
