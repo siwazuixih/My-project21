@@ -315,18 +315,12 @@ public class ModelCollisionHighlighter : MonoBehaviour
         if (highlight)
         {
             currentHighlightedObject = this;
-            // 初始化中心点
-            InitializeCenterPoint();
-            // 显示中心点
-            SetCenterPointVisible(true);
             // 设置模型透明化
             SetModelOpacity(highlightOpacity);
         }
         else if (currentHighlightedObject == this)
         {
             currentHighlightedObject = null;
-            // 隐藏中心点
-            SetCenterPointVisible(false);
             // 恢复模型不透明度
             SetModelOpacity(1.0f);
         }
@@ -492,6 +486,7 @@ public class ModelCollisionHighlighter : MonoBehaviour
         }
 
         isSelected = highlight;
+        isHighlighted = highlight;
 
         // 更新当前高亮物体
         if (highlight)
@@ -503,10 +498,6 @@ public class ModelCollisionHighlighter : MonoBehaviour
             }
             Debug.Log($"添加途经点：{this.name}");
             PathPointManager.Instance?.AddPoint(gameObject);
-            // 初始化中心点
-            InitializeCenterPoint();
-            // 显示中心点
-            SetCenterPointVisible(true);
             // 设置模型透明化
             SetModelOpacity(highlightOpacity);
         }
@@ -518,8 +509,6 @@ public class ModelCollisionHighlighter : MonoBehaviour
             }
             ModelCollisionHighlighter.SeletectedObjects.RemoveAll(item => item == this.transform);
             PathPointManager.Instance?.RemovePoint(gameObject);
-            // 隐藏中心点
-            SetCenterPointVisible(false);
             // 恢复模型不透明度
             SetModelOpacity(1.0f);
         }
@@ -768,11 +757,6 @@ public class ModelCollisionHighlighter : MonoBehaviour
                     PathPointManager.Instance?.AddPoint(gameObject, worldPos);
                     
                     SelectModel(!isSelected, Color.red);
-                    if (!isSelected)
-                    {
-                        HighlightModel(false);
-                        Debug.Log($"移除途经点：{this.name}");
-                    }
                     Debug.Log($"模型 {gameObject.name} 点击{(isHighlighted ? "高亮" : "取消高亮")}");
                 }
             }

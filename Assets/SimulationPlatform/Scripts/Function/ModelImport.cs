@@ -484,7 +484,7 @@ public class ModelImport : MonoBehaviour
                     ModelTool.DisableModelCameras(newModel);
 
                     // 添加碰撞器和Rigidbody，并为子物体添加ModelCollisionHighlighter
-                    ModelTool.AddMeshCollidersToModel(newModel, true);
+                    ModelTool.AddMeshCollidersToModel(newModel, false);
 
                     // 为父物体添加ModelCollisionHighlighter并标记为替换的接头
                     ModelCollisionHighlighter parentHighlighter = newModel.GetComponent<ModelCollisionHighlighter>();
@@ -521,6 +521,8 @@ public class ModelImport : MonoBehaviour
                     if (oldObject != null)
                     {
                         //Destroy(oldObject);
+                        PathPointManager.Instance?.RemovePoint(oldObject);
+                        ModelCollisionHighlighter.selectedObject = null;
                         oldObject.SetActive(false);
 
                         // 设置模型的位置、旋转和缩放与原高亮物体相同

@@ -88,6 +88,7 @@ public class PathPointManager : MonoBehaviour
     public void RemovePoint(int index)
     {
         if (index < 0 || index >= _pointObjList.Count) return;
+        Debug.Log($"[PathPointManager] 移除路径点: {index}, {_pointObjList[index]?.name}");
         _pointObjList.RemoveAt(index);
         if (index < _worldPosList.Count)
         {
