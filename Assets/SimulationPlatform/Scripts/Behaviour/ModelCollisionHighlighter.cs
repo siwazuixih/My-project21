@@ -699,32 +699,53 @@ public class ModelCollisionHighlighter : MonoBehaviour
         return false;
     }
 
+    private bool wasMouseOver = false;
+
     private void Update()
     {
-        // 检测鼠标左键点击，但忽略UI元素和活动输入
         Camera activeCamera = CameraTool.GetActiveCamera();
-        if (Input.GetMouseButtonDown(0) && !UIUtil.IsPointerOverUI() && !IsInputActive() && activeCamera != null)
+        if (activeCamera == null) return;
+
+        Ray ray = activeCamera.ScreenPointToRay(Input.mousePosition);
+        RaycastHit hit;
+        bool isMouseOver = false;
+
+        if (Physics.Raycast(ray, out hit))
         {
-            // 创建从相机到鼠标位置的射线
-            Ray ray = activeCamera.ScreenPointToRay(Input.mousePosition);
-            RaycastHit hit;
-            
-            // 执行射线检测
+            if (hit.transform == transform || hit.transform.IsChildOf(transform))
+            {
+                isMouseOver = true;
+            }
+        }
+
+        if (isMouseOver && !wasMouseOver)
+        {
+            if (!UIUtil.IsPointerOverUI() && !IsInputActive())
+            {
+                Color highlightColor = isReplacedJoint ? new Color(1f, 0.5f, 0f) : Color.yellow;
+                HighlightModel(true, highlightColor);
+            }
+        }
+        else if (!isMouseOver && wasMouseOver)
+        {
+            HighlightModel(false);
+        }
+
+        wasMouseOver = isMouseOver;
+
+        if (Input.GetMouseButtonDown(0) && !UIUtil.IsPointerOverUI() && !IsInputActive())
+        {
             if (Physics.Raycast(ray, out hit))
             {
-                // 检查点击的是否是当前游戏对象或其子对象
                 if (hit.transform == transform || hit.transform.IsChildOf(transform))
                 {
-                    // 打印调试信息
                     Vector3 mousePos = Input.mousePosition;
                     Vector3 worldPos = hit.point + Vector3.up * 1.5f;
                     Vector3 screenPos = activeCamera.WorldToScreenPoint(worldPos);
                     Debug.Log($"[射线检测] 点击坐标: ({mousePos.x:F1}, {mousePos.y:F1}), 物体世界坐标: {hit.point}, 标记世界坐标: {worldPos}, 屏幕坐标: ({screenPos.x:F1}, {screenPos.y:F1}), 物体: {gameObject.name}");
                     
-                    // 添加路径点，使用碰撞点 + 偏移作为世界坐标
                     PathPointManager.Instance?.AddPoint(gameObject, worldPos);
                     
-                    // 切换高亮状态
                     SelectModel(!isSelected, Color.red);
                     if (!isSelected)
                     {
