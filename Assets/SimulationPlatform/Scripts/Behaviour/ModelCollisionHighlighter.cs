@@ -340,28 +340,30 @@ public class ModelCollisionHighlighter : MonoBehaviour
             if (highlight)
             {
                 // 保存原始颜色，支持多种材质属性
+                // 注意：必须从 renderer.material 直接获取原始颜色，而不是从 propBlock 获取
+                // 因为 SetModelOpacity 可能已经修改了 propBlock 中的颜色
                 Color originalColor = Color.white;
                 bool foundColor = false;
                 
                 // 优先检测常见的颜色属性
                 if (renderer.material.HasProperty("_BaseColorFactor")) // glTF PBR 材质
                 {
-                    originalColor = propBlock.HasColor("_BaseColorFactor") ? propBlock.GetColor("_BaseColorFactor") : renderer.material.GetColor("_BaseColorFactor");
+                    originalColor = renderer.material.GetColor("_BaseColorFactor");
                     foundColor = true;
                 }
                 else if (renderer.material.HasProperty("_BaseColor")) // URP 材质或glTF PBR材质
                 {
-                    originalColor = propBlock.HasColor("_BaseColor") ? propBlock.GetColor("_BaseColor") : renderer.material.GetColor("_BaseColor");
+                    originalColor = renderer.material.GetColor("_BaseColor");
                     foundColor = true;
                 }
                 else if (renderer.material.HasProperty("_Color")) // 传统材质
                 {
-                    originalColor = propBlock.HasColor("_Color") ? propBlock.GetColor("_Color") : renderer.material.GetColor("_Color");
+                    originalColor = renderer.material.GetColor("_Color");
                     foundColor = true;
                 }
                 else if (renderer.material.HasProperty("_MainColor")) // 其他可能的颜色属性名称
                 {
-                    originalColor = propBlock.HasColor("_MainColor") ? propBlock.GetColor("_MainColor") : renderer.material.GetColor("_MainColor");
+                    originalColor = renderer.material.GetColor("_MainColor");
                     foundColor = true;
                 }
                 else
@@ -379,6 +381,8 @@ public class ModelCollisionHighlighter : MonoBehaviour
                     }
                 }
                 
+                // 确保原始颜色的 alpha 为 1.0（完全不透阻）
+                originalColor.a = 1.0f;
                 originalColors[renderer] = originalColor;
                 if (!usedDirectColorAccess.ContainsKey(renderer))
                 {
@@ -525,49 +529,66 @@ public class ModelCollisionHighlighter : MonoBehaviour
         {
             // 获取当前材质属性
             renderer.GetPropertyBlock(propBlock);
-
+            
             if (highlight)
             {
                 // 保存原始颜色，支持多种材质属性
+                // 注意：必须从 renderer.material 直接获取原始颜色，而不是从 propBlock 获取
+                // 因为 SetModelOpacity 可能已经修改了 propBlock 中的颜色
                 Color originalColor = Color.white;
                 bool foundColor = false;
-
-                // 优先检测常见的颜色属性
-                if (renderer.material.HasProperty("_BaseColorFactor")) // glTF PBR 材质
+                
+                // 如果物体已经有高亮状态（isHighlighted=true），originalColors 中保存的是高亮颜色
+                // 此时需要尝试从 originalColors 获取真正的原始颜色（如果存在）
+                if (isHighlighted && originalColors.TryGetValue(renderer, out Color savedFromHighlight))
                 {
-                    originalColor = propBlock.HasColor("_BaseColorFactor") ? propBlock.GetColor("_BaseColorFactor") : renderer.material.GetColor("_BaseColorFactor");
+                    // 使用已有的保存颜色作为原始颜色
+                    originalColor = savedFromHighlight;
                     foundColor = true;
                 }
-                else if (renderer.material.HasProperty("_BaseColor")) // URP 材质或glTF PBR材质
+                
+                // 如果没有找到有效的原始颜色，从材质获取
+                if (!foundColor)
                 {
-                    originalColor = propBlock.HasColor("_BaseColor") ? propBlock.GetColor("_BaseColor") : renderer.material.GetColor("_BaseColor");
-                    foundColor = true;
-                }
-                else if (renderer.material.HasProperty("_Color")) // 传统材质
-                {
-                    originalColor = propBlock.HasColor("_Color") ? propBlock.GetColor("_Color") : renderer.material.GetColor("_Color");
-                    foundColor = true;
-                }
-                else if (renderer.material.HasProperty("_MainColor")) // 其他可能的颜色属性名称
-                {
-                    originalColor = propBlock.HasColor("_MainColor") ? propBlock.GetColor("_MainColor") : renderer.material.GetColor("_MainColor");
-                    foundColor = true;
-                }
-                else
-                {
-                    // 尝试直接获取材质的颜色
-                    try
+                    // 优先检测常见的颜色属性
+                    if (renderer.material.HasProperty("_BaseColorFactor")) // glTF PBR 材质
                     {
-                        originalColor = renderer.material.color;
+                        originalColor = renderer.material.GetColor("_BaseColorFactor");
                         foundColor = true;
-                        usedDirectColorAccess[renderer] = true;
                     }
-                    catch
+                    else if (renderer.material.HasProperty("_BaseColor")) // URP 材质或glTF PBR材质
                     {
-                        usedDirectColorAccess[renderer] = false;
+                        originalColor = renderer.material.GetColor("_BaseColor");
+                        foundColor = true;
+                    }
+                    else if (renderer.material.HasProperty("_Color")) // 传统材质
+                    {
+                        originalColor = renderer.material.GetColor("_Color");
+                        foundColor = true;
+                    }
+                    else if (renderer.material.HasProperty("_MainColor")) // 其他可能的颜色属性名称
+                    {
+                        originalColor = renderer.material.GetColor("_MainColor");
+                        foundColor = true;
+                    }
+                    else
+                    {
+                        // 尝试直接获取材质的颜色
+                        try
+                        {
+                            originalColor = renderer.material.color;
+                            foundColor = true;
+                            usedDirectColorAccess[renderer] = true;
+                        }
+                        catch
+                        {
+                            usedDirectColorAccess[renderer] = false;
+                        }
                     }
                 }
-
+                
+                // 确保原始颜色的 alpha 为 1.0（完全不透明）
+                originalColor.a = 1.0f;
                 originalColors[renderer] = originalColor;
                 if (!usedDirectColorAccess.ContainsKey(renderer))
                 {
