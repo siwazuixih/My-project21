@@ -5,6 +5,7 @@ using UnityEngine.UI;
 
 public class JointParamInfo : MonoBehaviour
 {
+    public Text Name;
     public Text Lead;
     public Text PicthDiameter;
     public Text Torque;
@@ -30,6 +31,10 @@ public class JointParamInfo : MonoBehaviour
     {
         if (_Joint != null)
         {
+            if (Name != null)
+            {
+                Name.text = $"{_Joint.Name}({_Joint.Model})";
+            }
             if (Lead != null)
             {
                 Lead.text = _Joint.Param?.Lead;
