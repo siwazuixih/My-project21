@@ -5,22 +5,19 @@ public class PathPointManager : MonoBehaviour
 {
     public static PathPointManager Instance;
 
-    [Header("气泡样式设置")]
-    public float bubbleWidth = 60;
-    public float bubbleHeight = 30;
-    public int fontSize = 20;
-    public Color bubbleColor = Color.cyan;
-    public Color textColor = Color.white;
-
     [Header("模型上方偏移（世界空间）")]
-    public float modelTopOffset = 1.5f;
+    public float modelTopOffset = 0f;
 
     [Header("显示过滤设置")]
     public float maxVisibleDistance = 50f;
     public bool enableDistanceFilter = true;
 
+    public GameObject tipPrefab;
+    public Transform worldCanvasTrans;
+
     private List<GameObject> _pointObjList = new List<GameObject>();
     private List<Vector3> _worldPosList = new List<Vector3>();
+    private List<GameObject> _tipObjList = new List<GameObject>();
     private Camera _cachedCamera;
 
     void Awake()
@@ -72,8 +69,32 @@ public class PathPointManager : MonoBehaviour
         _pointObjList.Add(targetObj);
         _worldPosList.Add(worldPos);
 
-        // 设置 TransformJointDataComponent 的索引
         int pointIndex = _pointObjList.Count - 1;
+
+        // 创建 tipPrefab
+        if (tipPrefab != null)
+        {
+            GameObject tipObj = Instantiate(tipPrefab, worldPos, Quaternion.identity);
+            tipObj.transform.SetParent(worldCanvasTrans ?? transform);
+            tipObj.transform.localScale = Vector3.one;
+            
+            Canvas canvas = tipObj.GetComponent<Canvas>();
+            if (canvas != null)
+            {
+                canvas.sortingOrder = 100;
+            }
+            
+            _tipObjList.Add(tipObj);
+
+            // 设置 PathPointMarker 的 index
+            PathPointMarker marker = tipObj.GetComponent<PathPointMarker>();
+            if (marker != null)
+            {
+                marker.Init(targetObj.transform, pointIndex+1);
+            }
+        }
+
+        // 设置 TransformJointDataComponent 的索引
         TransformJointDataComponent tjdc = targetObj.GetComponent<TransformJointDataComponent>();
         if (tjdc != null)
         {
@@ -108,6 +129,13 @@ public class PathPointManager : MonoBehaviour
             _worldPosList.RemoveAt(index);
         }
 
+        // 销毁对应的 tip 对象
+        if (index < _tipObjList.Count)
+        {
+            Destroy(_tipObjList[index]);
+            _tipObjList.RemoveAt(index);
+        }
+
         // 更新剩余物体的 TransformJointDataComponent 索引
         for (int i = index; i < _pointObjList.Count; i++)
         {
@@ -115,6 +143,16 @@ public class PathPointManager : MonoBehaviour
             if (tjdc != null)
             {
                 tjdc.index = i;
+            }
+        }
+
+        // 更新剩余 tip 对象的 PathPointMarker index
+        for (int i = index; i < _tipObjList.Count; i++)
+        {
+            PathPointMarker marker = _tipObjList[i].GetComponent<PathPointMarker>();
+            if (marker != null)
+            {
+                marker.SetIndex(i+1);
             }
         }
     }
@@ -132,72 +170,13 @@ public class PathPointManager : MonoBehaviour
     {
         _pointObjList.Clear();
         _worldPosList.Clear();
-    }
-
-    public List<GameObject> GetAllPoints() => _pointObjList;
-
-    void OnGUI()
-    {
-        if (_pointObjList.Count == 0) return;
-
-        Camera currentCamera = CameraTool.GetActiveCamera();
-        if (currentCamera == null) return;
-
-        for (int i = 0; i < _pointObjList.Count; i++)
+        
+        // 销毁所有 tip 对象
+        foreach (GameObject tipObj in _tipObjList)
         {
-            GameObject targetObj = _pointObjList[i];
-            if (targetObj == null) continue;
-
-            Vector3 worldPos = i < _worldPosList.Count ? _worldPosList[i] : targetObj.transform.position + Vector3.up * modelTopOffset;
-
-            if (enableDistanceFilter)
-            {
-                float distance = Vector3.Distance(currentCamera.transform.position, worldPos);
-                if (distance > maxVisibleDistance) continue;
-            }
-
-            Vector3 screenPos = currentCamera.WorldToScreenPoint(worldPos);
-
-            // 背面剔除
-            if (screenPos.z < 0) continue;
-
-            // 屏幕范围检查
-            if (screenPos.x < 0 || screenPos.x > Screen.width || screenPos.y < 0 || screenPos.y > Screen.height)
-            {
-                //Debug.Log($"[PathPoint {i+1}] 超出屏幕: world={worldPos}, screen={screenPos}, Screen={Screen.width}x{Screen.height}, 相机={currentCamera.name}");
-                continue;
-            }
-
-            float guiX = screenPos.x - bubbleWidth / 2;
-            float guiY = Screen.height - screenPos.y - bubbleHeight / 2;
-
-            //Debug.Log($"[PathPoint {i+1}] world={worldPos}, screen={screenPos}, GUI=({guiX:F1},{guiY:F1}), 相机={currentCamera.name}");
-
-            // 设置样式
-            GUIStyle boxStyle = new GUIStyle(GUI.skin.box);
-            boxStyle.alignment = TextAnchor.MiddleCenter;
-            boxStyle.fontSize = fontSize;
-            boxStyle.normal.textColor = textColor;
-
-            // 创建背景纹理
-            Texture2D bgTexture = new Texture2D(1, 1);
-            bgTexture.SetPixel(0, 0, bubbleColor);
-            bgTexture.Apply();
-            boxStyle.normal.background = bgTexture;
-
-            // 绘制
-            GUI.Box(new Rect(guiX, guiY, bubbleWidth, bubbleHeight), (i + 1).ToString(), boxStyle);
-
-            // 释放纹理（避免内存泄漏）
-            UnityEngine.Object.Destroy(bgTexture);
+            Destroy(tipObj);
         }
+        _tipObjList.Clear();
     }
 
-    private Texture2D CreateColorTexture(Color color)
-    {
-        Texture2D texture = new Texture2D(1, 1);
-        texture.SetPixel(0, 0, color);
-        texture.Apply();
-        return texture;
-    }
 }
