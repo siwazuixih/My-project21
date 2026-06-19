@@ -224,7 +224,6 @@ public class ModelImport : MonoBehaviour
                         cam.gameObject.SetActive(false);
                     }
 
-                    EditorLikeTransformHandle.Instance.mainCamera = modelCamera;
                     Debug.Log("已将modelCamera的所有参数设置为模型相机的对应值");
                 }
                 else

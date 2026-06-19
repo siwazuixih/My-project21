@@ -19,7 +19,6 @@ public class Simulation : ModelImport
     private List<JointModel> jointList = new List<JointModel>();
 
     public Button Back;
-    public DynamicEdgeArrowGuide EdgeArrow;
     public ModelMouseController ModelMouseController;
     public Button PathPlanButton;
     public Button ResetButton;
@@ -31,7 +30,6 @@ public class Simulation : ModelImport
     public EditorStyleVector3Control SceneXYZ;
     public EditorStyleVector3Control SceneRotation;
     public AutoColliderGen_Final ColliderGen;
-    public GameObjectTreePanel GameObjectTreePanel;
 
     // Simulation/Realtime 模式切换按钮
     public Button SimBtn;
@@ -358,8 +356,6 @@ public class Simulation : ModelImport
             {
                 modelCamera.gameObject.AddComponent<CameraController>();
             }
-            EdgeArrow.mainCam = modelCamera;
-            EdgeArrow.targetA = model.transform;
             Debug.Log("已将CameraController组件挂载到modelCamera上并设置EdgeArrow目标");
         }
         if (ColliderGen != null)
@@ -758,7 +754,7 @@ public class Simulation : ModelImport
 
     private async void OnColliderGenClicked()
     {
-        if (GameObjectTreePanel != null && currentModel != null && ColliderGen != null)
+        if (currentModel != null && ColliderGen != null)
         {
             //GameObjectTreePanel.Show(currentModel, ColliderGen);
             await ColliderGen.Generate();

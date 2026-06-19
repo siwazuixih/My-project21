@@ -38,18 +38,22 @@ public class StatusPanel : MonoBehaviour
         {
             case StatusType.SUCCESS:
                 Image.sprite = Success;
+                Image.gameObject.SetActive(true);
                 Text.color = new Color(0x05, 0xdf, 0x72);
                 break;
             case StatusType.ERROR:
                 Image.sprite = Error;
+                Image.gameObject.SetActive(true);
                 Text.color = new Color(0xfb, 0x2c, 0x36);
                 break;
             case StatusType.WARNING:
                 Image.sprite = Warning;
+                Image.gameObject.SetActive(true);
                 Text.color = new Color(0xff, 0x89, 0x04);
                 break;
             case StatusType.NONE:
                 Image.sprite = null;
+                Image.gameObject.SetActive(false);
                 Text.color = Color.white; 
                 break;
         }
