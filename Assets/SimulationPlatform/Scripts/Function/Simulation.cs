@@ -724,7 +724,7 @@ public class Simulation : ModelImport
             PathPlanManager.InitAct(currentModel);
             PathPlanManager.MoveTo(null);
         }//*/
-        ObserveParam.Instance.gameObject.SetActive(false);
+        JointParam.gameObject.SetActive(false);
         Debug.Log("开始仿真前重新构建 NavMesh...");
         if (!RebuildRuntimeNavMesh())
         {
