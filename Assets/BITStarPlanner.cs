@@ -45,7 +45,8 @@ public class BITStarPlanner : MonoBehaviour
         Debug.Log($"🎯 目标位置: {targetPos}, 目标旋转: {(targetRot.HasValue ? targetRot.Value.eulerAngles.ToString() : "None")}");
         
         // 2. 将 targetRot 传给 IK 求解器！
-        double[] fullIkResult = ikSolver.SolveIK(targetPos, targetRot);        Debug.Log($"IK: {string.Join(", ", fullIkResult.Select(d => d.ToString("F4")))}");        
+        double[] fullIkResult = ikSolver.SolveIK(targetPos, targetRot);      
+        Debug.Log($"IK: {string.Join(", ", fullIkResult.Select(d => d.ToString("F4")))}");        
         if (fullIkResult == null) return null;
 
         q_goal = ExtractCompactState(fullIkResult);

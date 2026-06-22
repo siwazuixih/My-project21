@@ -363,6 +363,7 @@ public class MissionController : MonoBehaviour
     {
         if (seletectedObjects == null || seletectedObjects.Count == 0)
         {
+            Debug.Log("无路径点，退出控制");
             return;
         }
         mission.targets.Clear();
@@ -384,19 +385,24 @@ public class MissionController : MonoBehaviour
             arm.manualObservationVec = new Vector3(x.Value, y.Value, z.Value);
         }
 
+        Debug.Log("当前状态：" + currentState);
         switch (currentState)
         {
             case MissionState.Idle:
+                Debug.Log("开始任务");
                 StartMissionSequence();
                 break;
             case MissionState.WaitingToStartPath:
+                Debug.Log("计算路径");
                 currentState = MissionState.ChassisMoving;
                 chassisCtrl.CalculateAndStartPath(true);
                 break;
             case MissionState.WaitingForNextTarget:
+                Debug.Log("执行目标");
                 ExecuteNextTargetLogic();
                 break;
             case MissionState.WaitingForInput:
+                Debug.Log("机械臂工作");
                 StartArmWork();
                 break;
         }
