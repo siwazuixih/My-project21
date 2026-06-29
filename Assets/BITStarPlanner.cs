@@ -37,6 +37,10 @@ public class BITStarPlanner : MonoBehaviour
     {
         if (!InitSystem()) return null;
 
+        q_start = ClampCompactState(q_start, "起点");
+        if (!IsCompactStateUsable(q_start, "起点")) return null;
+        Debug.Log($"[BIT*诊断] q_start compact = {FormatCompactState(q_start)}");
+
         bool startValid = IsValidConfig(q_start);
         Debug.Log($"🧐 [起点体检] IsValidConfig(q_start) = {startValid}");
         if (!startValid) Debug.LogError("💀 破案了：起点本身就是碰撞状态！请检查是不是机械臂初始姿态自相交了？");
@@ -45,11 +49,24 @@ public class BITStarPlanner : MonoBehaviour
         Debug.Log($"🎯 目标位置: {targetPos}, 目标旋转: {(targetRot.HasValue ? targetRot.Value.eulerAngles.ToString() : "None")}");
         
         // 2. 将 targetRot 传给 IK 求解器！
-        double[] fullIkResult = ikSolver.SolveIK(targetPos, targetRot);      
-        Debug.Log($"IK: {string.Join(", ", fullIkResult.Select(d => d.ToString("F4")))}");        
-        if (fullIkResult == null) return null;
+        double[] fullIkResult = ikSolver.SolveIK(targetPos, targetRot);
+        if (fullIkResult == null)
+        {
+            Debug.LogError("❌ BIT*: IK 求解失败，已终止本次规划");
+            return null;
+        }
 
-        q_goal = ExtractCompactState(fullIkResult);
+        if (!IsFullQposUsable(fullIkResult))
+        {
+            Debug.LogError("❌ BIT*: IK 返回了非法 qpos（长度不足、NaN 或 Inf），已终止本次规划");
+            return null;
+        }
+
+        Debug.Log($"IK: {string.Join(", ", fullIkResult.Select(d => d.ToString("F4")))}");
+
+        q_goal = ClampCompactState(ExtractCompactState(fullIkResult), "IK目标");
+        if (!IsCompactStateUsable(q_goal, "IK目标")) return null;
+        Debug.Log($"[BIT*诊断] q_goal compact = {FormatCompactState(q_goal)}");
 
         // =========================================================
         // 👇👇👇 新增：打印直线 Cost 和 连通性检查 👇👇👇
@@ -241,38 +258,39 @@ public class BITStarPlanner : MonoBehaviour
 
         List<Vector3> worldPoints = new List<Vector3>();
         
-        // 1. 备份当前机器人的姿态 (防止画线的时候机器人乱动)
-        double[] backup = new double[MjScene.Instance.Model->nq];
-        for(int i=0; i<backup.Length; i++) backup[i] = MjScene.Instance.Data->qpos[i];
+        MujocoStateSnapshot backup = CaptureState();
         
         // 确保 siteId 已初始化
         if (siteId == -1) 
             siteId = MujocoLib.mj_name2id(MjScene.Instance.Model, (int)MujocoLib.mjtObj.mjOBJ_SITE, ikSolver.endEffectorSite.name);
 
-        // 2. 遍历路径中的每一个点
-        foreach (var config in jointPath)
+        try
         {
-            // 应用关节角度
-            ApplyConfig(config);
-            
-            // 计算正向运动学 (FK)
-            MujocoLib.mj_kinematics(MjScene.Instance.Model, MjScene.Instance.Data);
-            
-            // 读取末端执行器位置 (MuJoCo 坐标系)
-            double mx = MjScene.Instance.Data->site_xpos[siteId * 3 + 0];
-            double my = MjScene.Instance.Data->site_xpos[siteId * 3 + 1];
-            double mz = MjScene.Instance.Data->site_xpos[siteId * 3 + 2];
+            // 2. 遍历路径中的每一个点
+            foreach (var config in jointPath)
+            {
+                // 应用关节角度
+                ApplyConfig(config);
 
-            // 3. 坐标转换 MuJoCo -> Unity
-            // MuJoCo: Z轴向上
-            // Unity: Y轴向上
-            // 转换公式: Unity(x, y, z) = MuJoCo(x, z, y)
-            worldPoints.Add(new Vector3((float)mx, (float)mz, (float)my));
+                // 计算正向运动学 (FK)
+                MujocoLib.mj_forward(MjScene.Instance.Model, MjScene.Instance.Data);
+
+                // 读取末端执行器位置 (MuJoCo 坐标系)
+                double mx = MjScene.Instance.Data->site_xpos[siteId * 3 + 0];
+                double my = MjScene.Instance.Data->site_xpos[siteId * 3 + 1];
+                double mz = MjScene.Instance.Data->site_xpos[siteId * 3 + 2];
+
+                // 3. 坐标转换 MuJoCo -> Unity
+                // MuJoCo: Z轴向上
+                // Unity: Y轴向上
+                // 转换公式: Unity(x, y, z) = MuJoCo(x, z, y)
+                worldPoints.Add(new Vector3((float)mx, (float)mz, (float)my));
+            }
         }
-
-        // 3. 恢复机器人原来的姿态
-        for(int i=0; i<backup.Length; i++) MjScene.Instance.Data->qpos[i] = backup[i];
-        MujocoLib.mj_kinematics(MjScene.Instance.Model, MjScene.Instance.Data);
+        finally
+        {
+            RestoreState(backup);
+        }
         
         return worldPoints;
     }
@@ -442,21 +460,26 @@ public class BITStarPlanner : MonoBehaviour
 
     private unsafe bool CheckCartesianLimits(double[] q)
     {
-        // 备份当前状态
-        double[] backup = new double[MjScene.Instance.Model->nq];
-        for(int i=0; i<backup.Length; i++) backup[i] = MjScene.Instance.Data->qpos[i];
+        if (!IsCompactStateUsable(q, "采样点")) return false;
 
-        // 设置 q
-        ApplyConfig(q);
-        MujocoLib.mj_kinematics(MjScene.Instance.Model, MjScene.Instance.Data);
+        MujocoStateSnapshot backup = CaptureState();
 
-        // 获取 Site 位置
-        double x = MjScene.Instance.Data->site_xpos[siteId * 3 + 0]; // MuJoCo X
-        double y = MjScene.Instance.Data->site_xpos[siteId * 3 + 1]; // MuJoCo Y
-        double z = MjScene.Instance.Data->site_xpos[siteId * 3 + 2]; // MuJoCo Z
+        double x, y, z;
+        try
+        {
+            // 设置 q
+            ApplyConfig(q);
+            MujocoLib.mj_forward(MjScene.Instance.Model, MjScene.Instance.Data);
 
-        // 还原
-        for(int i=0; i<backup.Length; i++) MjScene.Instance.Data->qpos[i] = backup[i];
+            // 获取 Site 位置
+            x = MjScene.Instance.Data->site_xpos[siteId * 3 + 0]; // MuJoCo X
+            y = MjScene.Instance.Data->site_xpos[siteId * 3 + 1]; // MuJoCo Y
+            z = MjScene.Instance.Data->site_xpos[siteId * 3 + 2]; // MuJoCo Z
+        }
+        finally
+        {
+            RestoreState(backup);
+        }
 
         // Unity 坐标系转换 (MuJoCo X=Unity X, MuJoCo Z=Unity Y, MuJoCo Y=Unity Z)
         // 你的 Python 代码 limits 是基于 Unity Inspector 看到的坐标
@@ -484,69 +507,73 @@ public class BITStarPlanner : MonoBehaviour
 
     private unsafe bool IsValidConfig(double[] q)
     {
-        // 1. 备份当前姿态
-        double[] backup = new double[MjScene.Instance.Model->nq];
-        for(int i=0; i<backup.Length; i++) backup[i] = MjScene.Instance.Data->qpos[i];
+        if (!IsCompactStateUsable(q, "碰撞检测姿态")) return false;
 
-        // 2. 设置新姿态并计算物理
-        ApplyConfig(q);
-        MujocoLib.mj_kinematics(MjScene.Instance.Model, MjScene.Instance.Data);
-        MujocoLib.mj_comPos(MjScene.Instance.Model, MjScene.Instance.Data);
-        MujocoLib.mj_fwdPosition(MjScene.Instance.Model, MjScene.Instance.Data); // 计算接触点
+        MujocoStateSnapshot backup = CaptureState();
 
-        int ncon = MjScene.Instance.Data->ncon;
-        bool collision = false;
-
-        for (int i = 0; i < ncon; i++)
+        try
         {
-            // 获取碰撞深度 (负数表示穿透)
-            double dist = MjScene.Instance.Data->contact[i].dist;
-            
-            // 🚨 【修改1】 容差从 -0.001 改为 -0.02 (允许 2cm 的穿模)
-            // 运动规划不需要像物理模拟那么精确，稍微蹭一点没关系
-            if (dist < -0.02f) 
-            { 
-                // 获取碰撞体的 ID
-                int geom1 = MjScene.Instance.Data->contact[i].geom1;
-                int geom2 = MjScene.Instance.Data->contact[i].geom2;
+            // 2. 设置新姿态并计算物理
+            ApplyConfig(q);
+            MujocoLib.mj_forward(MjScene.Instance.Model, MjScene.Instance.Data);
 
-                // 获取名字
-                string n1 = MujocoLib.mj_id2name(MjScene.Instance.Model, (int)MujocoLib.mjtObj.mjOBJ_GEOM, geom1) ?? "";
-                string n2 = MujocoLib.mj_id2name(MjScene.Instance.Model, (int)MujocoLib.mjtObj.mjOBJ_GEOM, geom2) ?? "";
-                
-                // 转小写方便比较
-                n1 = n1.ToLower();
-                n2 = n2.ToLower();
+            int ncon = MjScene.Instance.Data->ncon;
 
-                // 🚨 【修改2】 忽略地板/地面碰撞！(这是 AGV 能动的关键)
-                // 只要碰撞的一方名字里包含 floor, ground, plane，我们就当没看见
-                if (n1.Contains("floor") || n1.Contains("ground") || n1.Contains("plane") ||
-                    n2.Contains("floor") || n2.Contains("ground") || n2.Contains("plane"))
+            for (int i = 0; i < ncon; i++)
+            {
+                // 获取碰撞深度 (负数表示穿透)
+                double dist = MjScene.Instance.Data->contact[i].dist;
+                if (!IsFinite(dist)) return false;
+
+                // 🚨 【修改1】 容差从 -0.001 改为 -0.02 (允许 2cm 的穿模)
+                // 运动规划不需要像物理模拟那么精确，稍微蹭一点没关系
+                if (dist < -0.02f)
                 {
-                    continue; // 跳过，不算碰撞
-                }
-                
-                // 也可以忽略轮子本身 (假设轮子名字叫 wheel)
-                if (n1.Contains("wheel") || n2.Contains("wheel"))
-                {
-                    continue; 
-                }
+                    // 获取碰撞体的 ID
+                    int geom1 = MjScene.Instance.Data->contact[i].geom1;
+                    int geom2 = MjScene.Instance.Data->contact[i].geom2;
 
-                // 只有真的撞墙了，才标记为 true
-                collision = true; 
-                break; 
+                    // 获取名字
+                    string n1 = MujocoLib.mj_id2name(MjScene.Instance.Model, (int)MujocoLib.mjtObj.mjOBJ_GEOM, geom1) ?? "";
+                    string n2 = MujocoLib.mj_id2name(MjScene.Instance.Model, (int)MujocoLib.mjtObj.mjOBJ_GEOM, geom2) ?? "";
+
+                    // 转小写方便比较
+                    n1 = n1.ToLower();
+                    n2 = n2.ToLower();
+
+                    // 🚨 【修改2】 忽略地板/地面碰撞！(这是 AGV 能动的关键)
+                    // 只要碰撞的一方名字里包含 floor, ground, plane，我们就当没看见
+                    if (n1.Contains("floor") || n1.Contains("ground") || n1.Contains("plane") ||
+                        n2.Contains("floor") || n2.Contains("ground") || n2.Contains("plane"))
+                    {
+                        continue; // 跳过，不算碰撞
+                    }
+
+                    // 也可以忽略轮子本身 (假设轮子名字叫 wheel)
+                    if (n1.Contains("wheel") || n2.Contains("wheel"))
+                    {
+                        continue;
+                    }
+
+                    // 只有真的撞墙了，才标记为碰撞
+                    return false;
+                }
             }
-        }
 
-        // 3. 还原姿态
-        for(int i=0; i<backup.Length; i++) MjScene.Instance.Data->qpos[i] = backup[i];
-        MujocoLib.mj_kinematics(MjScene.Instance.Model, MjScene.Instance.Data);
-        
-        return !collision;
+            return true;
+        }
+        finally
+        {
+            RestoreState(backup);
+        }
     }
     private bool IsValidConnection(double[] from, double[] to)
     {
+        if (!IsCompactStateUsable(from, "连线起点") || !IsCompactStateUsable(to, "连线终点")) return false;
+
         double dist = Distance(from, to);
+        if (!IsFinite(dist)) return false;
+
         int steps = (int)(dist / 0.1f) + 2; // 步长检测
         double[] temp = new double[nv];
 
@@ -591,16 +618,43 @@ public class BITStarPlanner : MonoBehaviour
 
     private unsafe bool InitSystem()
     {
-        if (MjScene.Instance.Model == null) return false;
+        if (MjScene.Instance.Model == null || MjScene.Instance.Data == null) return false;
+        if (ikSolver == null || ikSolver.endEffectorSite == null)
+        {
+            Debug.LogError("❌ BIT*: ikSolver 或 endEffectorSite 未绑定");
+            return false;
+        }
+        if (actuators == null || actuators.Count == 0)
+        {
+            Debug.LogError("❌ BIT*: actuators 未绑定");
+            return false;
+        }
+
         nv = actuators.Count;
         siteId = MujocoLib.mj_name2id(MjScene.Instance.Model, (int)MujocoLib.mjtObj.mjOBJ_SITE, ikSolver.endEffectorSite.name);
+        if (siteId < 0)
+        {
+            Debug.LogError($"❌ BIT*: 找不到末端 Site: {ikSolver.endEffectorSite.name}");
+            return false;
+        }
         
         q_start = new double[nv];
         for (int i = 0; i < nv; i++)
         {
             var act = actuators[i];
+            if (act == null || act.Joint == null)
+            {
+                Debug.LogError($"❌ BIT*: actuators[{i}] 或它的 Joint 未绑定");
+                return false;
+            }
+
             if (act.Joint is MjHingeJoint h) q_start[i] = MjScene.Instance.Data->qpos[h.QposAddress];
             else if (act.Joint is MjSlideJoint s) q_start[i] = MjScene.Instance.Data->qpos[s.QposAddress];
+            else
+            {
+                Debug.LogError($"❌ BIT*: actuators[{i}] 绑定的 Joint 类型不支持");
+                return false;
+            }
         }
         return true;
     }
@@ -614,6 +668,38 @@ public class BITStarPlanner : MonoBehaviour
             else if (act.Joint is MjSlideJoint s) MjScene.Instance.Data->qpos[s.QposAddress] = q[i];
         }
     }
+
+    private unsafe MujocoStateSnapshot CaptureState()
+    {
+        var model = MjScene.Instance.Model;
+        var data = MjScene.Instance.Data;
+        MujocoStateSnapshot snapshot = new MujocoStateSnapshot
+        {
+            qpos = new double[model->nq],
+            qvel = new double[model->nv],
+            act = new double[model->na],
+            ctrl = new double[model->nu]
+        };
+
+        for (int i = 0; i < snapshot.qpos.Length; i++) snapshot.qpos[i] = data->qpos[i];
+        for (int i = 0; i < snapshot.qvel.Length; i++) snapshot.qvel[i] = data->qvel[i];
+        for (int i = 0; i < snapshot.act.Length; i++) snapshot.act[i] = data->act[i];
+        for (int i = 0; i < snapshot.ctrl.Length; i++) snapshot.ctrl[i] = data->ctrl[i];
+        return snapshot;
+    }
+
+    private unsafe void RestoreState(MujocoStateSnapshot snapshot)
+    {
+        if (snapshot == null) return;
+
+        var data = MjScene.Instance.Data;
+        for (int i = 0; i < snapshot.qpos.Length; i++) data->qpos[i] = snapshot.qpos[i];
+        for (int i = 0; i < snapshot.qvel.Length; i++) data->qvel[i] = snapshot.qvel[i];
+        for (int i = 0; i < snapshot.act.Length; i++) data->act[i] = snapshot.act[i];
+        for (int i = 0; i < snapshot.ctrl.Length; i++) data->ctrl[i] = snapshot.ctrl[i];
+        MujocoLib.mj_forward(MjScene.Instance.Model, data);
+    }
+
     private double[] ExtractCompactState(double[] fullQpos)
     {
         double[] compact = new double[nv];
@@ -626,6 +712,126 @@ public class BITStarPlanner : MonoBehaviour
             if (addr != -1) compact[i] = fullQpos[addr];
         }
         return compact;
+    }
+
+    private bool IsFullQposUsable(double[] fullQpos)
+    {
+        if (fullQpos == null) return false;
+
+        for (int i = 0; i < actuators.Count; i++)
+        {
+            int addr = GetQposAddress(actuators[i]);
+            if (addr < 0 || addr >= fullQpos.Length) return false;
+        }
+
+        for (int i = 0; i < fullQpos.Length; i++)
+        {
+            if (!IsFinite(fullQpos[i])) return false;
+        }
+
+        return true;
+    }
+
+    private double[] ClampCompactState(double[] q, string label)
+    {
+        if (q == null) return q;
+
+        double[] clamped = new double[q.Length];
+        Array.Copy(q, clamped, q.Length);
+
+        for (int i = 0; i < Math.Min(nv, clamped.Length); i++)
+        {
+            if (!TryGetJointRange(actuators[i], out double min, out double max)) continue;
+            if (!IsFinite(clamped[i])) continue;
+
+            double before = clamped[i];
+            clamped[i] = Math.Clamp(clamped[i], min, max);
+            if (Math.Abs(before - clamped[i]) > 1e-6)
+            {
+                Debug.LogWarning($"⚠️ BIT*: {label} 关节 {i} 超出限位，已从 {before:F4} 夹紧到 {clamped[i]:F4}");
+            }
+        }
+
+        return clamped;
+    }
+
+    private bool IsCompactStateUsable(double[] q, string label)
+    {
+        if (q == null || q.Length < nv)
+        {
+            Debug.LogError($"❌ BIT*: {label} 关节数组为空或长度不足");
+            return false;
+        }
+
+        for (int i = 0; i < nv; i++)
+        {
+            if (!IsFinite(q[i]))
+            {
+                Debug.LogError($"❌ BIT*: {label} 关节 {i} 是非法数值: {q[i]}");
+                return false;
+            }
+
+            if (TryGetJointRange(actuators[i], out double min, out double max))
+            {
+                double tolerance = Math.Max(0.001, Math.Abs(max - min) * 0.05);
+                if (q[i] < min - tolerance || q[i] > max + tolerance)
+                {
+                    Debug.LogError($"❌ BIT*: {label} 关节 {i} 严重超出限位: {q[i]:F4}, 合法范围 [{min:F4}, {max:F4}]");
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private int GetQposAddress(MjActuator act)
+    {
+        if (act?.Joint is MjHingeJoint h) return h.QposAddress;
+        if (act?.Joint is MjSlideJoint s) return s.QposAddress;
+        return -1;
+    }
+
+    private bool TryGetJointRange(MjActuator act, out double min, out double max)
+    {
+        min = 0;
+        max = 0;
+
+        if (act?.Joint is MjHingeJoint h && Math.Abs(h.RangeUpper - h.RangeLower) > 0.01)
+        {
+            min = h.RangeLower * Mathf.Deg2Rad;
+            max = h.RangeUpper * Mathf.Deg2Rad;
+            return true;
+        }
+
+        if (act?.Joint is MjSlideJoint s && Math.Abs(s.RangeUpper - s.RangeLower) > 0.01)
+        {
+            min = s.RangeLower;
+            max = s.RangeUpper;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool IsFinite(double value)
+    {
+        return !double.IsNaN(value) && !double.IsInfinity(value);
+    }
+
+    private string FormatCompactState(double[] q)
+    {
+        if (q == null) return "null";
+
+        List<string> parts = new List<string>();
+        for (int i = 0; i < Math.Min(nv, q.Length); i++)
+        {
+            MjActuator act = actuators != null && i < actuators.Count ? actuators[i] : null;
+            int addr = GetQposAddress(act);
+            string jointName = act?.Joint != null ? act.Joint.gameObject.name : "nullJoint";
+            parts.Add($"a{i}:{jointName}@qpos[{addr}]={q[i]:F4}");
+        }
+        return string.Join("; ", parts);
     }
 
     private List<double[]> ReconstructPath(BITNode node)
@@ -651,6 +857,14 @@ public class BITStarPlanner : MonoBehaviour
         public double gScore;
         public BITNode parent;
         public BITNode(int id, double[] q, double g, BITNode p) { this.id = id; this.q = q; this.gScore = g; this.parent = p; }
+    }
+
+    private class MujocoStateSnapshot
+    {
+        public double[] qpos;
+        public double[] qvel;
+        public double[] act;
+        public double[] ctrl;
     }
 
     private struct Vertex : IComparable<Vertex>
@@ -727,24 +941,27 @@ public class BITStarPlanner : MonoBehaviour
         // 这是一个低效但直观的方法：用 FK 算一下这个采样点的末端位置
         // 注意：这只为了在 Scene 窗口画个绿点看看
         
-        // 1. 备份当前姿态
-        double[] backup = new double[nv];
-        unsafe { for(int i=0; i<nv; i++) backup[i] = MjScene.Instance.Data->qpos[i]; }
+        unsafe
+        {
+            MujocoStateSnapshot backup = CaptureState();
+            try
+            {
+                // 2. 应用采样姿态并计算 FK
+                ApplyConfig(q);
+                MujocoLib.mj_forward(MjScene.Instance.Model, MjScene.Instance.Data);
 
-        // 2. 应用采样姿态并计算 FK
-        ApplyConfig(q);
-        unsafe {
-            MujocoLib.mj_kinematics(MjScene.Instance.Model, MjScene.Instance.Data);
-            double x = MjScene.Instance.Data->site_xpos[siteId * 3 + 0];
-            double y = MjScene.Instance.Data->site_xpos[siteId * 3 + 1];
-            double z = MjScene.Instance.Data->site_xpos[siteId * 3 + 2];
-            
-            // 转 Unity 坐标 (MuJoCo Z-up -> Unity Y-up)
-            debugSamplePoints.Add(new Vector3((float)x, (float)z, (float)y));
+                double x = MjScene.Instance.Data->site_xpos[siteId * 3 + 0];
+                double y = MjScene.Instance.Data->site_xpos[siteId * 3 + 1];
+                double z = MjScene.Instance.Data->site_xpos[siteId * 3 + 2];
+
+                // 转 Unity 坐标 (MuJoCo Z-up -> Unity Y-up)
+                debugSamplePoints.Add(new Vector3((float)x, (float)z, (float)y));
+            }
+            finally
+            {
+                RestoreState(backup);
+            }
         }
-
-        // 3. 恢复姿态
-        unsafe { for(int i=0; i<nv; i++) MjScene.Instance.Data->qpos[i] = backup[i]; }
     }
 
     // Unity 自动调用的画图函数

@@ -112,9 +112,9 @@ public class MujocoStaticIKSolver : MonoBehaviour
         int nq = MjScene.Instance.Model->nq;
         int nv = MjScene.Instance.Model->nv;
 
-        // 1. 备份当前姿态 (用于恢复和计算最短路径)
-        double[] startQpos = new double[nq];
-        for (int i = 0; i < nq; i++) startQpos[i] = MjScene.Instance.Data->qpos[i];
+        // 1. 备份当前状态 (用于恢复和计算最短路径)
+        MujocoStateSnapshot startState = CaptureState();
+        double[] startQpos = startState.qpos;
 
         if (restQpos == null || restQpos.Length != nq) restQpos = startQpos;
 
@@ -125,10 +125,14 @@ public class MujocoStaticIKSolver : MonoBehaviour
         float bestPosError = float.MaxValue;
         float bestRotError = float.MaxValue;
         double bestDistFromRest = double.MaxValue; // 离舒适姿态的距离
+        bool bestConverged = false;
+        int bestAttempt = -1;
 
         // 2. 随机重试循环
         for (int attempt = 0; attempt < maxRetries; attempt++)
         {
+            RestoreState(startState);
+
             // 第0次尝试保持原样，后续尝试进行随机扰动
             if (attempt > 0) RandomizeConfiguration();
 
@@ -170,6 +174,8 @@ public class MujocoStaticIKSolver : MonoBehaviour
                     bestPosError = finalPosErr;
                     bestRotError = finalRotErr;
                     bestDistFromRest = distFromRest;
+                    bestConverged = converged;
+                    bestAttempt = attempt;
 
                     if (bestQpos == null) bestQpos = new double[nq];
                     for (int i = 0; i < nq; i++) bestQpos[i] = MjScene.Instance.Data->qpos[i];
@@ -184,8 +190,7 @@ public class MujocoStaticIKSolver : MonoBehaviour
         }
 
         // 3. 恢复现场 (让物理引擎回到起点，避免视觉闪烁)
-        for (int i = 0; i < nq; i++) MjScene.Instance.Data->qpos[i] = startQpos[i];
-        MujocoLib.mj_kinematics(MjScene.Instance.Model, MjScene.Instance.Data);
+        RestoreState(startState);
 
         // 4. 返回结果处理
         if (bestQpos != null)
@@ -222,6 +227,7 @@ public class MujocoStaticIKSolver : MonoBehaviour
 
             // float realPosErr = Mathf.Sqrt(bestPosError);
             // float realRotErr = Mathf.Sqrt(bestRotError);
+            if (debugMode) LogIKResultDiagnostics(bestQpos, targetPos, targetRot, bestPosError, bestRotError, bestDistFromRest, bestConverged, bestAttempt);
             return bestQpos;
         }
         else
@@ -358,6 +364,37 @@ public class MujocoStaticIKSolver : MonoBehaviour
         return (false, currentPosErr, currentRotErr);
     }
 
+    private unsafe void LogIKResultDiagnostics(double[] qpos, Vector3 targetPos, Quaternion? targetRot, float posErrorSq, float rotErrorSq, double distFromRest, bool converged, int attempt)
+    {
+        if (qpos == null || MjScene.Instance.Model == null || MjScene.Instance.Data == null || cachedSiteId < 0) return;
+
+        MujocoStateSnapshot backup = CaptureState();
+        try
+        {
+            for (int i = 0; i < qpos.Length; i++) MjScene.Instance.Data->qpos[i] = qpos[i];
+            MujocoLib.mj_forward(MjScene.Instance.Model, MjScene.Instance.Data);
+
+            double mx = MjScene.Instance.Data->site_xpos[cachedSiteId * 3 + 0];
+            double my = MjScene.Instance.Data->site_xpos[cachedSiteId * 3 + 1];
+            double mz = MjScene.Instance.Data->site_xpos[cachedSiteId * 3 + 2];
+            Vector3 siteUnity = new Vector3((float)mx, (float)mz, (float)my);
+            float unityDistance = Vector3.Distance(siteUnity, targetPos);
+
+            Debug.Log(
+                $"[IK诊断] site='{endEffectorSite?.name}', id={cachedSiteId}, bestAttempt={attempt}, converged={converged}, " +
+                $"posErr={Mathf.Sqrt(Mathf.Max(posErrorSq, 0f)):F5}m, rotErr={Mathf.Sqrt(Mathf.Max(rotErrorSq, 0f)):F5}, restDist={distFromRest:F5}, " +
+                $"targetUnity={targetPos:F4}, siteUnity={siteUnity:F4}, unityDistance={unityDistance:F5}m, " +
+                $"targetRot={(targetRot.HasValue ? targetRot.Value.eulerAngles.ToString("F3") : "None")}");
+
+            Debug.Log($"[IK诊断] fullQpos({qpos.Length}) = {FormatArray(qpos)}");
+            Debug.Log($"[IK诊断] actuator映射 = {FormatActuatorQposMap(qpos)}");
+        }
+        finally
+        {
+            RestoreState(backup);
+        }
+    }
+
     // =================================================================================
     // 7. 辅助功能 (已改为 public 以便 MissionController 调用)
     // =================================================================================
@@ -366,6 +403,30 @@ public class MujocoStaticIKSolver : MonoBehaviour
         if (act.Joint is MjHingeJoint h) return h.QposAddress;
         if (act.Joint is MjSlideJoint s) return s.QposAddress;
         return -1;
+    }
+
+    private string FormatArray(double[] values)
+    {
+        if (values == null) return "null";
+        List<string> parts = new List<string>();
+        for (int i = 0; i < values.Length; i++) parts.Add($"{i}:{values[i]:F4}");
+        return string.Join(", ", parts);
+    }
+
+    private string FormatActuatorQposMap(double[] fullQpos)
+    {
+        if (actuators == null || fullQpos == null) return "null";
+
+        List<string> parts = new List<string>();
+        for (int i = 0; i < actuators.Count; i++)
+        {
+            MjActuator act = actuators[i];
+            int addr = act != null ? GetQposAddr(act) : -1;
+            string jointName = act?.Joint != null ? act.Joint.gameObject.name : "nullJoint";
+            string value = addr >= 0 && addr < fullQpos.Length ? fullQpos[addr].ToString("F4") : "addrInvalid";
+            parts.Add($"a{i}:{jointName}@qpos[{addr}]={value}");
+        }
+        return string.Join("; ", parts);
     }
 
     private unsafe void RefreshCache()
@@ -459,5 +520,44 @@ public class MujocoStaticIKSolver : MonoBehaviour
             }
         }
         MujocoLib.mj_forward(MjScene.Instance.Model, MjScene.Instance.Data);
+    }
+
+    private unsafe MujocoStateSnapshot CaptureState()
+    {
+        var model = MjScene.Instance.Model;
+        var data = MjScene.Instance.Data;
+        MujocoStateSnapshot snapshot = new MujocoStateSnapshot
+        {
+            qpos = new double[model->nq],
+            qvel = new double[model->nv],
+            act = new double[model->na],
+            ctrl = new double[model->nu]
+        };
+
+        for (int i = 0; i < snapshot.qpos.Length; i++) snapshot.qpos[i] = data->qpos[i];
+        for (int i = 0; i < snapshot.qvel.Length; i++) snapshot.qvel[i] = data->qvel[i];
+        for (int i = 0; i < snapshot.act.Length; i++) snapshot.act[i] = data->act[i];
+        for (int i = 0; i < snapshot.ctrl.Length; i++) snapshot.ctrl[i] = data->ctrl[i];
+        return snapshot;
+    }
+
+    private unsafe void RestoreState(MujocoStateSnapshot snapshot)
+    {
+        if (snapshot == null) return;
+
+        var data = MjScene.Instance.Data;
+        for (int i = 0; i < snapshot.qpos.Length; i++) data->qpos[i] = snapshot.qpos[i];
+        for (int i = 0; i < snapshot.qvel.Length; i++) data->qvel[i] = snapshot.qvel[i];
+        for (int i = 0; i < snapshot.act.Length; i++) data->act[i] = snapshot.act[i];
+        for (int i = 0; i < snapshot.ctrl.Length; i++) data->ctrl[i] = snapshot.ctrl[i];
+        MujocoLib.mj_forward(MjScene.Instance.Model, data);
+    }
+
+    private class MujocoStateSnapshot
+    {
+        public double[] qpos;
+        public double[] qvel;
+        public double[] act;
+        public double[] ctrl;
     }
 }

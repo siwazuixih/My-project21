@@ -386,13 +386,8 @@ public class Simulation : ModelImport
         }
 
         GameObject robotRoot = MissionController.gameObject;
-        NavMeshModifier robotModifier = robotRoot.GetComponent<NavMeshModifier>();
-        if (robotModifier == null)
-        {
-            robotModifier = robotRoot.AddComponent<NavMeshModifier>();
-        }
-        robotModifier.ignoreFromBuild = true;
-        robotModifier.applyToChildren = true;
+        int preservedGroundCount;
+        int excludedCount = ApplyIgnoreFromNavMeshBuild(robotRoot, out preservedGroundCount);
 
         NavMeshSurface[] surfaces = FindObjectsOfType<NavMeshSurface>(true);
         if (surfaces.Length == 0)
@@ -401,17 +396,95 @@ public class Simulation : ModelImport
             return false;
         }
 
+        int builtCount = 0;
         foreach (NavMeshSurface surface in surfaces)
         {
+            if (surface == null || surface.gameObject.scene != gameObject.scene)
+            {
+                continue;
+            }
+
             if (!surface.gameObject.activeSelf)
             {
                 surface.gameObject.SetActive(true);
             }
+
             surface.BuildNavMesh();
-            Debug.Log($"NavMesh 已根据当前场景重新构建：{surface.name}，已排除机器人层级：{robotRoot.name}");
+            builtCount++;
+            Debug.Log($"NavMesh 已根据当前场景重新构建：{GetHierarchyPath(surface.transform)}，已排除机器人对象数：{excludedCount}，保留地面对象数：{preservedGroundCount}，Surface LayerMask={surface.layerMask.value}，包含Robot层={SurfaceIncludesLayer(surface, robotRoot.layer)}");
+        }
+
+        if (builtCount == 0)
+        {
+            Debug.LogError("当前场景中未找到可重建的 NavMeshSurface，底盘无法进行路径规划。");
+            return false;
         }
 
         return true;
+    }
+
+    private int ApplyIgnoreFromNavMeshBuild(GameObject root, out int preservedGroundCount)
+    {
+        int count = 0;
+        preservedGroundCount = 0;
+        foreach (Transform child in root.GetComponentsInChildren<Transform>(true))
+        {
+            NavMeshModifier modifier = child.GetComponent<NavMeshModifier>();
+            if (modifier == null)
+            {
+                modifier = child.gameObject.AddComponent<NavMeshModifier>();
+            }
+
+            if (ShouldKeepInNavMeshBuild(child.gameObject))
+            {
+                modifier.ignoreFromBuild = false;
+                modifier.applyToChildren = false;
+                preservedGroundCount++;
+            }
+            else
+            {
+                modifier.ignoreFromBuild = true;
+                modifier.applyToChildren = false;
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private bool ShouldKeepInNavMeshBuild(GameObject obj)
+    {
+        string objectName = obj.name.ToLowerInvariant();
+        return objectName == "ground"
+            || objectName.StartsWith("ground ")
+            || objectName.StartsWith("ground_")
+            || objectName.StartsWith("floor")
+            || objectName == "plane"
+            || objectName.StartsWith("plane ")
+            || objectName.StartsWith("plane_");
+    }
+
+    private bool SurfaceIncludesLayer(NavMeshSurface surface, int layer)
+    {
+        return (surface.layerMask.value & (1 << layer)) != 0;
+    }
+
+    private string GetHierarchyPath(Transform transform)
+    {
+        if (transform == null)
+        {
+            return "<null>";
+        }
+
+        string path = transform.name;
+        Transform current = transform.parent;
+        while (current != null)
+        {
+            path = current.name + "/" + path;
+            current = current.parent;
+        }
+
+        return path;
     }
 
     /// <summary>
