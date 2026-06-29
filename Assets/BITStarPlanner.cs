@@ -29,6 +29,8 @@ public class BITStarPlanner : MonoBehaviour
     private double[] q_start;
     private double[] q_goal;
     private int siteId = -1;
+    private readonly HashSet<int> ignoredGeomIds = new HashSet<int>();
+    private static readonly string[] IgnoredGeomNameTokens = { "floor", "ground", "plane", "wheel" };
 
     // -------------------------------------------------------------------------
     // 主入口：Plan
@@ -529,28 +531,12 @@ public class BITStarPlanner : MonoBehaviour
                 // 运动规划不需要像物理模拟那么精确，稍微蹭一点没关系
                 if (dist < -0.02f)
                 {
-                    // 获取碰撞体的 ID
+                    // 直接比较初始化时缓存的 geom ID，避免调用 mj_id2name。
+                    // 当前 MuJoCo C# 绑定会错误释放 mj_id2name 返回的模型内部字符串。
                     int geom1 = MjScene.Instance.Data->contact[i].geom1;
                     int geom2 = MjScene.Instance.Data->contact[i].geom2;
 
-                    // 获取名字
-                    string n1 = MujocoLib.mj_id2name(MjScene.Instance.Model, (int)MujocoLib.mjtObj.mjOBJ_GEOM, geom1) ?? "";
-                    string n2 = MujocoLib.mj_id2name(MjScene.Instance.Model, (int)MujocoLib.mjtObj.mjOBJ_GEOM, geom2) ?? "";
-
-                    // 转小写方便比较
-                    n1 = n1.ToLower();
-                    n2 = n2.ToLower();
-
-                    // 🚨 【修改2】 忽略地板/地面碰撞！(这是 AGV 能动的关键)
-                    // 只要碰撞的一方名字里包含 floor, ground, plane，我们就当没看见
-                    if (n1.Contains("floor") || n1.Contains("ground") || n1.Contains("plane") ||
-                        n2.Contains("floor") || n2.Contains("ground") || n2.Contains("plane"))
-                    {
-                        continue; // 跳过，不算碰撞
-                    }
-
-                    // 也可以忽略轮子本身 (假设轮子名字叫 wheel)
-                    if (n1.Contains("wheel") || n2.Contains("wheel"))
+                    if (ignoredGeomIds.Contains(geom1) || ignoredGeomIds.Contains(geom2))
                     {
                         continue;
                     }
@@ -637,6 +623,8 @@ public class BITStarPlanner : MonoBehaviour
             Debug.LogError($"❌ BIT*: 找不到末端 Site: {ikSolver.endEffectorSite.name}");
             return false;
         }
+
+        RefreshIgnoredGeomIds();
         
         q_start = new double[nv];
         for (int i = 0; i < nv; i++)
@@ -657,6 +645,38 @@ public class BITStarPlanner : MonoBehaviour
             }
         }
         return true;
+    }
+
+    private unsafe void RefreshIgnoredGeomIds()
+    {
+        ignoredGeomIds.Clear();
+
+        int geomCount = MjScene.Instance.Model->ngeom;
+        MjGeom[] sceneGeoms = FindObjectsOfType<MjGeom>();
+        foreach (MjGeom geom in sceneGeoms)
+        {
+            if (geom == null || string.IsNullOrEmpty(geom.MujocoName)) continue;
+            if (geom.MujocoId < 0 || geom.MujocoId >= geomCount) continue;
+
+            if (ContainsIgnoredGeomToken(geom.name) || ContainsIgnoredGeomToken(geom.MujocoName))
+            {
+                ignoredGeomIds.Add(geom.MujocoId);
+            }
+        }
+
+        Debug.Log($"BIT*: 已缓存 {ignoredGeomIds.Count} 个地面/轮子 geom ID，碰撞检查不再调用 mj_id2name");
+    }
+
+    private bool ContainsIgnoredGeomToken(string geomName)
+    {
+        if (string.IsNullOrEmpty(geomName)) return false;
+
+        foreach (string token in IgnoredGeomNameTokens)
+        {
+            if (geomName.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        }
+
+        return false;
     }
 
     private unsafe void ApplyConfig(double[] q)
