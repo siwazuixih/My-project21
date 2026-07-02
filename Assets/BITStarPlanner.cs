@@ -14,6 +14,8 @@ public class BITStarPlanner : MonoBehaviour
     public int batchSize = 2000;    // 每一批撒多少点
     public int maxBatches = 50;     // 最大迭代轮数
     public float eta = 3.0f;        // 搜索半径系数 (建议 3.0 - 5.0)
+    [Min(0.1f)] public float minConnectionRadius = 3.0f;
+    [Min(1)] public int maxNeighborsPerVertex = 64;
     
     [Header("重启动策略")]
     public int restartAttempts = 5; // 跑几次取最优 (解决拓扑陷阱)
@@ -23,6 +25,14 @@ public class BITStarPlanner : MonoBehaviour
     [Header("采样调试")]
     public bool recordDebugSamples = false;
     [Min(0)] public int maxDebugSamplePoints = 200;
+    public bool logSearchDiagnostics = true;
+
+    [Header("BIT* 引导采样")]
+    public bool useGuidedSampling = true;
+    [Range(0f, 1f)] public float corridorSampleRatio = 0.7f;
+    [Range(0f, 1f)] public float goalSampleRatio = 0.2f;
+    [Min(0f)] public float corridorNoise = 0.35f;
+    [Min(0f)] public float goalNoise = 0.25f;
 
     [Header("笛卡尔空间限制 (Workspace)")]
     public bool useWorkspaceLimits = true;
@@ -36,6 +46,7 @@ public class BITStarPlanner : MonoBehaviour
     private int siteId = -1;
     private readonly HashSet<int> ignoredGeomIds = new HashSet<int>();
     private static readonly string[] IgnoredGeomNameTokens = { "floor", "ground", "plane", "wheel" };
+    private BITSearchStats activeSearchStats;
 
     // -------------------------------------------------------------------------
     // 主入口：Plan
@@ -135,6 +146,7 @@ public class BITStarPlanner : MonoBehaviour
     // -------------------------------------------------------------------------
     private (List<double[]>, double) RunBITStarInternal(float timeLimit)
     {
+        activeSearchStats = new BITSearchStats();
         // 1. 初始化数据结构
         List<BITNode> treeNodes = new List<BITNode>();
         List<BITNode> samples = new List<BITNode>();
@@ -152,25 +164,33 @@ public class BITStarPlanner : MonoBehaviour
         
         float startTime = Time.realtimeSinceStartup;
         double radius = double.MaxValue;
+        bool timedOut = false;
 
         for (int batchIdx = 0; batchIdx < maxBatches; batchIdx++)
         {
             // 检查超时
-            if (Time.realtimeSinceStartup - startTime > timeLimit) break;
+            if (Time.realtimeSinceStartup - startTime > timeLimit)
+            {
+                timedOut = true;
+                break;
+            }
 
             // --- 只有当队列为空时，才撒新点 ---
             if (vertexQueue.IsEmpty() && edgeQueue.IsEmpty())
             {
+                activeSearchStats.batches++;
                 // 剪枝
                 Prune(ref samples, finalCost);
                 
                 // 采样新点 (包含笛卡尔限制)
-                var newSamples = SampleInformed(batchSize, finalCost);
+                var newSamples = SampleInformed(batchSize, finalCost, activeSearchStats);
                 samples.AddRange(newSamples);
+                activeSearchStats.maxSamplesInPool = Math.Max(activeSearchStats.maxSamplesInPool, samples.Count);
 
                 // 更新半径 (RGG公式)
                 int q = treeNodes.Count + samples.Count;
                 radius = CalculateRadius(q);
+                activeSearchStats.lastRadius = radius;
 
                 // 重建 Vertex Queue
                 vertexQueue.Clear();
@@ -192,7 +212,11 @@ public class BITStarPlanner : MonoBehaviour
             while (!vertexQueue.IsEmpty() || !edgeQueue.IsEmpty())
             {
                 // 超时检查 (粒度更细)
-                if (Time.realtimeSinceStartup - startTime > timeLimit) break;
+                if (Time.realtimeSinceStartup - startTime > timeLimit)
+                {
+                    timedOut = true;
+                    break;
+                }
 
                 // 比较两个队列的最小值
                 double bestV = vertexQueue.IsEmpty() ? double.MaxValue : vertexQueue.Peek().fScore;
@@ -208,14 +232,17 @@ public class BITStarPlanner : MonoBehaviour
 
                 if (bestV <= bestE)
                 {
+                    activeSearchStats.verticesExpanded++;
                     ExpandVertex(vertexQueue.Pop(), samples, edgeQueue, radius, finalCost);
                 }
                 else
                 {
                     var bestEdge = edgeQueue.Pop();
+                    activeSearchStats.edgesPopped++;
                     if (!bestEdge.isGoal &&
                         (bestEdge.childSample == null || !samples.Contains(bestEdge.childSample)))
                     {
+                        activeSearchStats.staleEdgesSkipped++;
                         continue;
                     }
 
@@ -223,8 +250,11 @@ public class BITStarPlanner : MonoBehaviour
                     if (bestEdge.fScore < finalCost) // 再次剪枝检查
                     {
                         // 碰撞检测 (延迟到最后一刻做)
+                        activeSearchStats.connectionChecks++;
+                        if (bestEdge.isGoal) activeSearchStats.goalConnectionChecks++;
                         if (IsValidConnection(bestEdge.parent.q, bestEdge.childQ))
                         {
+                            activeSearchStats.connectionSuccesses++;
                             // 连通！加入树
                             BITNode newNode = new BITNode(treeNodes.Count, bestEdge.childQ, bestEdge.gScore, bestEdge.parent);
                             treeNodes.Add(newNode);
@@ -240,6 +270,7 @@ public class BITStarPlanner : MonoBehaviour
 
                             if (bestEdge.isGoal)
                             {
+                                activeSearchStats.goalConnectionSuccesses++;
                                 if (newNode.gScore < finalCost)
                                 {
                                     finalCost = newNode.gScore;
@@ -247,15 +278,28 @@ public class BITStarPlanner : MonoBehaviour
                                 }
                             }
                         }
+                        else
+                        {
+                            activeSearchStats.connectionFailures++;
+                            if (bestEdge.isGoal) activeSearchStats.goalConnectionFailures++;
+                        }
                     }
                 }
             }
         }
 
+        activeSearchStats.elapsedSeconds = Time.realtimeSinceStartup - startTime;
+        activeSearchStats.timedOut = timedOut;
+        activeSearchStats.finalTreeNodes = treeNodes.Count;
+        activeSearchStats.remainingSamples = samples.Count;
+        activeSearchStats.finalCost = finalCost;
+
         if (goalNodeInTree != null)
         {
+            LogSearchStats(activeSearchStats, true);
             return (ReconstructPath(goalNodeInTree), finalCost);
         }
+        LogSearchStats(activeSearchStats, false);
         return (null, double.MaxValue);
     }
 
@@ -323,13 +367,12 @@ public class BITStarPlanner : MonoBehaviour
         double distToGoal = Distance(v.node.q, q_goal);
         if (v.node.gScore + distToGoal < cMax) 
         {
+            activeSearchStats.goalEdgesQueued++;
             edgeQueue.Push(new Edge(v.node, q_goal, v.node.gScore + distToGoal, v.node.gScore + distToGoal, true, null));
         }
 
         // 2. 检查样本点 (加入 K-近邻限制 / KNN)
-        // ---------------------------------------------------------
-        int maxNeighbors = 20; // 🔥 熔断阀值：每个点最多只许连最近的 20 个邻居
-        // ---------------------------------------------------------
+        int maxNeighbors = Math.Max(1, maxNeighborsPerVertex);
 
         // 用一个临时列表存储所有在半径内的候选邻居
         var potentialNeighbors = new List<(BITNode node, double dist)>();
@@ -348,6 +391,8 @@ public class BITStarPlanner : MonoBehaviour
                 potentialNeighbors.Add((sample, dist));
             }
         }
+
+        activeSearchStats.neighborCandidates += potentialNeighbors.Count;
 
         // 🔥 关键修复：如果邻居太多，会撑爆内存，所以我们只取“最近的”那几个
         if (potentialNeighbors.Count > maxNeighbors)
@@ -381,10 +426,13 @@ public class BITStarPlanner : MonoBehaviour
 
         if (estF < cMax)
         {
+            activeSearchStats.sampleEdgesQueued++;
             edgeQueue.Push(new Edge(v.node, sample.q, estF, estG, false, sample));
         }
-    }    // 采样：带笛卡尔限制 + 启发式拒绝
-    private List<BITNode> SampleInformed(int n, double cMax)
+    }
+
+    // 采样：带笛卡尔限制 + 启发式拒绝
+    private List<BITNode> SampleInformed(int n, double cMax, BITSearchStats stats)
     {
         // 👇👇👇 加上这一行，防止 Debug 点无限堆积 👇👇👇
         debugSamplePoints.Clear();
@@ -401,32 +449,33 @@ public class BITStarPlanner : MonoBehaviour
             // 🔥 关键修复：如果这一帧采样超过了 0.1秒 还没完，强制停手，防止卡死
             if (Time.realtimeSinceStartup - startTime > 0.1f) 
             {
+                stats.sampleTimeouts++;
                 Debug.LogWarning($"⚠️ 采样超时！只生成了 {result.Count}/{n} 个点，但这比卡死强。");
                 break;
             }
 
             attempts++;
+            stats.sampleAttempts++;
             double[] q = new double[nv];
 
-            // 1. 关节空间随机
-            for(int i=0; i<nv; i++)
-            {
-                var act = actuators[i];
-                float min = -3.14f, max = 3.14f;
-                if (act.Joint is MjHingeJoint h && Math.Abs(h.RangeUpper - h.RangeLower) > 0.01) { min = h.RangeLower * Mathf.Deg2Rad; max = h.RangeUpper * Mathf.Deg2Rad; }
-                else if (act.Joint is MjSlideJoint s && Math.Abs(s.RangeUpper - s.RangeLower) > 0.01) { min = (float)s.RangeLower; max = (float)s.RangeUpper; }
-                
-                q[i] = UnityEngine.Random.Range(min, max);
-            }
+            GenerateSample(q);
 
             // 2. 启发式剪枝 (Heuristic Rejection): g_hat + h_hat < cMax
             // 如果连直线距离都比当前最差解长，那就别试了 (Informed RRT* 原理)
-            if (Distance(q_start, q) + Distance(q, q_goal) >= cMax) continue;
+            if (Distance(q_start, q) + Distance(q, q_goal) >= cMax)
+            {
+                stats.heuristicRejected++;
+                continue;
+            }
 
             // 3. 笛卡尔空间限制 (Workspace Rejection)
             if (useWorkspaceLimits)
             {
-                if (!CheckCartesianLimits(q)) continue;
+                if (!CheckCartesianLimits(q))
+                {
+                    stats.workspaceRejected++;
+                    continue;
+                }
             }
 
 
@@ -437,8 +486,23 @@ public class BITStarPlanner : MonoBehaviour
 
             // 通过筛选
             result.Add(new BITNode(-1, q, double.MaxValue, null));
+            stats.samplesAccepted++;
         }
         return result;
+    }
+
+    private void LogSearchStats(BITSearchStats stats, bool success)
+    {
+        if (!logSearchDiagnostics || stats == null) return;
+
+        string result = success ? "成功" : "失败";
+        Debug.Log(
+            $"[BIT*搜索诊断] result={result}, elapsed={stats.elapsedSeconds:F3}s, timeout={stats.timedOut}, " +
+            $"batches={stats.batches}, radius={stats.lastRadius:F3}, tree={stats.finalTreeNodes}, samplesPool={stats.remainingSamples}/{stats.maxSamplesInPool}, " +
+            $"sampleAttempts={stats.sampleAttempts}, accepted={stats.samplesAccepted}, heuristicReject={stats.heuristicRejected}, workspaceReject={stats.workspaceRejected}, sampleTimeouts={stats.sampleTimeouts}, " +
+            $"expanded={stats.verticesExpanded}, neighborCandidates={stats.neighborCandidates}, queued(sample/goal)={stats.sampleEdgesQueued}/{stats.goalEdgesQueued}, " +
+            $"edgesPopped={stats.edgesPopped}, staleSkipped={stats.staleEdgesSkipped}, checks={stats.connectionChecks}, ok={stats.connectionSuccesses}, fail={stats.connectionFailures}, " +
+            $"goalChecks={stats.goalConnectionChecks}, goalOk={stats.goalConnectionSuccesses}, goalFail={stats.goalConnectionFailures}, bestCost={stats.finalCost:F4}");
     }
 
     // 剪枝：移除 samples 中不再可能优化当前解的点
@@ -581,7 +645,7 @@ public class BITStarPlanner : MonoBehaviour
         for (int i = 1; i < steps; i++)
         {
             float t = (float)i / steps;
-            for (int j = 0; j < nv; j++) temp[j] = from[j] + (to[j] - from[j]) * t;
+            InterpolateState(from, to, t, temp);
             if (!IsValidConfig(temp)) return false;
         }
         return true;
@@ -597,11 +661,9 @@ public class BITStarPlanner : MonoBehaviour
         double term = Math.Log(q) / q;
         double r = eta * 2.5 * Math.Pow(term, 1.0 / nv); 
         
-        // 🔥【核心修复】兜底逻辑：
-        // 在 10维空间，r 算出来可能只有 2.0，但这根本够不着邻居。
-        // 强制它至少要有 6.0 (或者更大，取决于你的地图尺度)
-        // 这里的 6.0 是一个经验值，代表“你认为两个随机点之间最大允许的跳跃距离”
-        return Math.Max(r, 1);    }
+        // 在高维关节空间里，RGG 半径容易偏小；保留一个可调下限，避免树只有 1-3 个节点。
+        return Math.Max(r, minConnectionRadius);
+    }
 
     private double Distance(double[] a, double[] b)
     {
@@ -611,10 +673,106 @@ public class BITStarPlanner : MonoBehaviour
         for (int i = 0; i < nv; i++)
         {
             double w = (i < 3) ? 4.0 : 1.0; 
-            double d = (a[i] - b[i]) * w;
+            double d = JointDelta(a[i], b[i], i) * w;
             sum += d * d;
         }
         return Math.Sqrt(sum);
+    }
+
+    private void GenerateSample(double[] q)
+    {
+        if (!useGuidedSampling || q_start == null || q_goal == null)
+        {
+            GenerateGlobalSample(q);
+            return;
+        }
+
+        float goalRatio = Mathf.Clamp01(goalSampleRatio);
+        float corridorRatio = Mathf.Clamp01(corridorSampleRatio);
+        float roll = UnityEngine.Random.value;
+
+        if (roll < goalRatio)
+        {
+            GenerateNoisySampleAround(q_goal, goalNoise, q);
+        }
+        else if (roll < goalRatio + corridorRatio)
+        {
+            double[] center = new double[nv];
+            InterpolateState(q_start, q_goal, UnityEngine.Random.value, center);
+            GenerateNoisySampleAround(center, corridorNoise, q);
+        }
+        else
+        {
+            GenerateGlobalSample(q);
+        }
+    }
+
+    private void GenerateGlobalSample(double[] q)
+    {
+        for (int i = 0; i < nv; i++)
+        {
+            q[i] = RandomJointValue(i);
+        }
+    }
+
+    private void GenerateNoisySampleAround(double[] center, float noise, double[] q)
+    {
+        for (int i = 0; i < nv; i++)
+        {
+            double rangeNoise = noise;
+            if (actuators[i]?.Joint is MjSlideJoint) rangeNoise *= 0.25;
+
+            q[i] = center[i] + UnityEngine.Random.Range(-(float)rangeNoise, (float)rangeNoise);
+            q[i] = ClampJointValue(q[i], i);
+        }
+    }
+
+    private double RandomJointValue(int index)
+    {
+        if (TryGetJointRange(actuators[index], out double min, out double max))
+        {
+            return UnityEngine.Random.Range((float)min, (float)max);
+        }
+
+        return UnityEngine.Random.Range(-Mathf.PI, Mathf.PI);
+    }
+
+    private double ClampJointValue(double value, int index)
+    {
+        if (TryGetJointRange(actuators[index], out double min, out double max))
+        {
+            return Math.Clamp(value, min, max);
+        }
+
+        if (IsHingeJoint(index)) return WrapToPi(value);
+        return value;
+    }
+
+    private void InterpolateState(double[] from, double[] to, float t, double[] result)
+    {
+        for (int j = 0; j < nv; j++)
+        {
+            result[j] = ClampJointValue(from[j] + JointDelta(from[j], to[j], j) * t, j);
+        }
+    }
+
+    private double JointDelta(double from, double to, int index)
+    {
+        double delta = to - from;
+        return IsHingeJoint(index) ? WrapToPi(delta) : delta;
+    }
+
+    private bool IsHingeJoint(int index)
+    {
+        return index >= 0 && index < actuators.Count && actuators[index]?.Joint is MjHingeJoint;
+    }
+
+    private double WrapToPi(double angle)
+    {
+        const double twoPi = Math.PI * 2.0;
+        angle = (angle + Math.PI) % twoPi;
+        if (angle < 0) angle += twoPi;
+        return angle - Math.PI;
     }
 
     private unsafe bool InitSystem()
@@ -904,6 +1062,35 @@ public class BITStarPlanner : MonoBehaviour
         public double[] qvel;
         public double[] act;
         public double[] ctrl;
+    }
+
+    private class BITSearchStats
+    {
+        public int batches;
+        public int sampleAttempts;
+        public int samplesAccepted;
+        public int heuristicRejected;
+        public int workspaceRejected;
+        public int sampleTimeouts;
+        public int verticesExpanded;
+        public int neighborCandidates;
+        public int sampleEdgesQueued;
+        public int goalEdgesQueued;
+        public int edgesPopped;
+        public int staleEdgesSkipped;
+        public int connectionChecks;
+        public int connectionSuccesses;
+        public int connectionFailures;
+        public int goalConnectionChecks;
+        public int goalConnectionSuccesses;
+        public int goalConnectionFailures;
+        public int finalTreeNodes;
+        public int remainingSamples;
+        public int maxSamplesInPool;
+        public double lastRadius;
+        public double finalCost;
+        public float elapsedSeconds;
+        public bool timedOut;
     }
 
     private struct Vertex : IComparable<Vertex>
