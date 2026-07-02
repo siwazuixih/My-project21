@@ -47,10 +47,6 @@ public class ArmController : MonoBehaviour
     {
         if (externalControlActive) return;
         CalculateObservationPose(mgr.refs.targetObject.position, mgr.chassisCtrl.GetRobotPosition(), transform.forward, out lockedArmTargetPos, out lockedArmTargetRot);
-        
-        double[] runtimeResult = mgr.arm.enableLookAt ? 
-            mgr.refs.ikSolver.SolveIK(lockedArmTargetPos, lockedArmTargetRot) : 
-            mgr.refs.ikSolver.SolveIK(lockedArmTargetPos);
 
         List<double[]> cachedPlan = null;
         if (mgr.hasPrecalculated && mgr.currentMissionIndex < mgr.snapshots.Count) {
@@ -59,12 +55,10 @@ public class ArmController : MonoBehaviour
 
         if (mgr.arm.usePrecalculatedSolution && cachedPlan != null) {
             StartCoroutine(ExecutePath(cachedPlan, true)); 
+        } else if (mgr.arm.useBitStarPlanner && mgr.refs.bitPlanner != null) {
+            StartCoroutine(RunBitStarPlanning());
         } else {
-            if (mgr.arm.useBitStarPlanner && mgr.refs.bitPlanner != null) StartCoroutine(RunBitStarPlanning());
-            else {
-                if (runtimeResult != null) StartCoroutine(ExecutePath(new List<double[]> { runtimeResult }, true));
-                else StartCoroutine(RunSimpleIKInterp()); 
-            }
+            StartCoroutine(RunSimpleIKInterp());
         }
     }
 

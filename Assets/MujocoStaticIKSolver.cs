@@ -4,8 +4,8 @@ using UnityEngine;
 using Mujoco;
 
 /// <summary>
-/// 基于梯度下降法 (Gradient Descent) 的 MuJoCo 逆运动学 (IK) 求解器。
-/// 修复版：采用“底座全向探索 + 手臂姿态约束”的混合策略，解决多解扭曲问题。
+/// 基于加权阻尼最小二乘的 MuJoCo 逆运动学求解器。
+/// 升降缸以高运动代价参与求解，机械臂本体无法满足任务时才优先使用。
 /// </summary>
 public class MujocoStaticIKSolver : MonoBehaviour
 {
@@ -28,6 +28,16 @@ public class MujocoStaticIKSolver : MonoBehaviour
     [Tooltip("旋转停止阈值 (弧度)。0.05 ≈ 2.8度")]
     public float stopRotThreshold = 0.05f;
     public float stepSize = 0.5f;     // 步长
+
+    [Header("阻尼最小二乘")]
+    [Min(0.0001f), Tooltip("DLS 阻尼。越大越稳定，但靠近目标时会更保守。")]
+    public float dlsDamping = 0.05f;
+    [Min(0.001f), Tooltip("单次迭代允许的最大转动关节变化（弧度）。")]
+    public float maxAngularStep = 0.12f;
+    [Min(0.0001f), Tooltip("单次迭代允许的最大升降缸变化（米）。")]
+    public float maxElevatorStep = 0.01f;
+    [Min(1f), Tooltip("升降缸运动代价。越大越优先只用机械臂，必要时仍可升降。")]
+    public float elevatorMotionPenalty = 20f;
 
     [Header("姿态控制")]
     [Tooltip("旋转误差的权重。0.1~0.5 比较合适。设为0则忽略姿态。")]
@@ -64,6 +74,20 @@ public class MujocoStaticIKSolver : MonoBehaviour
     [Tooltip("重试次数。建议设为 10~20 次，给底座足够的概率随机到正确的朝向。")]
     public int maxRetries = 15;
     public bool checkCollision = false;
+    [Min(0f), Tooltip("IK 端点允许的最大穿透深度（米），应与规划器保持一致。")]
+    public float collisionPenetrationTolerance = 0.02f;
+    [Min(0.1f), Tooltip("非底座转动关节随机种子的半径（弧度）。")]
+    public float randomSeedRadius = 1.5f;
+    [Min(0.01f), Tooltip("两个 IK 候选在周期关节归一化后的最小间距。")]
+    public float candidateSeparation = 0.35f;
+
+    [Header("结果验收")]
+    [Tooltip("允许返回未达到严格收敛阈值、但误差仍在安全上限内的近似解。")]
+    public bool allowApproximateSolution = true;
+    [Min(0f), Tooltip("近似解允许的最大位置误差（米）。")]
+    public float maxAcceptedPositionError = 0.01f;
+    [Min(0f), Tooltip("近似解允许的最大姿态误差（弧度）。")]
+    public float maxAcceptedRotationError = 0.03f;
 
     // 忽略碰撞的物体名字 (白名单)
     public List<string> ignoreGeomNames = new List<string>() { "floor" };
@@ -79,6 +103,7 @@ public class MujocoStaticIKSolver : MonoBehaviour
     private int cachedSiteId = -1;
     private string cachedSiteName = "";
     private HashSet<int> ignoredGeomIds = new HashSet<int>();
+    private static readonly string[] DefaultIgnoredGeomTokens = { "floor", "ground", "plane", "wheel" };
     private double[] restQpos;
 
     // =================================================================================
@@ -105,142 +130,274 @@ public class MujocoStaticIKSolver : MonoBehaviour
 
     public unsafe double[] SolveIK(Vector3 targetPos, Quaternion? targetRot = null)
     {
-        if (MjScene.Instance.Model == null || MjScene.Instance.Data == null) return null;
+        List<double[]> candidates = SolveIKCandidates(targetPos, targetRot, 1);
+        return candidates.Count > 0 ? candidates[0] : null;
+    }
+
+    public unsafe List<double[]> SolveIKCandidates(Vector3 targetPos, Quaternion? targetRot, int maxCandidates)
+    {
+        List<double[]> result = new List<double[]>();
+        if (MjScene.Instance.Model == null || MjScene.Instance.Data == null || maxCandidates <= 0) return result;
+        if (endEffectorSite == null || actuators == null || actuators.Count == 0)
+        {
+            Debug.LogError("IK 求解失败：endEffectorSite 或 actuators 未绑定");
+            return result;
+        }
+        for (int i = 0; i < actuators.Count; i++)
+        {
+            if (actuators[i]?.Joint != null) continue;
+            Debug.LogError($"IK 求解失败：actuators[{i}] 或其 Joint 未绑定");
+            return result;
+        }
 
         RefreshCache();
-
+        if (cachedSiteId < 0)
+        {
+            Debug.LogError($"IK 求解失败：MuJoCo 中找不到末端 Site '{endEffectorSite.name}'");
+            return result;
+        }
         int nq = MjScene.Instance.Model->nq;
         int nv = MjScene.Instance.Model->nv;
-
-        // 1. 备份当前状态 (用于恢复和计算最短路径)
         MujocoStateSnapshot startState = CaptureState();
         double[] startQpos = startState.qpos;
+        if (restQpos == null || restQpos.Length != nq) restQpos = (double[])startQpos.Clone();
 
-        if (restQpos == null || restQpos.Length != nq) restQpos = startQpos;
+        List<IKCandidate> accepted = new List<IKCandidate>();
+        IKCandidate bestObserved = null;
+        bool rotationRequired = targetRot.HasValue && rotWeight >= 0.001f;
 
-        double[] bestQpos = null;
+        try
+        {
+            int attempts = Math.Max(1, maxRetries);
+            for (int phase = 0; phase < 2; phase++)
+            {
+                bool allowElevator = phase == 1;
+                if (allowElevator && accepted.Count > 0) break;
+                if (allowElevator && debugMode)
+                {
+                    Debug.LogWarning("[IK候选] 六轴阶段没有可接受解，开始释放升降缸参与求解");
+                }
 
-        // 评分变量 (越小越好)
-        float bestTotalError = float.MaxValue; 
-        float bestPosError = float.MaxValue;
-        float bestRotError = float.MaxValue;
-        double bestDistFromRest = double.MaxValue; // 离舒适姿态的距离
-        bool bestConverged = false;
-        int bestAttempt = -1;
+                for (int attempt = 0; attempt < attempts; attempt++)
+                {
+                    RestoreState(startState);
+                    SetElevatorFromState(startQpos);
+                    if (attempt > 0) RandomizeConfiguration(attempt);
 
-        // 2. 随机重试循环
-        for (int attempt = 0; attempt < maxRetries; attempt++)
+                    var (converged, finalPosErr, finalRotErr) =
+                        RunDampedLeastSquares(targetPos, targetRot, nv, allowElevator);
+                    bool collisionFree = !checkCollision || !CheckCollision();
+                    if (!collisionFree) continue;
+
+                    IKCandidate candidate = CaptureCandidate(
+                        nq, attempt + phase * attempts, converged, finalPosErr, finalRotErr,
+                        rotationRequired, startQpos);
+
+                    if (bestObserved == null || CompareCandidates(candidate, bestObserved) < 0)
+                    {
+                        bestObserved = candidate;
+                    }
+
+                    if (candidate.accepted)
+                    {
+                        AddOrReplaceEquivalentCandidate(accepted, candidate);
+                    }
+
+                    if (!selectBestCandidate && candidate.accepted) break;
+                }
+            }
+        }
+        finally
         {
             RestoreState(startState);
+        }
 
-            // 第0次尝试保持原样，后续尝试进行随机扰动
-            if (attempt > 0) RandomizeConfiguration();
-
-            // 核心计算
-            var (converged, finalPosErr, finalRotErr) = RunGradientDescent(targetPos, targetRot, nv);
-
-            float totalErr = finalPosErr + finalRotErr;
-
-            // 计算当前解离 Rest Pose (舒适姿态) 有多远
-            double distFromRest = 0;
-            for (int i = 0; i < actuators.Count; i++)
+        accepted.Sort(CompareCandidates);
+        int count = Math.Min(maxCandidates, accepted.Count);
+        for (int i = 0; i < count; i++)
+        {
+            IKCandidate candidate = accepted[i];
+            result.Add((double[])candidate.qpos.Clone());
+            if (debugMode)
             {
-                int qAddr = GetQposAddr(actuators[i]);
-                if (qAddr != -1) 
-                {
-                    double diff = Math.Abs(MjScene.Instance.Data->qpos[qAddr] - restQpos[qAddr]);
-                    // 如果是升降缸 (MjSlideJoint)，给它加上巨大的惩罚系数！
-                    if (actuators[i].Joint is MjSlideJoint) {
-                        distFromRest += diff * elevatorPenalty; 
-                    } else {
-                        distFromRest += diff;
-                    }
-                }
-            }
-            // 碰撞检测
-            bool isCollisionFree = (!checkCollision || !CheckCollision());
-
-            if (isCollisionFree)
-            {
-                // 评分公式：
-                float weightPose = 0.2f; 
-                float currentScore = totalErr + (float)distFromRest * weightPose;
-                float bestScore = bestTotalError + (float)bestDistFromRest * weightPose;
-
-                // 更新最佳解
-                if (bestQpos == null || currentScore < bestScore)
-                {
-                    bestTotalError = totalErr;
-                    bestPosError = finalPosErr;
-                    bestRotError = finalRotErr;
-                    bestDistFromRest = distFromRest;
-                    bestConverged = converged;
-                    bestAttempt = attempt;
-
-                    if (bestQpos == null) bestQpos = new double[nq];
-                    for (int i = 0; i < nq; i++) bestQpos[i] = MjScene.Instance.Data->qpos[i];
-                }
-            }
-
-            // 只要没关优选模式，就一定要跑完所有 Retries
-            if (!selectBestCandidate)
-            {
-                if (converged && isCollisionFree) break;
+                Debug.Log($"[IK候选] {i + 1}/{count}, attempt={candidate.attempt}, " +
+                          $"converged={candidate.converged}, lift={GetLiftValue(candidate.qpos):F4}");
+                LogIKResultDiagnostics(candidate.qpos, targetPos, targetRot, candidate.posErrorSq,
+                    candidate.rotErrorSq, candidate.distFromRest, candidate.converged, candidate.attempt);
             }
         }
 
-        // 3. 恢复现场 (让物理引擎回到起点，避免视觉闪烁)
-        RestoreState(startState);
-
-        // 4. 返回结果处理
-        if (bestQpos != null)
+        if (result.Count == 0)
         {
-            // 就近旋转优化 (处理底座多圈问题)
-            if (rotationOptimization == RotationMode.ShortestPath)
+            if (bestObserved != null)
             {
-                for (int i = 0; i < actuators.Count; i++)
-                {
-                    var act = actuators[i];
-                    if (act.Joint is MjHingeJoint h)
-                    {
-                        int qAddr = h.QposAddress;
-                        double startAngle = startQpos[qAddr];
-                        double targetAngle = bestQpos[qAddr];
-
-                        double delta = targetAngle - startAngle;
-                        double twoPi = 2.0 * Math.PI;
-                        while (delta > Math.PI) delta -= twoPi;
-                        while (delta < -Math.PI) delta += twoPi;
-
-                        double optimizedTarget = startAngle + delta;
-                        double min = h.RangeLower * Mathf.Deg2Rad;
-                        double max = h.RangeUpper * Mathf.Deg2Rad;
-                        bool hasRange = Math.Abs(h.RangeUpper - h.RangeLower) > 0.01;
-
-                        if (!hasRange || (optimizedTarget >= min && optimizedTarget <= max))
-                        {
-                            bestQpos[qAddr] = optimizedTarget;
-                        }
-                    }
-                }
+                float posError = Mathf.Sqrt(Mathf.Max(bestObserved.posErrorSq, 0f));
+                float rotError = Mathf.Sqrt(Mathf.Max(bestObserved.rotErrorSq, 0f));
+                Debug.LogError($"IK 未找到可接受解: bestPosErr={posError:F5}m, bestRotErr={rotError:F5}");
             }
-
-            // float realPosErr = Mathf.Sqrt(bestPosError);
-            // float realRotErr = Mathf.Sqrt(bestRotError);
-            if (debugMode) LogIKResultDiagnostics(bestQpos, targetPos, targetRot, bestPosError, bestRotError, bestDistFromRest, bestConverged, bestAttempt);
-            return bestQpos;
+            else if (debugMode)
+            {
+                Debug.LogError("❌ IK 彻底失败：所有候选均发生碰撞或数值无效");
+            }
         }
-        else
+
+        return result;
+    }
+
+    private unsafe IKCandidate CaptureCandidate(
+        int nq,
+        int attempt,
+        bool converged,
+        float posErrorSq,
+        float rotErrorSq,
+        bool rotationRequired,
+        double[] startQpos)
+    {
+        double[] qpos = new double[nq];
+        for (int i = 0; i < nq; i++) qpos[i] = MjScene.Instance.Data->qpos[i];
+        OptimizePeriodicAngles(qpos, startQpos);
+
+        float posThresholdSq = Mathf.Max(stopThreshold * stopThreshold, 1e-12f);
+        float poseScore = posErrorSq / posThresholdSq;
+        if (rotationRequired)
         {
-            if (debugMode) Debug.LogError("❌ IK 彻底失败");
-            return null;
+            float rotThresholdSq = Mathf.Max(stopRotThreshold * stopRotThreshold, 1e-12f);
+            poseScore += rotErrorSq / rotThresholdSq;
+        }
+
+        float posError = Mathf.Sqrt(Mathf.Max(posErrorSq, 0f));
+        float rotError = Mathf.Sqrt(Mathf.Max(rotErrorSq, 0f));
+        bool approximateAccepted =
+            allowApproximateSolution &&
+            posError <= Mathf.Max(maxAcceptedPositionError, stopThreshold) &&
+            (!rotationRequired || rotError <= Mathf.Max(maxAcceptedRotationError, stopRotThreshold));
+
+        return new IKCandidate
+        {
+            qpos = qpos,
+            attempt = attempt,
+            converged = converged,
+            accepted = IsFinite(posErrorSq) && IsFinite(rotErrorSq) && (converged || approximateAccepted),
+            posErrorSq = posErrorSq,
+            rotErrorSq = rotErrorSq,
+            poseScore = poseScore,
+            distFromRest = ComputeRestDistance(qpos)
+        };
+    }
+
+    private int CompareCandidates(IKCandidate left, IKCandidate right)
+    {
+        if (left.converged != right.converged) return left.converged ? -1 : 1;
+        int poseComparison = left.poseScore.CompareTo(right.poseScore);
+        if (poseComparison != 0) return poseComparison;
+        return left.distFromRest.CompareTo(right.distFromRest);
+    }
+
+    private void AddOrReplaceEquivalentCandidate(List<IKCandidate> candidates, IKCandidate candidate)
+    {
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            if (CandidateDistance(candidates[i].qpos, candidate.qpos) >= candidateSeparation) continue;
+            if (CompareCandidates(candidate, candidates[i]) < 0) candidates[i] = candidate;
+            return;
+        }
+        candidates.Add(candidate);
+    }
+
+    private double CandidateDistance(double[] left, double[] right)
+    {
+        double sum = 0;
+        for (int i = 0; i < actuators.Count; i++)
+        {
+            MjActuator act = actuators[i];
+            int address = GetQposAddr(act);
+            if (address < 0 || address >= left.Length || address >= right.Length) continue;
+
+            double difference = left[address] - right[address];
+            if (act.Joint is MjHingeJoint) difference = NormalizeAngle(difference);
+            else if (act.Joint is MjSlideJoint) difference *= 10.0;
+            sum += difference * difference;
+        }
+        return Math.Sqrt(sum);
+    }
+
+    private double ComputeRestDistance(double[] qpos)
+    {
+        double distance = 0;
+        for (int i = 0; i < actuators.Count; i++)
+        {
+            MjActuator act = actuators[i];
+            int address = GetQposAddr(act);
+            if (address < 0 || address >= qpos.Length || address >= restQpos.Length) continue;
+
+            double difference = qpos[address] - restQpos[address];
+            if (act.Joint is MjHingeJoint) difference = NormalizeAngle(difference);
+            distance += Math.Abs(difference) * (act.Joint is MjSlideJoint ? elevatorPenalty : 1.0);
+        }
+        return distance;
+    }
+
+    private void OptimizePeriodicAngles(double[] qpos, double[] startQpos)
+    {
+        if (rotationOptimization != RotationMode.ShortestPath) return;
+
+        foreach (MjActuator act in actuators)
+        {
+            if (!(act?.Joint is MjHingeJoint hinge)) continue;
+            int address = hinge.QposAddress;
+            double optimized = startQpos[address] + NormalizeAngle(qpos[address] - startQpos[address]);
+            double min = hinge.RangeLower * Mathf.Deg2Rad;
+            double max = hinge.RangeUpper * Mathf.Deg2Rad;
+            bool hasRange = Math.Abs(hinge.RangeUpper - hinge.RangeLower) > 0.01;
+            if (!hasRange || (optimized >= min && optimized <= max)) qpos[address] = optimized;
         }
     }
 
+    private double GetLiftValue(double[] qpos)
+    {
+        foreach (MjActuator act in actuators)
+        {
+            if (!(act?.Joint is MjSlideJoint slide)) continue;
+            int address = slide.QposAddress;
+            if (address >= 0 && address < qpos.Length) return qpos[address];
+        }
+        return 0;
+    }
+
+    private unsafe void SetElevatorFromState(double[] referenceQpos)
+    {
+        foreach (MjActuator act in actuators)
+        {
+            if (!(act?.Joint is MjSlideJoint slide)) continue;
+            int address = slide.QposAddress;
+            if (address >= 0 && address < referenceQpos.Length)
+            {
+                MjScene.Instance.Data->qpos[address] = referenceQpos[address];
+            }
+        }
+    }
+
+    private double NormalizeAngle(double angle)
+    {
+        double twoPi = 2.0 * Math.PI;
+        while (angle > Math.PI) angle -= twoPi;
+        while (angle < -Math.PI) angle += twoPi;
+        return angle;
+    }
+
+    private bool IsFinite(double value)
+    {
+        return !double.IsNaN(value) && !double.IsInfinity(value);
+    }
+
     // =================================================================================
-    // 6. 核心算法 (梯度下降)
+    // 6. 核心算法（加权阻尼最小二乘）
     // =================================================================================
-    private unsafe (bool, float, float) RunGradientDescent(Vector3 targetPos, Quaternion? targetRot, int nv)
+    private unsafe (bool, float, float) RunDampedLeastSquares(
+        Vector3 targetPos,
+        Quaternion? targetRot,
+        int nv,
+        bool allowElevator)
     {
         float currentPosErr = 0;
         float currentRotErr = 0;
@@ -320,48 +477,172 @@ public class MujocoStaticIKSolver : MonoBehaviour
                 MujocoLib.mj_jacSite(MjScene.Instance.Model, MjScene.Instance.Data, p_jacp, p_jacr, cachedSiteId);
             }
 
-            double[] deltaQ = new double[nv];
+            double[] taskError = targetRot.HasValue && rotWeight >= 0.001f
+                ? new[] { ex, ey, ez, erx, ery, erz }
+                : new[] { ex, ey, ez };
+
+            if (!TryComputeDlsStep(taskError, nv, allowElevator, out double[] actuatorSteps))
+            {
+                break;
+            }
+
             for (int i = 0; i < actuators.Count; i++)
             {
-                var act = actuators[i];
-                if (act == null || act.Joint == null) continue;
+                MjActuator act = actuators[i];
+                if (act?.Joint == null) continue;
+                if (!allowElevator && act.Joint is MjSlideJoint) continue;
+                int qposAddr = GetQposAddr(act);
+                if (qposAddr < 0) continue;
 
-                int dofAddr = -1; int qposAddr = -1;
-                if (act.Joint is MjHingeJoint h) { dofAddr = h.DofAddress; qposAddr = h.QposAddress; }
-                else if (act.Joint is MjSlideJoint s) { dofAddr = s.DofAddress; qposAddr = s.QposAddress; }
-                else continue;
+                double restWeight = i == 0 ? 0.001 : restPoseWeight;
+                if (act.Joint is MjSlideJoint) restWeight = elevatorWeight;
 
-                double dx = jacp[0 * nv + dofAddr];
-                double dy = jacp[1 * nv + dofAddr];
-                double dz = jacp[2 * nv + dofAddr];
-                double gradPos = dx * ex + dy * ey + dz * ez;
-
-                double gradRot = 0;
-                if (targetRot.HasValue)
-                {
-                    double rx = jacr[0 * nv + dofAddr];
-                    double ry = jacr[1 * nv + dofAddr];
-                    double rz = jacr[2 * nv + dofAddr];
-                    gradRot = rx * erx + ry * ery + rz * erz;
-                }
-
-                double currentQ = MjScene.Instance.Data->qpos[qposAddr];
-                double restQ = restQpos[qposAddr];
-
-                double currentWeight = (i == 0) ? 0.001 : restPoseWeight;
-                if (act.Joint is MjSlideJoint) currentWeight = elevatorWeight; 
-
-                double biasForce = (restQ - currentQ) * currentWeight;
-
-                double totalGrad = gradPos + (gradRot * rotWeight) + biasForce;
-                double weight = 1.0;
-
-                deltaQ[dofAddr] = totalGrad * stepSize * weight;
-                MjScene.Instance.Data->qpos[qposAddr] += deltaQ[dofAddr];
+                double bias = (restQpos[qposAddr] - MjScene.Instance.Data->qpos[qposAddr]) * restWeight * stepSize;
+                double maxStep = act.Joint is MjSlideJoint ? maxElevatorStep : maxAngularStep;
+                double delta = Math.Clamp(actuatorSteps[i] * stepSize + bias, -maxStep, maxStep);
+                MjScene.Instance.Data->qpos[qposAddr] += delta;
                 ClampJoint(act.Joint, qposAddr);
             }
         }
         return (false, currentPosErr, currentRotErr);
+    }
+
+    private bool TryComputeDlsStep(
+        double[] taskError,
+        int nv,
+        bool allowElevator,
+        out double[] actuatorSteps)
+    {
+        int taskSize = taskError.Length;
+        int actuatorCount = actuators.Count;
+        actuatorSteps = new double[actuatorCount];
+        double[,] taskJacobian = new double[taskSize, actuatorCount];
+        double[] inverseJointWeights = new double[actuatorCount];
+        double rotationScale = Math.Sqrt(Math.Max(rotWeight, 0.0));
+
+        for (int i = 0; i < actuatorCount; i++)
+        {
+            MjActuator act = actuators[i];
+            int dofAddr = GetDofAddr(act);
+            if (dofAddr < 0 || dofAddr >= nv) continue;
+
+            taskJacobian[0, i] = jacp[0 * nv + dofAddr];
+            taskJacobian[1, i] = jacp[1 * nv + dofAddr];
+            taskJacobian[2, i] = jacp[2 * nv + dofAddr];
+            if (taskSize == 6)
+            {
+                taskJacobian[3, i] = jacr[0 * nv + dofAddr] * rotationScale;
+                taskJacobian[4, i] = jacr[1 * nv + dofAddr] * rotationScale;
+                taskJacobian[5, i] = jacr[2 * nv + dofAddr] * rotationScale;
+            }
+
+            if (act?.Joint is MjSlideJoint)
+            {
+                inverseJointWeights[i] = allowElevator
+                    ? 1.0 / Math.Max(elevatorMotionPenalty, 1.0)
+                    : 0.0;
+            }
+            else
+            {
+                inverseJointWeights[i] = 1.0;
+            }
+        }
+
+        double[] weightedError = (double[])taskError.Clone();
+        if (taskSize == 6)
+        {
+            weightedError[3] *= rotationScale;
+            weightedError[4] *= rotationScale;
+            weightedError[5] *= rotationScale;
+        }
+
+        double[,] normal = new double[taskSize, taskSize];
+        for (int row = 0; row < taskSize; row++)
+        {
+            for (int col = 0; col < taskSize; col++)
+            {
+                double value = 0;
+                for (int joint = 0; joint < actuatorCount; joint++)
+                {
+                    value += taskJacobian[row, joint] * inverseJointWeights[joint] * taskJacobian[col, joint];
+                }
+                normal[row, col] = value;
+            }
+            normal[row, row] += dlsDamping * dlsDamping;
+        }
+
+        if (!TrySolveLinearSystem(normal, weightedError, out double[] taskStep)) return false;
+
+        for (int joint = 0; joint < actuatorCount; joint++)
+        {
+            double value = 0;
+            for (int row = 0; row < taskSize; row++)
+            {
+                value += taskJacobian[row, joint] * taskStep[row];
+            }
+            actuatorSteps[joint] = inverseJointWeights[joint] * value;
+            if (!IsFinite(actuatorSteps[joint])) return false;
+        }
+        return true;
+    }
+
+    private bool TrySolveLinearSystem(double[,] matrix, double[] rhs, out double[] solution)
+    {
+        int n = rhs.Length;
+        double[,] augmented = new double[n, n + 1];
+        solution = new double[n];
+        for (int row = 0; row < n; row++)
+        {
+            for (int col = 0; col < n; col++) augmented[row, col] = matrix[row, col];
+            augmented[row, n] = rhs[row];
+        }
+
+        for (int pivot = 0; pivot < n; pivot++)
+        {
+            int bestRow = pivot;
+            double bestValue = Math.Abs(augmented[pivot, pivot]);
+            for (int row = pivot + 1; row < n; row++)
+            {
+                double value = Math.Abs(augmented[row, pivot]);
+                if (value > bestValue)
+                {
+                    bestValue = value;
+                    bestRow = row;
+                }
+            }
+
+            if (!IsFinite(bestValue) || bestValue < 1e-12) return false;
+            if (bestRow != pivot)
+            {
+                for (int col = pivot; col <= n; col++)
+                {
+                    double temporary = augmented[pivot, col];
+                    augmented[pivot, col] = augmented[bestRow, col];
+                    augmented[bestRow, col] = temporary;
+                }
+            }
+
+            double divisor = augmented[pivot, pivot];
+            for (int col = pivot; col <= n; col++) augmented[pivot, col] /= divisor;
+
+            for (int row = 0; row < n; row++)
+            {
+                if (row == pivot) continue;
+                double factor = augmented[row, pivot];
+                if (Math.Abs(factor) < 1e-15) continue;
+                for (int col = pivot; col <= n; col++)
+                {
+                    augmented[row, col] -= factor * augmented[pivot, col];
+                }
+            }
+        }
+
+        for (int row = 0; row < n; row++)
+        {
+            solution[row] = augmented[row, n];
+            if (!IsFinite(solution[row])) return false;
+        }
+        return true;
     }
 
     private unsafe void LogIKResultDiagnostics(double[] qpos, Vector3 targetPos, Quaternion? targetRot, float posErrorSq, float rotErrorSq, double distFromRest, bool converged, int attempt)
@@ -400,8 +681,15 @@ public class MujocoStaticIKSolver : MonoBehaviour
     // =================================================================================
     public int GetQposAddr(MjActuator act)
     {
-        if (act.Joint is MjHingeJoint h) return h.QposAddress;
-        if (act.Joint is MjSlideJoint s) return s.QposAddress;
+        if (act?.Joint is MjHingeJoint h) return h.QposAddress;
+        if (act?.Joint is MjSlideJoint s) return s.QposAddress;
+        return -1;
+    }
+
+    private int GetDofAddr(MjActuator act)
+    {
+        if (act?.Joint is MjHingeJoint h) return h.DofAddress;
+        if (act?.Joint is MjSlideJoint s) return s.DofAddress;
         return -1;
     }
 
@@ -443,14 +731,33 @@ public class MujocoStaticIKSolver : MonoBehaviour
             Debug.Log($"<color=cyan>[IK 名字查验]</color> 正在用 Unity 物体名 <b>'{endEffectorSite.name}'</b> 去底层搜 ID，得到的 cachedSiteId = <b>{cachedSiteId}</b>");
             // ======================================
         }
-        if (ignoredGeomIds.Count == 0 && ignoreGeomNames.Count > 0)
+        if (ignoredGeomIds.Count == 0)
         {
             foreach (var name in ignoreGeomNames)
             {
                 int id = MujocoLib.mj_name2id(MjScene.Instance.Model, (int)MujocoLib.mjtObj.mjOBJ_GEOM, name);
                 if (id != -1) ignoredGeomIds.Add(id);
             }
+
+            foreach (MjGeom geom in FindObjectsOfType<MjGeom>())
+            {
+                if (geom == null || geom.MujocoId < 0) continue;
+                if (ContainsIgnoredGeomToken(geom.name) || ContainsIgnoredGeomToken(geom.MujocoName))
+                {
+                    ignoredGeomIds.Add(geom.MujocoId);
+                }
+            }
         }
+    }
+
+    private bool ContainsIgnoredGeomToken(string geomName)
+    {
+        if (string.IsNullOrEmpty(geomName)) return false;
+        foreach (string token in DefaultIgnoredGeomTokens)
+        {
+            if (geomName.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        }
+        return false;
     }
 
     private unsafe void ClampJoint(MjBaseJoint joint, int qposAddr)
@@ -485,7 +792,7 @@ public class MujocoStaticIKSolver : MonoBehaviour
         for (int i = 0; i < ncon; i++)
         {
             var contact = MjScene.Instance.Data->contact[i];
-            if (contact.dist < -0.001f)
+            if (contact.dist < -Math.Max(collisionPenetrationTolerance, 0f))
             {
                 if (ignoredGeomIds.Contains(contact.geom1) || ignoredGeomIds.Contains(contact.geom2))
                     continue;
@@ -495,28 +802,33 @@ public class MujocoStaticIKSolver : MonoBehaviour
         return false;
     }
 
-    private unsafe void RandomizeConfiguration()
+    private unsafe void RandomizeConfiguration(int attempt)
     {
         for (int i = 0; i < actuators.Count; i++)
         {
             var act = actuators[i];
-            bool isBaseJoint = (i == 0); 
 
-            if (act.Joint is MjSlideJoint s)
+            if (act.Joint is MjSlideJoint)
             {
-                MjScene.Instance.Data->qpos[s.QposAddress] += UnityEngine.Random.Range(-0.1f, 0.1f);
+                // 升降缸保持本次求解开始时的高度，由第二阶段 DLS 决定是否需要移动。
+                continue;
             }
             else if (act.Joint is MjHingeJoint h)
             {
-                if (isBaseJoint)
+                bool useFullRangeSeed = i == 0 || attempt % 3 == 0;
+                if (useFullRangeSeed && Math.Abs(h.RangeUpper - h.RangeLower) > 0.01)
                 {
-                    MjScene.Instance.Data->qpos[h.QposAddress] = UnityEngine.Random.Range(-3.14f, 3.14f);
+                    float min = h.RangeLower * Mathf.Deg2Rad;
+                    float max = h.RangeUpper * Mathf.Deg2Rad;
+                    MjScene.Instance.Data->qpos[h.QposAddress] = UnityEngine.Random.Range(min, max);
                 }
                 else
                 {
                     double restVal = restQpos[h.QposAddress];
-                    MjScene.Instance.Data->qpos[h.QposAddress] = restVal + UnityEngine.Random.Range(-0.5f, 0.5f);
+                    MjScene.Instance.Data->qpos[h.QposAddress] = restVal +
+                        UnityEngine.Random.Range(-randomSeedRadius, randomSeedRadius);
                 }
+                ClampJoint(h, h.QposAddress);
             }
         }
         MujocoLib.mj_forward(MjScene.Instance.Model, MjScene.Instance.Data);
@@ -551,6 +863,18 @@ public class MujocoStaticIKSolver : MonoBehaviour
         for (int i = 0; i < snapshot.act.Length; i++) data->act[i] = snapshot.act[i];
         for (int i = 0; i < snapshot.ctrl.Length; i++) data->ctrl[i] = snapshot.ctrl[i];
         MujocoLib.mj_forward(MjScene.Instance.Model, data);
+    }
+
+    private class IKCandidate
+    {
+        public double[] qpos;
+        public int attempt;
+        public bool converged;
+        public bool accepted;
+        public float posErrorSq;
+        public float rotErrorSq;
+        public float poseScore;
+        public double distFromRest;
     }
 
     private class MujocoStateSnapshot

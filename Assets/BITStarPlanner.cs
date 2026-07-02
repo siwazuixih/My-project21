@@ -18,6 +18,11 @@ public class BITStarPlanner : MonoBehaviour
     [Header("重启动策略")]
     public int restartAttempts = 5; // 跑几次取最优 (解决拓扑陷阱)
     public float timeLimitPerRun = 0.5f; // 单次尝试的时间限制 (秒)
+    [Min(1)] public int ikGoalAttempts = 3; // 为同一末端目标尝试多个 IK 分支
+
+    [Header("采样调试")]
+    public bool recordDebugSamples = false;
+    [Min(0)] public int maxDebugSamplePoints = 200;
 
     [Header("笛卡尔空间限制 (Workspace)")]
     public bool useWorkspaceLimits = true;
@@ -45,86 +50,83 @@ public class BITStarPlanner : MonoBehaviour
 
         bool startValid = IsValidConfig(q_start);
         Debug.Log($"🧐 [起点体检] IsValidConfig(q_start) = {startValid}");
-        if (!startValid) Debug.LogError("💀 破案了：起点本身就是碰撞状态！请检查是不是机械臂初始姿态自相交了？");
+        if (!startValid)
+        {
+            Debug.LogError("❌ BIT*: 起点本身处于碰撞状态，已终止规划");
+            return null;
+        }
 
-        Debug.Log("🔍 BIT*: 正在调用 IK 寻找终点 (包含位姿)...");
         Debug.Log($"🎯 目标位置: {targetPos}, 目标旋转: {(targetRot.HasValue ? targetRot.Value.eulerAngles.ToString() : "None")}");
-        
-        // 2. 将 targetRot 传给 IK 求解器！
-        double[] fullIkResult = ikSolver.SolveIK(targetPos, targetRot);
-        if (fullIkResult == null)
+
+        int requestedGoalCount = Math.Max(1, ikGoalAttempts);
+        int plannerAttemptCount = Math.Max(1, restartAttempts);
+        List<double[]> ikCandidates = ikSolver.SolveIKCandidates(targetPos, targetRot, requestedGoalCount);
+        if (ikCandidates.Count == 0)
         {
-            Debug.LogError("❌ BIT*: IK 求解失败，已终止本次规划");
+            Debug.LogError("❌ BIT*: IK 没有返回可接受候选，已终止本次规划");
             return null;
         }
 
-        if (!IsFullQposUsable(fullIkResult))
+        Debug.Log($"🔍 BIT*: IK 返回 {ikCandidates.Count}/{requestedGoalCount} 个去重候选");
+        int goalAttemptCount = ikCandidates.Count;
+        for (int goalAttempt = 0; goalAttempt < goalAttemptCount; goalAttempt++)
         {
-            Debug.LogError("❌ BIT*: IK 返回了非法 qpos（长度不足、NaN 或 Inf），已终止本次规划");
-            return null;
-        }
-
-        Debug.Log($"IK: {string.Join(", ", fullIkResult.Select(d => d.ToString("F4")))}");
-
-        q_goal = ClampCompactState(ExtractCompactState(fullIkResult), "IK目标");
-        if (!IsCompactStateUsable(q_goal, "IK目标")) return null;
-        Debug.Log($"[BIT*诊断] q_goal compact = {FormatCompactState(q_goal)}");
-
-        // =========================================================
-        // 👇👇👇 新增：打印直线 Cost 和 连通性检查 👇👇👇
-        // =========================================================
-        double straightCost = Distance(q_start, q_goal);
-        bool canGoStraight = IsValidConnection(q_start, q_goal);
-
-        Debug.Log($"📏 [基准数据] 理论直线 Cost: {straightCost:F4}");
-        Debug.Log($"🚧 [基准数据] 直线是否无碰撞: {canGoStraight}");
-        
-        if (canGoStraight)
-        {
-            Debug.Log("🚀 居然可以直接走直线！那你应该能看到 Cost 和直线一样...");
-        }
-        else
-        {
-            Debug.Log("🧱 直线被挡住了，必须绕路！最终 Cost 一定会大于直线 Cost。");
-        }
-        // =========================================================
-
-        
-        // --- 🏆 冠军挑战赛：并行重启动 ---
-        Debug.Log($"🏁 BIT* 启动竞速模式: 尝试 {restartAttempts} 次...");
-        
-        List<double[]> bestPath = null;
-        double bestCost = double.MaxValue;
-
-        for (int i = 0; i < restartAttempts; i++)
-        {
-            // 运行一次完整的 BIT*
-            var (path, cost) = RunBITStarInternal(timeLimitPerRun);
-
-            if (path != null)
+            Debug.Log($"🔍 BIT*: 正在检查 IK 候选 {goalAttempt + 1}/{goalAttemptCount}");
+            double[] fullIkResult = ikCandidates[goalAttempt];
+            if (!IsFullQposUsable(fullIkResult))
             {
-                Debug.Log($"Attempt {i + 1}: Cost = {cost:F4}");
+                Debug.LogWarning($"⚠️ BIT*: IK 候选 {goalAttempt + 1} 无效，继续尝试其他分支");
+                continue;
+            }
+
+            Debug.Log($"IK: {string.Join(", ", fullIkResult.Select(d => d.ToString("F4")))}");
+            q_goal = ClampCompactState(ExtractCompactState(fullIkResult), $"IK目标{goalAttempt + 1}");
+            if (!IsCompactStateUsable(q_goal, $"IK目标{goalAttempt + 1}")) continue;
+            if (!IsValidConfig(q_goal))
+            {
+                Debug.LogWarning($"⚠️ BIT*: IK 候选 {goalAttempt + 1} 处于碰撞状态，已跳过");
+                continue;
+            }
+
+            Debug.Log($"[BIT*诊断] q_goal compact = {FormatCompactState(q_goal)}");
+            double straightCost = Distance(q_start, q_goal);
+            bool canGoStraight = IsValidConnection(q_start, q_goal);
+            Debug.Log($"📏 [基准数据] 理论直线 Cost: {straightCost:F4}");
+            Debug.Log($"🚧 [基准数据] 直线是否无碰撞: {canGoStraight}");
+
+            if (canGoStraight)
+            {
+                Debug.Log($"✅ BIT*: IK 候选 {goalAttempt + 1} 可直连，无需随机采样");
+                return new List<double[]> { CloneState(q_start), CloneState(q_goal) };
+            }
+
+            List<double[]> bestPath = null;
+            double bestCost = double.MaxValue;
+            Debug.Log($"🏁 BIT*: IK 候选 {goalAttempt + 1} 开始 {plannerAttemptCount} 次搜索");
+            for (int plannerAttempt = 0; plannerAttempt < plannerAttemptCount; plannerAttempt++)
+            {
+                var (path, cost) = RunBITStarInternal(timeLimitPerRun);
+                if (path == null) continue;
+
+                Debug.Log($"IK候选 {goalAttempt + 1}, 搜索 {plannerAttempt + 1}: Cost = {cost:F4}");
                 if (cost < bestCost)
                 {
                     bestCost = cost;
                     bestPath = path;
                 }
             }
+
+            if (bestPath != null)
+            {
+                var smoothedPath = ShortcutPath(bestPath);
+                Debug.Log($"🏆 IK候选 {goalAttempt + 1} 规划成功，Cost: {bestCost:F4}, 平滑后节点数: {smoothedPath.Count}");
+                return smoothedPath;
+            }
+
+            Debug.LogWarning($"⚠️ BIT*: IK 候选 {goalAttempt + 1} 未找到路径，继续尝试其他 IK 分支");
         }
 
-        if (bestPath != null)
-        {
-            Debug.Log($"🏆 最终胜出方案 Cost: {bestCost:F4}, 节点数: {bestPath.Count}");
-            
-            // 🔥 后处理：路径拉直
-            var smoothedPath = ShortcutPath(bestPath);
-            Debug.Log($"✨ 平滑后节点数: {smoothedPath.Count}");
-            
-            return smoothedPath;
-        }
-
-
-        Debug.LogError("❌ BIT* 所有尝试均失败");
+        Debug.LogError($"❌ BIT*: {goalAttemptCount} 个去重 IK 候选均未找到有效路径");
         return null;
     }
 
@@ -211,24 +213,32 @@ public class BITStarPlanner : MonoBehaviour
                 else
                 {
                     var bestEdge = edgeQueue.Pop();
+                    if (!bestEdge.isGoal &&
+                        (bestEdge.childSample == null || !samples.Contains(bestEdge.childSample)))
+                    {
+                        continue;
+                    }
+
                     // 尝试连接
                     if (bestEdge.fScore < finalCost) // 再次剪枝检查
                     {
                         // 碰撞检测 (延迟到最后一刻做)
-                        if (IsValidConfig(bestEdge.parent.q) && IsValidConnection(bestEdge.parent.q, bestEdge.childQ))
+                        if (IsValidConnection(bestEdge.parent.q, bestEdge.childQ))
                         {
                             // 连通！加入树
                             BITNode newNode = new BITNode(treeNodes.Count, bestEdge.childQ, bestEdge.gScore, bestEdge.parent);
                             treeNodes.Add(newNode);
 
-                            // 从样本列表中移除 (可选，为了性能通常标记移除，这里简化不移除)
+                            if (!bestEdge.isGoal)
+                            {
+                                samples.Remove(bestEdge.childSample);
+                            }
+
                             // 将新节点加入 Vertex 队列以扩展更多
                             double newF = newNode.gScore + Distance(newNode.q, q_goal);
                             vertexQueue.Push(new Vertex(newNode, newF));
 
-                            // 检查是否到达终点 (这里假设终点就在 samples 里或者是特定检查)
-                            double distToGoal = Distance(newNode.q, q_goal);
-                            if (distToGoal < 0.01f || bestEdge.isGoal) 
+                            if (bestEdge.isGoal)
                             {
                                 if (newNode.gScore < finalCost)
                                 {
@@ -313,7 +323,7 @@ public class BITStarPlanner : MonoBehaviour
         double distToGoal = Distance(v.node.q, q_goal);
         if (v.node.gScore + distToGoal < cMax) 
         {
-            edgeQueue.Push(new Edge(v.node, q_goal, v.node.gScore + distToGoal, v.node.gScore + distToGoal, true));
+            edgeQueue.Push(new Edge(v.node, q_goal, v.node.gScore + distToGoal, v.node.gScore + distToGoal, true, null));
         }
 
         // 2. 检查样本点 (加入 K-近邻限制 / KNN)
@@ -371,7 +381,7 @@ public class BITStarPlanner : MonoBehaviour
 
         if (estF < cMax)
         {
-            edgeQueue.Push(new Edge(v.node, sample.q, estF, estG, false));
+            edgeQueue.Push(new Edge(v.node, sample.q, estF, estG, false, sample));
         }
     }    // 采样：带笛卡尔限制 + 启发式拒绝
     private List<BITNode> SampleInformed(int n, double cMax)
@@ -420,7 +430,11 @@ public class BITStarPlanner : MonoBehaviour
             }
 
 
-            RecordSampleForDebug(q);    
+            if (recordDebugSamples && debugSamplePoints.Count < maxDebugSamplePoints)
+            {
+                RecordSampleForDebug(q);
+            }
+
             // 通过筛选
             result.Add(new BITNode(-1, q, double.MaxValue, null));
         }
@@ -556,6 +570,7 @@ public class BITStarPlanner : MonoBehaviour
     private bool IsValidConnection(double[] from, double[] to)
     {
         if (!IsCompactStateUsable(from, "连线起点") || !IsCompactStateUsable(to, "连线终点")) return false;
+        if (!IsValidConfig(from) || !IsValidConfig(to)) return false;
 
         double dist = Distance(from, to);
         if (!IsFinite(dist)) return false;
@@ -859,12 +874,16 @@ public class BITStarPlanner : MonoBehaviour
         List<double[]> path = new List<double[]>();
         while (node != null)
         {
-            path.Add(node.q);
+            path.Add(CloneState(node.q));
             node = node.parent;
         }
         path.Reverse();
-        path.Add(q_goal); // 确保终点精确
         return path;
+    }
+
+    private double[] CloneState(double[] source)
+    {
+        return source == null ? null : (double[])source.Clone();
     }
 
     // -------------------------------------------------------------------------
@@ -902,7 +921,16 @@ public class BITStarPlanner : MonoBehaviour
         public double fScore;
         public double gScore;
         public bool isGoal;
-        public Edge(BITNode p, double[] c, double f, double g, bool goal) { parent = p; childQ = c; fScore = f; gScore = g; isGoal = goal; }
+        public BITNode childSample;
+        public Edge(BITNode p, double[] c, double f, double g, bool goal, BITNode sample)
+        {
+            parent = p;
+            childQ = c;
+            fScore = f;
+            gScore = g;
+            isGoal = goal;
+            childSample = sample;
+        }
         public int CompareTo(Edge other) => fScore.CompareTo(other.fScore);
     }
 
@@ -987,7 +1015,7 @@ public class BITStarPlanner : MonoBehaviour
     // Unity 自动调用的画图函数
     void OnDrawGizmos()
     {
-        if (debugSamplePoints != null)
+        if (recordDebugSamples && debugSamplePoints != null)
         {
             Gizmos.color = new Color(0, 1, 0, 0.3f); // 半透明绿色
             foreach (var p in debugSamplePoints)
