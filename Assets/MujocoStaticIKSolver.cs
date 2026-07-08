@@ -42,6 +42,10 @@ public class MujocoStaticIKSolver : MonoBehaviour
     [Header("姿态控制")]
     [Tooltip("旋转误差的权重。0.1~0.5 比较合适。设为0则忽略姿态。")]
     public float rotWeight = 0.3f;
+    [Tooltip("完整姿态求解失败后，围绕末端观察轴尝试不同 roll 角。相机仍朝向目标，但不强制绕自身轴角度固定。")]
+    public bool enableRollFallback = true;
+    [Min(0), Tooltip("roll fallback 每侧尝试几个角度。4 会尝试 ±45/±90/±135/180 度。")]
+    public int rollFallbackSteps = 4;
 
     [Header("防扭曲策略")]
     [Tooltip("偏置权重：让机械臂倾向于保持舒适姿态 (Rest Pose)。建议设为 0.1~0.2")]
@@ -165,46 +169,60 @@ public class MujocoStaticIKSolver : MonoBehaviour
         List<IKCandidate> accepted = new List<IKCandidate>();
         IKCandidate bestObserved = null;
         bool rotationRequired = targetRot.HasValue && rotWeight >= 0.001f;
+        List<RotationAttempt> rotationAttempts = BuildRotationAttempts(targetRot);
 
         try
         {
             int attempts = Math.Max(1, maxRetries);
-            for (int phase = 0; phase < 2; phase++)
+            for (int rotIndex = 0; rotIndex < rotationAttempts.Count; rotIndex++)
             {
-                bool allowElevator = phase == 1;
-                if (allowElevator && accepted.Count > 0) break;
-                if (allowElevator && debugMode)
+                RotationAttempt rotationAttempt = rotationAttempts[rotIndex];
+                if (rotIndex > 0 && debugMode)
                 {
-                    Debug.LogWarning("[IK候选] 六轴阶段没有可接受解，开始释放升降缸参与求解");
+                    Debug.LogWarning($"[IK候选] 原姿态无可接受解，尝试绕观察轴 roll={rotationAttempt.rollDegrees:F1}°");
                 }
 
-                for (int attempt = 0; attempt < attempts; attempt++)
+                for (int phase = 0; phase < 2; phase++)
                 {
-                    RestoreState(startState);
-                    SetElevatorFromState(startQpos);
-                    if (attempt > 0) RandomizeConfiguration(attempt);
-
-                    var (converged, finalPosErr, finalRotErr) =
-                        RunDampedLeastSquares(targetPos, targetRot, nv, allowElevator);
-                    bool collisionFree = !checkCollision || !CheckCollision();
-                    if (!collisionFree) continue;
-
-                    IKCandidate candidate = CaptureCandidate(
-                        nq, attempt + phase * attempts, converged, finalPosErr, finalRotErr,
-                        rotationRequired, startQpos);
-
-                    if (bestObserved == null || CompareCandidates(candidate, bestObserved) < 0)
+                    bool allowElevator = phase == 1;
+                    if (allowElevator && accepted.Count > 0) break;
+                    if (allowElevator && debugMode)
                     {
-                        bestObserved = candidate;
+                        Debug.LogWarning("[IK候选] 六轴阶段没有可接受解，开始释放升降缸参与求解");
                     }
 
-                    if (candidate.accepted)
+                    for (int attempt = 0; attempt < attempts; attempt++)
                     {
-                        AddOrReplaceEquivalentCandidate(accepted, candidate);
-                    }
+                        RestoreState(startState);
+                        SetElevatorFromState(startQpos);
+                        if (attempt > 0) RandomizeConfiguration(attempt);
 
-                    if (!selectBestCandidate && candidate.accepted) break;
+                        var (converged, finalPosErr, finalRotErr) =
+                            RunDampedLeastSquares(targetPos, rotationAttempt.rotation, nv, allowElevator);
+                        bool collisionFree = !checkCollision || !CheckCollision();
+                        if (!collisionFree) continue;
+
+                        int globalAttempt = attempt + phase * attempts + rotIndex * attempts * 2;
+                        IKCandidate candidate = CaptureCandidate(
+                            nq, globalAttempt, converged, finalPosErr, finalRotErr,
+                            rotationRequired, startQpos, rotationAttempt.rotation,
+                            rotationAttempt.rollDegrees, rotIndex > 0);
+
+                        if (bestObserved == null || CompareCandidates(candidate, bestObserved) < 0)
+                        {
+                            bestObserved = candidate;
+                        }
+
+                        if (candidate.accepted)
+                        {
+                            AddOrReplaceEquivalentCandidate(accepted, candidate);
+                        }
+
+                        if (!selectBestCandidate && candidate.accepted) break;
+                    }
                 }
+
+                if (accepted.Count > 0) break;
             }
         }
         finally
@@ -221,8 +239,9 @@ public class MujocoStaticIKSolver : MonoBehaviour
             if (debugMode)
             {
                 Debug.Log($"[IK候选] {i + 1}/{count}, attempt={candidate.attempt}, " +
-                          $"converged={candidate.converged}, lift={GetLiftValue(candidate.qpos):F4}");
-                LogIKResultDiagnostics(candidate.qpos, targetPos, targetRot, candidate.posErrorSq,
+                          $"converged={candidate.converged}, lift={GetLiftValue(candidate.qpos):F4}, " +
+                          $"rollFallback={candidate.usedRollFallback}, roll={candidate.rollDegrees:F1}°");
+                LogIKResultDiagnostics(candidate.qpos, targetPos, candidate.targetRot, candidate.posErrorSq,
                     candidate.rotErrorSq, candidate.distFromRest, candidate.converged, candidate.attempt);
             }
         }
@@ -244,6 +263,37 @@ public class MujocoStaticIKSolver : MonoBehaviour
         return result;
     }
 
+    private List<RotationAttempt> BuildRotationAttempts(Quaternion? targetRot)
+    {
+        List<RotationAttempt> attempts = new List<RotationAttempt>();
+        attempts.Add(new RotationAttempt { rotation = targetRot, rollDegrees = 0f });
+
+        if (!targetRot.HasValue || !enableRollFallback || rollFallbackSteps <= 0) return attempts;
+
+        int steps = Mathf.Max(1, rollFallbackSteps);
+        float stepDegrees = 180f / steps;
+        for (int i = 1; i <= steps; i++)
+        {
+            float angle = stepDegrees * i;
+            attempts.Add(new RotationAttempt
+            {
+                rotation = targetRot.Value * Quaternion.AngleAxis(angle, Vector3.forward),
+                rollDegrees = angle
+            });
+
+            if (angle < 179.9f)
+            {
+                attempts.Add(new RotationAttempt
+                {
+                    rotation = targetRot.Value * Quaternion.AngleAxis(-angle, Vector3.forward),
+                    rollDegrees = -angle
+                });
+            }
+        }
+
+        return attempts;
+    }
+
     private unsafe IKCandidate CaptureCandidate(
         int nq,
         int attempt,
@@ -251,7 +301,10 @@ public class MujocoStaticIKSolver : MonoBehaviour
         float posErrorSq,
         float rotErrorSq,
         bool rotationRequired,
-        double[] startQpos)
+        double[] startQpos,
+        Quaternion? targetRot,
+        float rollDegrees,
+        bool usedRollFallback)
     {
         double[] qpos = new double[nq];
         for (int i = 0; i < nq; i++) qpos[i] = MjScene.Instance.Data->qpos[i];
@@ -281,7 +334,10 @@ public class MujocoStaticIKSolver : MonoBehaviour
             posErrorSq = posErrorSq,
             rotErrorSq = rotErrorSq,
             poseScore = poseScore,
-            distFromRest = ComputeRestDistance(qpos)
+            distFromRest = ComputeRestDistance(qpos),
+            targetRot = targetRot,
+            rollDegrees = rollDegrees,
+            usedRollFallback = usedRollFallback
         };
     }
 
@@ -875,6 +931,15 @@ public class MujocoStaticIKSolver : MonoBehaviour
         public float rotErrorSq;
         public float poseScore;
         public double distFromRest;
+        public Quaternion? targetRot;
+        public float rollDegrees;
+        public bool usedRollFallback;
+    }
+
+    private struct RotationAttempt
+    {
+        public Quaternion? rotation;
+        public float rollDegrees;
     }
 
     private class MujocoStateSnapshot

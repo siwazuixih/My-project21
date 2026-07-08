@@ -1,5 +1,71 @@
 # Worklog
 
+## 2026-07-08 - Unity + MuJoCo 飞机导管装配粗定位仿真平台论文梳理
+
+### 本次任务目标
+
+- 按用户给出的 15 个论文写作维度，系统梳理当前 Unity + MuJoCo 飞机导管装配粗定位仿真平台的真实代码、场景、模型、规划、控制和真机接口现状。
+- 本次以读取和总结为主，不修改业务代码。
+
+### 读取的关键文件
+
+- `AGENTS.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `.codex/WORKLOG.md`
+- `Packages/manifest.json`
+- `Assets/Scenes/SampleScene.unity`
+- `Assets/MissionController.cs`
+- `Assets/RobotData.cs`
+- `Assets/ChassisController.cs`
+- `Assets/ArmController.cs`
+- `Assets/MujocoStaticIKSolver.cs`
+- `Assets/BITStarPlanner.cs`
+- `Assets/ConnectCommander.cs`
+- `Assets/DobotController.cs`
+- `Assets/RobokitController.cs`
+- `Assets/RobokitProtocol.cs`
+- `Assets/LiftCylinderController.cs`
+- `Assets/RealRobotFollower.cs`
+- `Assets/SimulationPlatform/Scripts/Function/Simulation.cs`
+- `Assets/SimulationPlatform/Scripts/Manage/PathPlanManager.cs`
+- `Assets/SimulationPlatform/Scripts/Manage/PathPointManager.cs`
+- `Assets/SimulationPlatform/Scripts/Behaviour/ModelCollisionHighlighter.cs`
+- `Assets/SimulationPlatform/Scripts/Behaviour/ObserveParam.cs`
+- `Assets/SimulationPlatform/Scripts/Behaviour/TransformJointDataComponent.cs`
+
+### 修改的文件
+
+- `.codex/WORKLOG.md`
+
+### 具体做了什么改动
+
+- 追加本次项目梳理记录，说明读取范围、未修改业务代码、当前发现和后续检查点。
+
+### 为什么这样改
+
+- 项目规则要求每次阶段完成后更新工作日志，便于后续继续论文写作或代码验证时快速恢复上下文。
+
+### 当前是否完成
+
+- 代码和场景证据已完成初步梳理。
+- 已确认 `Assets/MujocoStaticIKSolver.cs` 在本次开始前已有未提交改动，本次未触碰该脚本。
+
+### 还存在什么问题
+
+- 项目中未发现原始 MuJoCo XML/MJCF 文件；只发现导入后的 `Assets/Local/MjImports/cr10_robot356/Resources/*.obj` 和场景内 MuJoCo 组件，因此 body/joint/actuator 的精确 XML 原文无法直接引用。
+- 本次未打开 Unity Editor 运行场景，也未生成实验数据；论文实验指标仍需要后续在 Editor/真机中采集。
+
+### 下次继续开发时应该从哪里开始
+
+- 若要写论文实验部分，优先在 `Assets/Scenes/SampleScene.unity` 中运行“选择接头/目标点 -> 路径规划 -> 仿真执行”，记录 Console 中 IK、BIT*、NavMesh 和执行诊断日志。
+- 如需补齐 MJCF 描述，建议找回 `cr10_robot356` 的原始 XML/MJCF 导入文件，或从 Unity 场景导出/整理 MuJoCo 组件配置表。
+
+### 需要我手动在 Unity Editor 里检查什么
+
+- 检查 `cr10_robot356` 上 `MissionController` 的 `refs`、`chassis`、`arm`、`mission.targets`、`connect.Commander` 绑定是否与当前论文描述一致。
+- 检查 `MujocoStaticIKSolver.actuators` 的 7 个执行器顺序是否为 6 个机械臂关节加 1 个升降缸，以及 `liftActuatorIndex=6` 是否仍正确。
+- 检查真实导管/接头模型是否通过运行时 GLB/FBX 导入，接头对象是否带 `ModelCollisionHighlighter` 和 `TransformJointDataComponent`。
+
 ## 2026-06-25 - 21.2 两点路径规划闪退防护
 
 ### 本次任务目标
