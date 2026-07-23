@@ -397,6 +397,15 @@ public class SceneEdit : ModelImport
         ModelManager.Save();
         MessageManage.ShowMessage("保存成功", 1);
         Debug.Log(isNewScene ? "新Scene已保存" : "Scene已更新并保存");
+
+        if (isNewScene)
+        {
+            OperationLogTool.RecordLog(OperationType.模型管理, $"添加场景模型 - 名称：{Scene.Name}");
+        }
+        else
+        {
+            OperationLogTool.RecordLog(OperationType.模型管理, $"编辑场景模型 - 名称：{Scene.Name}");
+        }
     }
 
     /// <summary>

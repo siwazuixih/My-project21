@@ -35,6 +35,11 @@ public class LiftCylinderController : MonoBehaviour
     private ModbusIpMaster modbusMaster; 
     private Coroutine monitorCoroutine;
 
+    private void Awake()
+    {
+        RefreshDisconnectedUI();
+    }
+
     public void Connect()
     {
         try {
@@ -42,8 +47,10 @@ public class LiftCylinderController : MonoBehaviour
             tcpClient.Connect(ipAddress, port); 
             modbusMaster = ModbusIpMaster.CreateIp(tcpClient); 
             Debug.Log("<color=green>[升降缸] NModbus4 TCP 连接成功！</color>");
+            RefreshUI();
             StartMonitor();
         } catch (Exception e) {
+            RefreshDisconnectedUI();
             Debug.LogError($"[升降缸] 连接失败: {e.Message}");
         }
     }
@@ -53,6 +60,7 @@ public class LiftCylinderController : MonoBehaviour
         StopMonitor();
         tcpClient?.Close();
         modbusMaster?.Dispose();
+        RefreshDisconnectedUI();
         Debug.Log("<color=yellow>[升降缸] 连接已断开。</color>");
     }
 
@@ -243,6 +251,7 @@ public class LiftCylinderController : MonoBehaviour
             yield return wait;
         }
         monitorCoroutine = null;
+        RefreshDisconnectedUI();
     }
 
     private void UpdatePositionState(float heightMm)
@@ -254,11 +263,21 @@ public class LiftCylinderController : MonoBehaviour
     private void RefreshUI()
     {
         if (heightTextDisplay != null)
-            heightTextDisplay.text = $"Lift: {currentHeightMm:F1} mm";
+            heightTextDisplay.text = $"升降缸高度：{currentHeightMm:F1} mm";
         if (velocityTextDisplay != null)
-            velocityTextDisplay.text = $"Lift Speed: {currentVelocityMmPerSec:F1} mm/s";
+            velocityTextDisplay.text = $"升降缸速度：{currentVelocityMmPerSec:F1} mm/s";
         if (torqueTextDisplay != null)
-            torqueTextDisplay.text = $"Lift Torque: {actualTorque:F2}";
+            torqueTextDisplay.text = $"升降缸转矩：{actualTorque:F2}";
+    }
+
+    private void RefreshDisconnectedUI()
+    {
+        if (heightTextDisplay != null)
+            heightTextDisplay.text = "升降缸连接：未连接";
+        if (velocityTextDisplay != null)
+            velocityTextDisplay.text = "升降缸高度：-- mm";
+        if (torqueTextDisplay != null)
+            torqueTextDisplay.text = "速度：-- mm/s  转矩：--";
     }
 
     void OnDestroy()

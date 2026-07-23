@@ -96,6 +96,7 @@ public class Login : MonoBehaviour
             // 登录成功，跳转到指定场景
             //SceneManager.LoadScene(targetSceneIndex);
             this.enabled = false;
+            OperationLogTool.RecordLog(OperationType.系统操作, "登录");
             SceneManager.LoadScene(TargetSceneName);
         }
         else

@@ -12,17 +12,12 @@ using Unity.AI.Navigation;
 
 public class Simulation : ModelImport
 {
-    public Dropdown JointSelectDropdown;
-    public JointParamInfo JointParam;
-    public Button CloseDropdownButton;
-    public Button SelectJointButton;
-    private List<JointModel> jointList = new List<JointModel>();
+    public JointReplace JointReplace;
 
     public Button Back;
     public ModelMouseController ModelMouseController;
     public Button PathPlanButton;
     public Button ResetButton;
-    public Button ReplaceButton;
     public Button ColliderGenButton;
     public MissionController MissionController;
     public EditorStyleVector3Control RobotXYZ;
@@ -49,9 +44,16 @@ public class Simulation : ModelImport
     public StatusPanel robotConnection;
     public StatusPanel boltConnection;
 
+    public TMP_InputField RobotIpInput;
+    public TMP_InputField ChassisIpInput;
+    public Slider SpeedSlider;
+    public Toggle StepRunToggle;
+    public Toggle SyncToggle;
+
     public GameObject Notice;
     public DobotController Dobot;
     public RobokitController Robokit;
+    public RealRobotFollower RealRobotFollower;
 
     private bool StepRun = true;
 
@@ -59,6 +61,9 @@ public class Simulation : ModelImport
     private bool m_isSimulationMode = true;
 
     private int runIndex = 0;
+
+    private Vector3? loadedSceneXYZ;
+    private Vector3? loadedSceneRotation;
 
     public void SetStepRun(bool stepRun)
     {
@@ -119,28 +124,9 @@ public class Simulation : ModelImport
         {
             ResetButton.onClick.AddListener(OnResetClicked);
         }
-        if (ReplaceButton != null)
-        {
-            ReplaceButton.onClick.AddListener(OnReplaceClicked);
-        }
-        if (SelectJointButton != null)
-        {
-            SelectJointButton.onClick.AddListener(PerformReplace);
-            SelectJointButton.gameObject.SetActive(false);
-        }
         if (ColliderGenButton != null)
         {
             ColliderGenButton.onClick.AddListener(OnColliderGenClicked);
-        }
-        if (JointSelectDropdown != null)
-        {
-            JointSelectDropdown.onValueChanged.AddListener(OnJointSelectChanged);
-            JointSelectDropdown.gameObject.SetActive(false);
-        }
-        if (CloseDropdownButton != null)
-        {
-            CloseDropdownButton.onClick.AddListener(OnCloseDropdownClicked);
-            CloseDropdownButton.gameObject.SetActive(false);
         }
         if (RobotXYZ != null)
         {
@@ -165,6 +151,8 @@ public class Simulation : ModelImport
         {
             LoadModelFromProject(RunManager.Project.Scene.Id);
         }
+        // 加载项目参数
+        LoadProjectParams();
         // 订阅 DobotController 事件
         SubscribeToDobotEvents();
         // 订阅 RobokitController 事件
@@ -367,11 +355,34 @@ public class Simulation : ModelImport
         if (ModelMouseController != null)
         {
             //ModelMouseController.Move(-1, 0, -2);
-            ModelMouseController.Move(0, 0, 0);
+            //ModelMouseController.Move(0, 0, 0);
+            //ModelMouseController.Move(RobotXYZ.Value.x, RobotXYZ.Value.y, RobotXYZ.Value.z);
+            OnRobotXYZValueChanged(RobotXYZ.Value);
+            OnRobotRotationValueChanged(RobotRotation.Value);
+        }
+
+        // 应用加载的场景位置和旋转
+        if (loadedSceneXYZ.HasValue)
+        {
+            model.transform.position = loadedSceneXYZ.Value;
+        }
+        if (loadedSceneRotation.HasValue)
+        {
+            model.transform.rotation = Quaternion.Euler(loadedSceneRotation.Value);
         }
 
         // 加载并应用碰撞体
         LoadAndApplyColliders(model);
+
+        // 设置 JointReplace 的根游戏体
+        if (JointReplace != null)
+        {
+            JointReplace.RootGameObject = model;
+            JointReplace.Simulation = this;
+            Debug.Log($"已设置 JointReplace 的根游戏体: {model.name}");
+
+            LoadJointReplaceRecords();
+        }
 
         await Task.Yield();
         RebuildRuntimeNavMesh();
@@ -764,6 +775,7 @@ public class Simulation : ModelImport
     {
         if (RunManager.RunStatus == RunStatus.IDLE || RunManager.RunStatus == RunStatus.INTERRUPT)
         {
+            SaveProjectParams();
             ModelCollisionHighlighter.SeletectedObjects.Clear();
             if (ColliderGen != null)
             {
@@ -772,7 +784,316 @@ public class Simulation : ModelImport
             }
             MissionController.ResetMission();
             runIndex = 0;
-            SceneManager.LoadScene("Main");
+            SceneManager.LoadScene("MainScene");
+        }
+    }
+
+    private const int MaxProjectRecords = 50;
+
+    private void SaveProjectParams()
+    {
+        if (RunManager.Project == null)
+        {
+            Debug.LogWarning("项目为空，无法保存参数");
+            return;
+        }
+
+        ProjectRecord record = new ProjectRecord();
+
+        record.Replaces = SaveJointReplaceRecordsToRecord();
+        record.SimulationParam = SaveSimulationParamsToRecord();
+        record.RunParam = SaveRunParamsToRecord();
+
+        if (RunManager.Project.ProjectRecords == null)
+        {
+            RunManager.Project.ProjectRecords = new System.Collections.Generic.List<ProjectRecord>();
+        }
+
+        RunManager.Project.ProjectRecords.Add(record);
+        TrimProjectRecords();
+
+        ProjectManager.Save();
+        Debug.Log($"项目参数已保存到 XML，创建记录 ID: {record.Id}");
+    }
+
+    private void TrimProjectRecords()
+    {
+        if (RunManager.Project.ProjectRecords == null)
+        {
+            return;
+        }
+
+        while (RunManager.Project.ProjectRecords.Count > MaxProjectRecords)
+        {
+            RunManager.Project.ProjectRecords.RemoveAt(0);
+        }
+    }
+
+    private List<JointReplaceRecord> SaveJointReplaceRecordsToRecord()
+    {
+        List<JointReplaceRecord> replaces = new List<JointReplaceRecord>();
+
+        if (JointReplace != null && JointReplace.ReplaceRecords != null)
+        {
+            replaces.AddRange(JointReplace.ReplaceRecords);
+            Debug.Log($"已保存 {JointReplace.ReplaceRecords.Count} 条接头替换记录到项目记录");
+        }
+        else
+        {
+            Debug.Log("JointReplace 或 ReplaceRecords 为空，未保存替换记录");
+        }
+
+        return replaces;
+    }
+
+    private SimulationParam SaveSimulationParamsToRecord()
+    {
+        SimulationParam param = new SimulationParam();
+
+        if (RobotXYZ != null)
+        {
+            param.RobotXYZ = new Vector3D(RobotXYZ.Value);
+        }
+
+        if (RobotRotation != null)
+        {
+            param.RobotRotation = new Vector3D(RobotRotation.Value);
+        }
+
+        if (SceneXYZ != null)
+        {
+            param.SceneXYZ = new Vector3D(SceneXYZ.Value);
+        }
+
+        if (SceneRotation != null)
+        {
+            param.SceneRotation = new Vector3D(SceneRotation.Value);
+        }
+
+        if (ObserveParam.Instance != null)
+        {
+            param.BaseSpeedValue = ObserveParam.Instance.BaseSpeedValue ?? 0f;
+            param.ArmSpeedValue = ObserveParam.Instance.ArmSpeedValue ?? 0f;
+            param.ObservationDistanceValue = ObserveParam.Instance.ObservationDistanceValue ?? 0f;
+
+            if (ObserveParam.Instance.XYZPanel != null)
+            {
+                param.XYZPanelValue = new Vector3D(ObserveParam.Instance.XYZPanel.Value);
+            }
+
+            param.ShowTarget = ObserveParam.Instance.ShowTarget;
+        }
+
+        return param;
+    }
+
+    private RunParam SaveRunParamsToRecord()
+    {
+        RunParam param = new RunParam();
+
+        if (Dobot != null)
+        {
+            param.RobotIp = Dobot.robotIP;
+            param.Speed = Dobot.speed;
+        }
+
+        if (Robokit != null)
+        {
+            param.ChassisIp = Robokit.robotIP;
+        }
+
+        param.IsSingle = StepRun;
+        if (RealRobotFollower != null)
+        {
+            param.IsSync = RealRobotFollower.followEnabled;
+        }
+
+        return param;
+    }
+
+    private void LoadProjectParams()
+    {
+        if (RunManager.Project == null)
+        {
+            Debug.LogWarning("项目为空，无法加载参数");
+            return;
+        }
+
+        LoadFromLastProjectRecord();
+
+        LoadSimulationParams();
+        LoadRunParams();
+
+        Debug.Log("项目参数已从 XML 加载");
+    }
+
+    private void LoadFromLastProjectRecord()
+    {
+        if (RunManager.Project.ProjectRecords == null || RunManager.Project.ProjectRecords.Count == 0)
+        {
+            Debug.Log("没有项目记录，使用项目默认参数");
+            return;
+        }
+
+        ProjectRecord lastRecord = RunManager.Project.ProjectRecords[RunManager.Project.ProjectRecords.Count - 1];
+        Debug.Log($"加载最后一条项目记录，ID: {lastRecord.Id}，创建时间: {lastRecord.CreateTime}");
+
+        if (lastRecord.Replaces != null && lastRecord.Replaces.Count > 0)
+        {
+            if (RunManager.Project.Replaces == null)
+            {
+                RunManager.Project.Replaces = new System.Collections.Generic.List<JointReplaceRecord>();
+            }
+            RunManager.Project.Replaces.Clear();
+            //RunManager.Project.Replaces.AddRange(lastRecord.Replaces);
+            Debug.Log($"已加载 {lastRecord.Replaces.Count} 条替换记录");
+        }
+
+        if (lastRecord.SimulationParam != null)
+        {
+            RunManager.Project.SimulationParam = lastRecord.SimulationParam;
+            Debug.Log("已加载仿真参数");
+        }
+
+        if (lastRecord.RunParam != null)
+        {
+            RunManager.Project.RunParam = lastRecord.RunParam;
+            Debug.Log("已加载运行参数");
+        }
+    }
+
+    public void LoadJointReplaceRecords()
+    {
+        if (JointReplace == null)
+        {
+            Debug.LogWarning("JointReplace 未设置，无法加载替换记录");
+            return;
+        }
+
+        if (RunManager.Project.Replaces == null || RunManager.Project.Replaces.Count == 0)
+        {
+            Debug.Log("没有替换记录需要加载");
+            return;
+        }
+
+        if (JointReplace.ReplaceRecords == null)
+        {
+            JointReplace.ReplaceRecords = new System.Collections.Generic.List<JointReplaceRecord>();
+        }
+
+        JointReplace.ReplaceRecords.Clear();
+        JointReplace.ReplaceRecords.AddRange(RunManager.Project.Replaces);
+        Debug.Log($"已加载 {JointReplace.ReplaceRecords.Count} 条替换记录到 JointReplace");
+    }
+
+    private void LoadSimulationParams()
+    {
+        var param = RunManager.Project.SimulationParam;
+        if (param == null)
+        {
+            return;
+        }
+
+        if (RobotXYZ != null && param.RobotXYZ != null)
+        {
+            RobotXYZ.SetValue(param.RobotXYZ.GetVector3(), false);
+        }
+
+        if (RobotRotation != null && param.RobotRotation != null)
+        {
+            RobotRotation.SetValue(param.RobotRotation.GetVector3(), false);
+        }
+
+        if (SceneXYZ != null && param.SceneXYZ != null)
+        {
+            Vector3 scenePos = param.SceneXYZ.GetVector3();
+            SceneXYZ.SetValue(scenePos, false);
+            loadedSceneXYZ = scenePos;
+        }
+
+        if (SceneRotation != null && param.SceneRotation != null)
+        {
+            Vector3 sceneRot = param.SceneRotation.GetVector3();
+            SceneRotation.SetValue(sceneRot, false);
+            loadedSceneRotation = sceneRot;
+        }
+
+        if (ObserveParam.Instance != null)
+        {
+            if (ObserveParam.Instance.BaseSpeedInput != null)
+            {
+                ObserveParam.Instance.BaseSpeedInput.text = param.BaseSpeedValue.ToString();
+            }
+
+            if (ObserveParam.Instance.ArmSpeedInput != null)
+            {
+                ObserveParam.Instance.ArmSpeedInput.text = param.ArmSpeedValue.ToString();
+            }
+
+            if (ObserveParam.Instance.ObservationDistance != null)
+            {
+                ObserveParam.Instance.ObservationDistance.text = param.ObservationDistanceValue.ToString();
+            }
+
+            if (ObserveParam.Instance.XYZPanel != null && param.XYZPanelValue != null)
+            {
+                ObserveParam.Instance.XYZPanel.SetValue(param.XYZPanelValue.GetVector3(), false);
+            }
+
+            if (ObserveParam.Instance.ToggleShowTarget != null)
+            {
+                ObserveParam.Instance.ToggleShowTarget.isOn = param.ShowTarget;
+            }
+        }
+    }
+
+    private void LoadRunParams()
+    {
+        var param = RunManager.Project.RunParam;
+        if (param == null)
+        {
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(param.RobotIp)) 
+        {
+            if (Dobot != null)
+            {
+                Dobot.robotIP = param.RobotIp;
+                Dobot.speed = param.Speed;
+                SpeedSlider.value = param.Speed;
+            }
+            if (RobotIpInput != null)
+            {
+                RobotIpInput.text = param.RobotIp;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(param.ChassisIp)) {
+            if (Robokit != null)
+            {
+                Robokit.robotIP = param.ChassisIp;
+            }
+            if (ChassisIpInput != null)
+            {
+                ChassisIpInput.text = param.ChassisIp;
+            }
+
+        }
+
+        StepRun = param.IsSingle;
+        if (StepRunToggle != null)
+        {
+            StepRunToggle.isOn = param.IsSingle;
+        }
+
+        if (RealRobotFollower != null)
+        {
+            RealRobotFollower.followEnabled = param.IsSync;
+        }
+        if (SyncToggle != null)
+        {
+            SyncToggle.isOn = param.IsSync;
         }
     }
 
@@ -797,7 +1118,7 @@ public class Simulation : ModelImport
             PathPlanManager.InitAct(currentModel);
             PathPlanManager.MoveTo(null);
         }//*/
-        JointParam.gameObject.SetActive(false);
+        JointReplace?.HidePanel();
         Debug.Log("开始仿真前重新构建 NavMesh...");
         if (!RebuildRuntimeNavMesh())
         {
@@ -835,160 +1156,6 @@ public class Simulation : ModelImport
         else
         {
             Debug.Log("GameObjectTreePanel、currentModel或ColliderGen未设置");
-        }
-    }
-
-    private void OnReplaceClicked()
-    {
-        if (ModelCollisionHighlighter.selectedObject == null)
-        {
-            Debug.Log("没有高亮的物体可以替换");
-            return;
-        }
-
-        if (JointSelectDropdown == null)
-        {
-            Debug.LogError("JointSelectDropdown未赋值");
-            return;
-        }
-
-        PopulateJointDropdown();
-
-        JointSelectDropdown.gameObject.SetActive(true);
-        if (CloseDropdownButton != null)
-        {
-            CloseDropdownButton.gameObject.SetActive(true);
-        }
-        if (SelectJointButton != null)
-        {
-            SelectJointButton.gameObject.SetActive(true);
-        }
-        Debug.Log("已弹出接头选择下拉框");
-    }
-
-    private void PerformReplace()
-    {
-        if (ModelCollisionHighlighter.selectedObject == null)
-        {
-            Debug.Log("没有高亮的物体可以替换");
-            return;
-        }
-
-        if (JointSelectDropdown.value < 0 || JointSelectDropdown.value >= jointList.Count)
-        {
-            Debug.Log("请先从下拉框中选择一个接头模型");
-            return;
-        }
-
-        JointModel selectedJoint = jointList[JointSelectDropdown.value];
-        if (selectedJoint.Glb == null || string.IsNullOrEmpty(selectedJoint.Glb.FilePath))
-        {
-            Debug.Log("选中的接头模型没有关联的GLB文件");
-            return;
-        }
-
-        Transform highlightedTransform = ModelCollisionHighlighter.selectedObject.transform;
-        Vector3 position = highlightedTransform.localPosition;
-        Quaternion rotation = highlightedTransform.localRotation;
-        Vector3 scale = highlightedTransform.localScale;
-        Transform parent = highlightedTransform.parent;
-        string oldObjectName = highlightedTransform.gameObject.name;
-
-        string executableDir = PathTool.GetExecutableDirPath();
-        string fullModelPath = Path.Combine(executableDir, selectedJoint.Glb.FilePath);
-
-        if (File.Exists(fullModelPath))
-        {
-            GameObject oldObject = ModelCollisionHighlighter.selectedObject.gameObject;           
-            
-            StartCoroutine(InstantiateReplacedModel(fullModelPath, position, rotation, scale, parent, oldObject, selectedJoint, JointParam, MissionController));
-            Debug.Log($"正在替换物体 {oldObjectName} 为 {selectedJoint.Name}");
-        }
-        else
-        {
-            Debug.LogError($"模型文件不存在: {fullModelPath}");
-        }
-
-        JointSelectDropdown.gameObject.SetActive(false);
-        if (CloseDropdownButton != null)
-        {
-            CloseDropdownButton.gameObject.SetActive(false);
-        }
-        if (SelectJointButton != null)
-        {
-            SelectJointButton.gameObject.SetActive(false);
-        }
-        // 隐藏JointParam
-        if (JointParam != null)
-        {
-            JointParam.gameObject.SetActive(false);
-        }
-    }
-
-    private void OnCloseDropdownClicked()
-    {
-        JointSelectDropdown.gameObject.SetActive(false);
-        if (CloseDropdownButton != null)
-        {
-            CloseDropdownButton.gameObject.SetActive(false);
-        }
-        if (SelectJointButton != null)
-        {
-            SelectJointButton.gameObject.SetActive(false);
-        }
-        // 隐藏JointParam
-        if (JointParam != null)
-        {
-            JointParam.gameObject.SetActive(false);
-        }
-        Debug.Log("已关闭接头选择下拉框");
-    }
-
-    private void PopulateJointDropdown()
-    {
-        if (JointSelectDropdown == null)
-        {
-            Debug.LogWarning("JointSelectDropdown未赋值");
-            return;
-        }
-
-        JointSelectDropdown.options.Clear();
-        jointList.Clear();
-
-        if (ModelManager.XmlModel == null || ModelManager.XmlModel.Joints == null || ModelManager.XmlModel.Joints.Count == 0)
-        {
-            Debug.LogWarning("没有可用的接头模型");
-            return;
-        }
-
-        foreach (var joint in ModelManager.XmlModel.Joints)
-        {
-            if (!string.IsNullOrEmpty(joint.Name) && joint.Glb != null && !string.IsNullOrEmpty(joint.Glb.FilePath))
-            {
-                Dropdown.OptionData option = new Dropdown.OptionData();
-                option.text = joint.Name;
-                JointSelectDropdown.options.Add(option);
-                jointList.Add(joint);
-            }
-        }
-
-        JointSelectDropdown.value = -1;
-        Debug.Log("接头下拉菜单填充完成，共" + jointList.Count + "个接头");
-    }
-
-    private void OnJointSelectChanged(int value)
-    {
-        if (value >= 0 && value < jointList.Count)
-        {
-            JointModel selectedJoint = jointList[value];
-            Debug.Log("选择了接头: " + selectedJoint.Name);
-            
-            // 显示JointParam并设置接头信息
-            if (JointParam != null)
-            {
-                JointParam.gameObject.SetActive(true);
-                JointParam.SetJoint(selectedJoint);
-            }
         }
     }
 

@@ -424,7 +424,7 @@ public class ModelImport : MonoBehaviour
     /// <summary>
     /// 实例化替换后的模型
     /// </summary>
-    protected IEnumerator InstantiateReplacedModel(string filePath, Vector3 position, Quaternion rotation, Vector3 scale, Transform parent, GameObject oldObject, JointModel jointModel = null, JointParamInfo jointParam = null, MissionController missionController = null)
+    internal IEnumerator InstantiateReplacedModel(string filePath, Vector3 position, Quaternion rotation, Vector3 scale, Transform parent, GameObject oldObject, JointModel jointModel = null, JointParamInfo jointParam = null, MissionController missionController = null)
     {
         var gltf = new GLTFast.GltfImport();
 

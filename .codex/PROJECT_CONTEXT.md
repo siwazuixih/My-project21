@@ -5,6 +5,8 @@
 - Unity + C# 项目，主要包含仿真平台、路径点选择、NavMesh 底盘导航、机械臂 IK/BIT* 规划、MuJoCo 仿真，以及 Dobot/底盘/升降缸等真实设备联动代码。
 - 主要运行场景包括 `Assets/SimulationPlatform/Scenes/RunScene16.unity`、`RunScene21.unity`、`RunScene.unity`、`Assets/Scenes/SampleScene.unity`。
 - 项目已有大量未提交修改，修改时应只碰当前任务相关文件，避免回退用户已有工作。
+- GitHub 远程仓库为 `https://github.com/siwazuixih/My-project21.git`；发布版本继续使用 `release/software-v1.0` 分支，并用 `v1.2`、`v1.3`、`v1.4` 等标签标记具体版本。
+- `My project21.5` 已恢复该 Git 历史，计划在同一发布分支提交 `SoftWare1.5` 并创建 `v1.5` 标签。
 
 ## 关键脚本
 
@@ -34,6 +36,21 @@
 
 - Unity 与 MuJoCo 坐标换算常见写法：MuJoCo `(x, y, z)` 对应 Unity `(x, z, y)`。
 - 对真实设备相关逻辑保持保守，不要自动下发危险动作；优先先稳定仿真路径规划。
+- Player 打包使用不含 Unity Editor 程序集的独立编译配置；运行时脚本不可无条件引用 `UnityEditor` 或 `UnityEditorInternal`。2026-07-23 已清理 ZCalendar 两处未使用的 Editor-only 引用。
+
+## 正式运行状态界面
+
+- Build Settings 当前启用的正式运行场景是 `Assets/SimulationPlatform/Scenes/RunScene.unity`。
+- 右侧机械臂模式和六轴角度由 `Assets/DobotController.cs` 动态刷新。
+- 右侧升降缸高度、速度、转矩由 `Assets/LiftCylinderController.cs` 动态刷新；未连接时使用现有三个文本框显示中文连接和参数占位。
+- 实物跟随状态由 `Assets/RealRobotFollower.cs` 动态刷新。
+- 2026-07-23 起，这些面向正式运行用户的动态状态统一显示中文；物理单位仍保留 `mm`、`mm/s` 和 `°`。
+- 左侧调试日志来自 `Assets/Canvas.prefab/ConsoleBackground` 上的 `Assets/RuntimeConsole.cs`。
+- 2026-07-23 起，`RuntimeConsole` 会在运行时创建“收起日志/展开日志”按钮；收起只隐藏 UI，日志采集和缓存继续运行。
+- `RunScene/SimulationPlatform/Canvas/Panel` 下有场景原生 UI 对象 `RuntimeConsoleToggleButton`，位于底部公共蓝色工具栏，可在场景中用 Rect Tool 直接拖动并保存。
+- `RuntimeConsole` 会优先跨 Canvas 查找这个活动按钮并绑定点击事件；其他没有该场景按钮的场景仍使用运行时创建逻辑作为兼容兜底。
+- `Assets/Canvas.prefab` 内原按钮已改名为 `RuntimeConsoleToggleButtonLegacy` 并停用，保留结构但不再参与正式运行显示。
+- `RuntimeConsole.startCollapsed` 和 `Canvas.prefab` 的对应序列化值默认开启；进入正式运行时日志窗口默认收起，但日志监听和缓存继续工作。
 
 ## NavMesh 运行时烘焙
 

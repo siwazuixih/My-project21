@@ -16,7 +16,7 @@ public class Menu : MonoBehaviour
     private GameObject ProjectManagePanel;
     private GameObject ModelManagePanel;
     private GameObject PrivilegeManagePanel;
-    
+
     // Start is called before the first frame update
     void Start()
     {
@@ -82,39 +82,42 @@ public class Menu : MonoBehaviour
         if (ProjectManagePanel != null && ProjectMenu.activeSelf)
         {
             ProjectManagePanel.SetActive(true);
+            ProjectMenu.GetComponent<PrivilegeControl>()?.SetChose(true);
         } 
         else if (ModelManagePanel != null && ModelMenu.activeSelf)
         {
             ModelManagePanel.SetActive(true);
+            ModelMenu.GetComponent<PrivilegeControl>()?.SetChose(true); 
         } 
         else if (PrivilegeManagePanel != null && PrivilegeMenu.activeSelf)
         {
             PrivilegeManagePanel.SetActive(true);
+            PrivilegeMenu.GetComponent<PrivilegeControl>()?.SetChose(true); 
         }
     }
     
     private void ShowProjectPanel()
     {
         // 显示ProjectManage面板，隐藏其他面板
-        if (ProjectManagePanel != null) ProjectManagePanel.SetActive(true);
-        if (ModelManagePanel != null) ModelManagePanel.SetActive(false);
-        if (PrivilegeManagePanel != null) PrivilegeManagePanel.SetActive(false);
+        if (ProjectManagePanel != null) {ProjectManagePanel.SetActive(true);ProjectMenu.GetComponent<PrivilegeControl>()?.SetChose(true);}
+        if (ModelManagePanel != null) {ModelManagePanel.SetActive(false);ModelMenu.GetComponent<PrivilegeControl>()?.SetChose(false);}
+        if (PrivilegeManagePanel != null) {PrivilegeManagePanel.SetActive(false);PrivilegeMenu.GetComponent<PrivilegeControl>()?.SetChose(false);}
     }
     
     private void ShowModelPanel()
     {
         // 显示ModelManage面板，隐藏其他面板
-        if (ProjectManagePanel != null) ProjectManagePanel.SetActive(false);
-        if (ModelManagePanel != null) ModelManagePanel.SetActive(true);
-        if (PrivilegeManagePanel != null) PrivilegeManagePanel.SetActive(false);
+        if (ProjectManagePanel != null) {ProjectManagePanel.SetActive(false);ProjectMenu.GetComponent<PrivilegeControl>()?.SetChose(false);}
+        if (ModelManagePanel != null) {ModelManagePanel.SetActive(true);ModelMenu.GetComponent<PrivilegeControl>()?.SetChose(true);}
+        if (PrivilegeManagePanel != null) {PrivilegeManagePanel.SetActive(false);PrivilegeMenu.GetComponent<PrivilegeControl>()?.SetChose(false);}
     }
     
     private void ShowPrivilegePanel()
     {
         // 显示PrivilegeManage面板，隐藏其他面板
-        if (ProjectManagePanel != null) ProjectManagePanel.SetActive(false);
-        if (ModelManagePanel != null) ModelManagePanel.SetActive(false);
-        if (PrivilegeManagePanel != null) PrivilegeManagePanel.SetActive(true);
+        if (ProjectManagePanel != null) {ProjectManagePanel.SetActive(false);ProjectMenu.GetComponent<PrivilegeControl>()?.SetChose(false);}
+        if (ModelManagePanel != null) {ModelManagePanel.SetActive(false);ModelMenu.GetComponent<PrivilegeControl>()?.SetChose(false);}
+        if (PrivilegeManagePanel != null) {PrivilegeManagePanel.SetActive(true);PrivilegeMenu.GetComponent<PrivilegeControl>()?.SetChose(true);}
     }
 
     // Update is called once per frame

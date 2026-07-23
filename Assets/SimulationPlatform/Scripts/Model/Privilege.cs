@@ -45,6 +45,9 @@ public enum Privilege
 
     [Privilege("80EDC760-D0AA-49BE-884C-E80C21C12AE7", "仿真记录", "仿真记录", true)]
     Module_Record,
+
+    [Privilege("74984134-979E-4C0F-B14E-F27DDA965B5D", "真机运行", "真机运行", true)]
+    Module_RealRun,
     #endregion
     #endregion
 }

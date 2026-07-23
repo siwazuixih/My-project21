@@ -14,4 +14,7 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/SimulationPlatform/Scenes/RunScene.unity
     guid: b7798e4e0c571a3439c61541f18bbf40
+  - enabled: 1
+    path: Assets/SimulationPlatform/Scenes/MainScene.unity
+    guid: 0e5480cb9120c93429efe2b16f4b71c8
   m_configObjects: {}

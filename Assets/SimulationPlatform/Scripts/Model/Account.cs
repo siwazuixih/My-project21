@@ -19,6 +19,12 @@ public class Account
     [XmlAttribute("Department")]
     public string Department { get; set; }
 
+    [XmlAttribute("Valid")]
+    public bool Valid { get; set; } = true;
+
+    [XmlAttribute("LoginTime")]
+    public string LoginTime { get; set; }
+
     [XmlElement("Privilege")]
     public string Privileges
     {
@@ -44,6 +50,7 @@ public class Account
         }
     }
 
+    [XmlIgnore]
     public List<Privilege> PrivilegeList { get; set; } = new List<Privilege>();
     public Account() { }
 }

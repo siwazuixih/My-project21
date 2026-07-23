@@ -9,7 +9,7 @@ public class Header : MonoBehaviour
     void Start()
     {
         // 查找子GameObject的AccountTxt
-        Transform accountTxtTransform = transform.Find("Container/Image/AccountTxt");
+        Transform accountTxtTransform = transform.Find("Container/AccountTxt");
         if (accountTxtTransform != null)
         {
             Text accountTxt = accountTxtTransform.GetComponent<Text>();

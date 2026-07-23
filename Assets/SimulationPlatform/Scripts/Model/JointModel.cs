@@ -25,6 +25,9 @@ public class JointModel
     [XmlElement("Glb")]
     public GlbModel Glb { get; set; }
 
+    [XmlElement("Time")]
+    public String Time { get; set; }
+
     [XmlElement("Param")]
     public ModelParam Param { get; set; } = new ModelParam();
 

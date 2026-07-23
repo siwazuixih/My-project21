@@ -1,4 +1,4 @@
-﻿using Assets.SimulationPlatform.Scripts.Model;
+using Assets.SimulationPlatform.Scripts.Model;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -25,5 +25,15 @@ public class Project
     public Scene Scene { get; set; }
     [XmlArray("Replaces")]
     [XmlArrayItem("Replace")]
-    public List<JointReplace> Replaces { get; set; } = new List<JointReplace>();
+    public List<JointReplaceRecord> Replaces { get; set; } = new List<JointReplaceRecord>();
+
+    [XmlElement]
+    public SimulationParam SimulationParam { get; set; }
+
+    [XmlElement]
+    public RunParam RunParam { get; set; }
+
+    [XmlArray("ProjectRecords")]
+    [XmlArrayItem("ProjectRecord")]
+    public List<ProjectRecord> ProjectRecords { get; set; } = new List<ProjectRecord>();
 }

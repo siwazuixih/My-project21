@@ -150,6 +150,8 @@ public class SceneList : MonoBehaviour
                 // 刷新场景列表
                 RefreshSceneList();
                 Debug.Log($"场景 {scene.Name} 删除成功");
+
+                OperationLogTool.RecordLog(OperationType.模型管理, $"删除场景模型 - 名称：{scene.Name}");
             }
             else
             {

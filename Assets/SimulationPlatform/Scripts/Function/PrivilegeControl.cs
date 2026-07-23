@@ -5,6 +5,7 @@ using UnityEngine;
 public class PrivilegeControl : MonoBehaviour
 {
     public Privilege requiredPrivilege;
+    public List<GameObject> chosed;
     
     // Start is called before the first frame update
     void Start()
@@ -12,8 +13,13 @@ public class PrivilegeControl : MonoBehaviour
         CheckPrivilege();
     }
     
-    private void CheckPrivilege()
+    public void CheckPrivilege()
     {
+        if (requiredPrivilege == null)
+        {
+            gameObject.SetActive(true);
+            return;
+        }
         // 1. 检查当前账号是否拥有该权限
         bool hasPrivilege = AccountManager.HasPrivilege(requiredPrivilege);
         
@@ -27,6 +33,16 @@ public class PrivilegeControl : MonoBehaviour
     // Update is called once per frame
     void Update()
     {
-        
+    }
+
+    public void SetChose(bool chose)
+    {
+        if (chosed != null)
+        {
+            foreach (var item in chosed)
+            {
+                item?.SetActive(chose);
+            }
+        }
     }
 }

@@ -24,4 +24,15 @@ public class CraftParam
     //起始点
     [XmlElement]
     public Position Start { get; set; }
+
+    public string StartPoint {
+        get
+        {
+            if (Start == null)
+            {
+                return "";
+            }
+            return Start.X.ToString() + "," + Start.Y.ToString() + "," + Start.Z.ToString();
+        }
+    }
 }

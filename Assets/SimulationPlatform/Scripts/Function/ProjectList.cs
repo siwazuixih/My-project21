@@ -146,6 +146,9 @@ public class ProjectList : MonoBehaviour
         RunManager.RunStatus = RunStatus.IDLE;
         RunManager.RunType = RunType.SIMULATION;
         GameObject.Find("SimulationPlatform").SetActive(false);
+
+        OperationLogTool.RecordLog(OperationType.项目管理, $"进入项目仿真 - 名称：{project.Name}");
+
         SceneManager.LoadScene("RunScene");
 
     }
@@ -181,6 +184,8 @@ public class ProjectList : MonoBehaviour
                 // 刷新项目列表
                 RefreshProjectList();
                 Debug.Log($"项目 {project.Name} 删除成功");
+
+                OperationLogTool.RecordLog(OperationType.项目管理, $"删除项目 - 名称：{project.Name}");
             }
             else
             {

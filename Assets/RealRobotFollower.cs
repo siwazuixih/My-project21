@@ -34,7 +34,7 @@ public class RealRobotFollower : MonoBehaviour
     public bool requireBothFeedbackSources = true;
     public bool armFeedbackFresh;
     public bool liftFeedbackFresh;
-    public string followStatus = "Disabled";
+    public string followStatus = "已关闭";
     public TextMeshProUGUI statusTextDisplay;
     private readonly double[] armFeedbackJoints = new double[6];
 
@@ -54,7 +54,7 @@ public class RealRobotFollower : MonoBehaviour
     {
         if (!followEnabled)
         {
-            UpdateStatus("Disabled");
+            UpdateStatus("已关闭");
             return;
         }
 
@@ -65,7 +65,7 @@ public class RealRobotFollower : MonoBehaviour
 
         if (requireBothFeedbackSources && (!armFeedbackFresh || !liftFeedbackFresh))
         {
-            UpdateStatus("Waiting for feedback");
+            UpdateStatus("等待真机反馈");
             return;
         }
 
@@ -73,8 +73,8 @@ public class RealRobotFollower : MonoBehaviour
         if (liftFeedbackFresh) FollowLift();
 
         UpdateStatus(armFeedbackFresh && liftFeedbackFresh
-            ? "Following real robot"
-            : "Partial feedback");
+            ? "正在跟随真机"
+            : "反馈数据不完整");
     }
 
     public void EnableRealRobotFollow()
@@ -82,7 +82,7 @@ public class RealRobotFollower : MonoBehaviour
         ResolveActuatorMapping();
         mission?.armCtrl?.SetExternalControlActive(true);
         followEnabled = true;
-        UpdateStatus("Waiting for feedback");
+        UpdateStatus("等待真机反馈");
         Debug.Log("[实物跟随] 已开启，仿真将只读取实物反馈，不向实物下发指令。");
     }
 
@@ -90,7 +90,7 @@ public class RealRobotFollower : MonoBehaviour
     {
         followEnabled = false;
         mission?.armCtrl?.SetExternalControlActive(false);
-        UpdateStatus("Disabled");
+        UpdateStatus("已关闭");
         Debug.Log("[实物跟随] 已关闭。");
     }
 
@@ -180,7 +180,7 @@ public class RealRobotFollower : MonoBehaviour
     {
         followStatus = status;
         if (statusTextDisplay != null)
-            statusTextDisplay.text = $"Real Follow: {status}";
+            statusTextDisplay.text = $"实物跟随：{status}";
     }
 
     void OnDisable()

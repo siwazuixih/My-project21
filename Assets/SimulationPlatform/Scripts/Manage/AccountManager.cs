@@ -13,7 +13,7 @@ public static class AccountManager
         try
         {
             XmlAccount = XmlConfigTool.DeserializeFromXml<XmlAccount>("Configs", "accounts.xml");
-        } 
+        }
         catch (Exception e)
         {
             Debug.LogException(e);
@@ -22,15 +22,19 @@ public static class AccountManager
         {
             XmlAccount = new XmlAccount();
         }
-        Account admin = new Account();
-        admin.AccountName = "admin";
-        admin.UserName = "admin";
-        admin.Password = "admin";
-        foreach (Privilege privilege in Enum.GetValues(typeof(Privilege)))
+        if (XmlAccount.Accounts.Count == 0)
         {
-            admin.PrivilegeList.Add(privilege);
+            XmlAccount.Accounts = new List<Account>();
+            Account admin = new Account();
+            admin.AccountName = "admin";
+            admin.UserName = "admin";
+            admin.Password = "admin";
+            foreach (Privilege privilege in Enum.GetValues(typeof(Privilege)))
+            {
+                admin.PrivilegeList.Add(privilege);
+            }
+            XmlAccount.Accounts.Add(admin);
         }
-        XmlAccount.Accounts.Add(admin);
     }
 
     public static void Save()
@@ -58,13 +62,32 @@ public static class AccountManager
         return string.Empty;
     }
 
+    public static string Update(Account account)
+    {
+        for (int i = 0; i < XmlAccount.Accounts.Count; i++)
+        {
+            if (XmlAccount.Accounts[i].AccountName == account.AccountName)
+            {
+                XmlAccount.Accounts[i].UserName = account.UserName;
+                XmlAccount.Accounts[i].Department = account.Department;
+                XmlAccount.Accounts[i].Password = account.Password;
+                XmlAccount.Accounts[i].Valid = account.Valid;
+                XmlAccount.Accounts[i].PrivilegeList = account.PrivilegeList;
+                return string.Empty;
+            }
+        }
+        return "账号不存在";
+    }
+
     public static bool Validate(string account, string password)
     {
         foreach (var item in XmlAccount.Accounts)
         {
-            if (item.AccountName == account && item.Password == password)
+            if (item.AccountName == account && item.Password == password && item.Valid)
             {
                 currentAccount = item;
+                currentAccount.LoginTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                Save();
                 return true;
             }
         }

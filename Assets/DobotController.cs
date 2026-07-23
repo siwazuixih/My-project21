@@ -36,13 +36,14 @@ public class DobotController : MonoBehaviour
 
     [Header("机械臂实时状态 (30005反馈)")]
     public int currentRobotMode = 0;
-    public string currentRobotModeText = "UNKNOWN";
+    public string currentRobotModeText = "未知";
     public double speedScaling = 0;
     public byte velocityRatio = 0;
     public double[] actualJoints = new double[6];
     public double[] actualJointSpeeds = new double[6];
     public long feedbackSequence = 0;
     public double lastFeedbackUnixSeconds = 0;
+    public int speed;
 
 
 
@@ -171,7 +172,8 @@ public class DobotController : MonoBehaviour
     public void SetRobotSpeed(float speedRatio)
     {
         // 安全保护：防止输入的数字超过 1-100 的范围
-        int speed = Mathf.RoundToInt(Mathf.Clamp(speedRatio, 1, 100));        
+        int speed = Mathf.RoundToInt(Mathf.Clamp(speedRatio, 1, 100));     
+        this.speed = speed;
         string cmd = $"SpeedFactor({speed})";
         SendCommand(cmd);
         if (speedTextDisplay != null)
@@ -440,18 +442,19 @@ public class DobotController : MonoBehaviour
         {
             EnsureFeedbackArrays();
             mode = currentRobotMode;
-            modeText = currentRobotModeText;
+            modeText = RobotModeToText(mode);
+            currentRobotModeText = modeText;
             scaling = speedScaling;
             ratio = velocityRatio;
             Array.Copy(actualJoints, joints, 6);
         }
 
         if (robotModeTextDisplay != null)
-            robotModeTextDisplay.text = $"Mode: {mode} {modeText}";
+            robotModeTextDisplay.text = $"工作模式：{mode} {modeText}";
         if (speedScalingTextDisplay != null)
-            speedScalingTextDisplay.text = $"SpeedScaling: {scaling:F2}";
+            speedScalingTextDisplay.text = $"速度缩放：{scaling:F2}";
         if (velocityRatioTextDisplay != null)
-            velocityRatioTextDisplay.text = $"JointSpeed: {ratio}%";
+            velocityRatioTextDisplay.text = $"关节速度：{ratio}%";
 
         if (actualJointTextDisplays != null)
         {
@@ -459,7 +462,7 @@ public class DobotController : MonoBehaviour
             for (int i = 0; i < count; i++)
             {
                 if (actualJointTextDisplays[i] != null)
-                    actualJointTextDisplays[i].text = $"J{i + 1}: {joints[i]:F2}°";
+                    actualJointTextDisplays[i].text = $"关节{i + 1}：{joints[i]:F2}°";
             }
         }
     }
@@ -470,16 +473,16 @@ public class DobotController : MonoBehaviour
         {
             case 1: return "初始化";
             case 2: return "抱闸松开";
-            case 3: return "下电";
+            case 3: return "已下电";
             case 4: return "未使能";
-            case 5: return "使能空闲";
+            case 5: return "已使能、空闲";
             case 6: return "拖拽模式";
             case 7: return "运行中";
-            case 8: return "单次运动";
+            case 8: return "单次运动中";
             case 9: return "报警";
-            case 10: return "暂停";
-            case 11: return "碰撞";
-            default: return "UNKNOWN";
+            case 10: return "已暂停";
+            case 11: return "碰撞状态";
+            default: return "未知";
         }
     }
 

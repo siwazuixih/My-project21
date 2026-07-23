@@ -218,6 +218,7 @@ public class JointEdit : ModelImport
         {
             Joint.Craft.Travel = TravelInput.text;
         }
+        Joint.Time = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
         // 生成uuid（如果还没有）
         if (string.IsNullOrEmpty(Joint.Id))
@@ -265,6 +266,15 @@ public class JointEdit : ModelImport
         ModelManager.Save();
         MessageManage.ShowMessage("保存成功", 1);
         Debug.Log("Joint已存在，只更新值并保存");
+
+        if (Joint != null && !string.IsNullOrEmpty(Joint.Id))
+        {
+            OperationLogTool.RecordLog(OperationType.模型管理, $"编辑接头模型 - 名称：{Joint.Name}");
+        }
+        else
+        {
+            OperationLogTool.RecordLog(OperationType.模型管理, $"添加接头模型 - 名称：{Joint.Name}");
+        }
     }
     
     /// <summary>

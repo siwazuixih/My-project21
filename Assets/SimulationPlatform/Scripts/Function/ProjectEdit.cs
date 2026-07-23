@@ -166,6 +166,15 @@ public class ProjectEdit : ModelImport
         ProjectManager.Save();
         MessageManage.ShowMessage("保存成功", 1);
         Debug.Log("Project已存在，只更新值并保存");
+
+        if (Project != null && !string.IsNullOrEmpty(Project.Id))
+        {
+            OperationLogTool.RecordLog(OperationType.项目管理, $"编辑项目 - 名称：{Project.Name}");
+        }
+        else
+        {
+            OperationLogTool.RecordLog(OperationType.项目管理, $"创建项目 - 名称：{Project.Name}");
+        }
     }
 
     /// <summary>

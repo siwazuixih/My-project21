@@ -77,12 +77,18 @@ public class JointList : MonoBehaviour
         
         // 设置关节项的文本内容
         Text[] texts = jointItem.GetComponentsInChildren<Text>();
-        if (texts.Length >= 4)
+        if (texts.Length >= 10)
         {
-            texts[0].text = index + "";
-            texts[1].text = joint.Name ?? "";
-            texts[2].text = joint.Model ?? "";
-            texts[3].text = joint.Comment ?? "";
+            texts[0].text = joint.Name ?? "";
+            texts[1].text = joint.Param?.Lead ?? "";
+            texts[2].text = joint.Param?.PitchDiameter ?? "";
+            texts[3].text = joint.Craft?.Torque ?? "";
+            texts[4].text = joint.Craft?.Threshold ?? "";
+            texts[5].text = joint.Craft?.Angle ?? "";
+            texts[6].text = joint.Craft?.Travel ?? "";
+            texts[7].text = joint.Craft?.StartPoint ?? "";
+            texts[8].text = joint.Time ?? "";
+            texts[9].text = joint.Comment ?? "";
         }
         
         // 添加点击事件
@@ -92,13 +98,10 @@ public class JointList : MonoBehaviour
             // 第一个按钮：编辑关节
             buttons[0].onClick.AddListener(() => OnJointItemClick(joint));
         }
-        if (buttons.Length > 3)
+        if (buttons.Length > 1)
         {
             // 第四个按钮：删除场景
             buttons[1].onClick.AddListener(() => OnDeleteJointClick(joint));
-            buttons[1].GetComponentsInChildren<Text>()[0].text = buttons[3].GetComponentsInChildren<Text>()[0].text;
-            buttons[2].gameObject.SetActive(false);
-            buttons[3].gameObject.SetActive(false);
         }
     }
     
@@ -149,6 +152,8 @@ public class JointList : MonoBehaviour
                 // 刷新关节列表
                 RefreshJointList();
                 Debug.Log($"关节 {joint.Name} 删除成功");
+
+                OperationLogTool.RecordLog(OperationType.模型管理, $"删除接头模型 - 名称：{joint.Name}");
             }
             else
             {

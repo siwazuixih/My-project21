@@ -1063,7 +1063,7 @@ MonoBehaviour:
   ErrorMsgTxt: {fileID: 1249923996}
   Alarm: {fileID: 1792907350}
   targetSceneIndex: 1
-  TargetSceneName: Main
+  TargetSceneName: MainScene
 --- !u!114 &855346696
 MonoBehaviour:
   m_ObjectHideFlags: 0
