@@ -6,6 +6,10 @@
 [Ll]ogs/
 UserSettings/
 
+ExternalCode/__pycache__/
+ExternalCode/servo_logs/
+ExternalCode/*.log
+
 .vscode/
 
 *.csproj
