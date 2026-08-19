@@ -648,6 +648,13 @@ public class Simulation : ModelImport
         // 添加 MjGeom 组件
         Mujoco.MjGeom mjGeom = colliderObj.AddComponent<Mujoco.MjGeom>();
 
+        // 场景凸包均为固定障碍物，无需彼此产生接触。单独使用contype=2可减少装配体
+        // 内部相邻/重叠凸包的约束，同时仍保留与默认1/1机器人类别的碰撞。
+        Mujoco.MjGeomSettings geomSettings = mjGeom.Settings;
+        geomSettings.Filtering.Contype = 2;
+        geomSettings.Filtering.Conaffinity = 1;
+        mjGeom.Settings = geomSettings;
+
 #if UNITY_EDITOR
         UnityEditor.SerializedObject so = new UnityEditor.SerializedObject(mjGeom);
         var prop = so.FindProperty("ShapeType") ?? so.FindProperty("shapeType") ?? so.FindProperty("m_ShapeType");
@@ -659,7 +666,9 @@ public class Simulation : ModelImport
 #endif
 
         Mujoco.MjMeshShape shape = new Mujoco.MjMeshShape();
-        shape.Mesh = mesh;
+        // 保存文件保留原始局部网格；重新载入时再次为MuJoCo烘焙Unity层级比例。
+        // PhysX继续使用下面的原始mesh，避免把缩放重复应用到Unity碰撞体。
+        shape.Mesh = MujocoMeshTransformUtility.CreateBakedMesh(mesh, colliderObj.transform);
         mjGeom.Mesh = shape;
 
         MeshCollider meshCollider = colliderObj.AddComponent<MeshCollider>();
@@ -671,7 +680,8 @@ public class Simulation : ModelImport
         rigidbody.useGravity = false;
         rigidbody.constraints = RigidbodyConstraints.FreezeAll;
 
-        ModelCollisionHighlighter highlighter = colliderObj.AddComponent<ModelCollisionHighlighter>();
+        // 保存碰撞体重载后仍只保留碰撞/射线代理；高亮和选点由原模型统一处理。
+        // 不给 Hull 添加 ModelCollisionHighlighter，避免代理参与鼠标高亮状态竞争。
 
         if (meshData.IsVHACD)
         {

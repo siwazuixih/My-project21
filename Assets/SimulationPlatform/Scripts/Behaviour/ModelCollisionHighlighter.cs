@@ -32,11 +32,55 @@ public class ModelCollisionHighlighter : MonoBehaviour
     public static ModelCollisionHighlighter selectedObject = null;
     public static List<Transform> SeletectedObjects = new List<Transform>();
 
+    void Awake()
+    {
+        // 自动生成的 Hull 只是原模型的碰撞代理。它仍参与射线命中和碰撞，
+        // 但不应再独立处理同一次点击，否则原模型和 Hull 会被同时加入任务列表。
+        if (IsGeneratedCollisionProxy())
+        {
+            ClearProxyStaticReferences();
+            enabled = false;
+            return;
+        }
+
+        EnsureRendererState();
+    }
+
+    public static Transform ResolveLogicalSelectionTarget(Transform candidate)
+    {
+        if (candidate == null) return null;
+
+        Transform parent = candidate.parent;
+        if (parent != null &&
+            parent.name.IndexOf("_MjRoot", System.StringComparison.OrdinalIgnoreCase) >= 0 &&
+            parent.parent != null)
+        {
+            return parent.parent;
+        }
+
+        return candidate;
+    }
+
     void Start()
     {
-        // 获取模型所有的Renderer组件
-        allRenderers = GetComponentsInChildren<Renderer>();
-        propBlock = new MaterialPropertyBlock();
+        EnsureRendererState();
+    }
+
+    private bool IsGeneratedCollisionProxy()
+    {
+        return ResolveLogicalSelectionTarget(transform) != transform;
+    }
+
+    private void ClearProxyStaticReferences()
+    {
+        if (currentHighlightedObject == this) currentHighlightedObject = null;
+        if (selectedObject == this) selectedObject = null;
+    }
+
+    private void EnsureRendererState()
+    {
+        if (allRenderers == null) allRenderers = GetComponentsInChildren<Renderer>();
+        if (propBlock == null) propBlock = new MaterialPropertyBlock();
     }
     
     /// <summary>
@@ -291,6 +335,16 @@ public class ModelCollisionHighlighter : MonoBehaviour
     
     private void HighlightModel(bool highlight, Color highlightColor = default(Color))
     {
+        // 兼容旧保存数据：其中的 Hull 可能已经序列化了本组件。即使 Unity 仍向禁用组件
+        // 发送旧式鼠标消息，代理也不会再参与材质或全局高亮状态。
+        if (IsGeneratedCollisionProxy())
+        {
+            ClearProxyStaticReferences();
+            return;
+        }
+
+        EnsureRendererState();
+
         if (isSelected)
         {
             return;
@@ -471,6 +525,14 @@ public class ModelCollisionHighlighter : MonoBehaviour
 
     private void SelectModel(bool highlight, Color highlightColor = default(Color))
     {
+        if (IsGeneratedCollisionProxy())
+        {
+            ClearProxyStaticReferences();
+            return;
+        }
+
+        EnsureRendererState();
+
         // 如果没有指定颜色，默认使用黄色
         if (highlightColor == default(Color))
         {
@@ -492,12 +554,13 @@ public class ModelCollisionHighlighter : MonoBehaviour
         if (highlight)
         {
             selectedObject = this;
-            if (!ModelCollisionHighlighter.SeletectedObjects.Contains(this.transform))
+            Transform logicalTarget = ResolveLogicalSelectionTarget(transform);
+            if (logicalTarget != null && !ModelCollisionHighlighter.SeletectedObjects.Contains(logicalTarget))
             {
-                ModelCollisionHighlighter.SeletectedObjects.Add(this.transform);
+                ModelCollisionHighlighter.SeletectedObjects.Add(logicalTarget);
             }
             Debug.Log($"添加途经点：{this.name}");
-            PathPointManager.Instance?.AddPoint(gameObject);
+            if (logicalTarget != null) PathPointManager.Instance?.AddPoint(logicalTarget.gameObject);
             // 设置模型透明化
             SetModelOpacity(highlightOpacity);
         }
@@ -507,8 +570,10 @@ public class ModelCollisionHighlighter : MonoBehaviour
             {
                 selectedObject = null;
             }
-            ModelCollisionHighlighter.SeletectedObjects.RemoveAll(item => item == this.transform);
-            PathPointManager.Instance?.RemovePoint(gameObject);
+            Transform logicalTarget = ResolveLogicalSelectionTarget(transform);
+            ModelCollisionHighlighter.SeletectedObjects.RemoveAll(
+                item => ResolveLogicalSelectionTarget(item) == logicalTarget);
+            if (logicalTarget != null) PathPointManager.Instance?.RemovePoint(logicalTarget.gameObject);
             // 恢复模型不透明度
             SetModelOpacity(1.0f);
         }
@@ -672,6 +737,7 @@ public class ModelCollisionHighlighter : MonoBehaviour
     // 鼠标进入模型时触发
     private void OnMouseEnter()
     {
+        if (IsGeneratedCollisionProxy()) return;
         if (UIUtil.IsPointerOverUI()) return;
         if (IsInputActive()) return;
         Color highlightColor = isReplacedJoint ? new Color(1f, 0.5f, 0f) : Color.yellow;
@@ -682,6 +748,7 @@ public class ModelCollisionHighlighter : MonoBehaviour
     // 鼠标离开模型时触发
     private void OnMouseExit()
     {
+        if (IsGeneratedCollisionProxy()) return;
         //if (UIUtil.IsPointerOverUI()) return;
         // 鼠标离开时恢复原始状态
         HighlightModel(false);

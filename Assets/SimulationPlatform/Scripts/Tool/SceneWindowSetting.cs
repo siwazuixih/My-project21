@@ -7,10 +7,10 @@ public class SceneWindowSetting : MonoBehaviour
 {
     [Header("当前场景窗口配置")]
     [Tooltip("窗口宽度")]
-    public int windowWidth = 1280; // 默认宽度（如主菜单：1280）
+    public int windowWidth = 1850;
 
     [Tooltip("窗口高度")]
-    public int windowHeight = 720; // 默认高度（如主菜单：720）
+    public int windowHeight = 1015;
 
     [Tooltip("是否全屏（打包后生效，编辑器中仅调整窗口大小）")]
     public bool isFullScreen = false;

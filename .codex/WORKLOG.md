@@ -1,5 +1,1125 @@
 # Worklog
 
+## 2026-08-13 - 最终复测通过与碰撞生成问题完整结论
+
+### 本次任务目标
+
+- 复核修复后的最新Unity运行日志。
+- 验证碰撞生成、机器人位姿、MuJoCo稳定性和后续规划是否正常。
+- 整理本次“切割后机器人被推飞/卡顿/闪退”的完整原因链。
+
+### 读取的关键文件和证据
+
+- `AGENTS.md`、`.codex/WORKLOG.md`、`.codex/PROJECT_CONTEXT.md`
+- `Logs/Log_2026-08-13_16-44-01.log`
+- Unity当前`Editor.log`及上一轮崩溃的`Editor-prev.log`
+- 项目`MUJOCO_LOG.TXT`
+- `Assets/SimulationPlatform/Scenes/RunScene.unity`中`default (1)`和`geom_13`
+
+### 最新运行结果
+
+- 同一装配模型31个源Mesh成功生成80个凸包、1930个顶点、3540个三角面，耗时
+  11.14秒；生成后有80个MjGeom。
+- MuJoCo场景只重建1次，64M arena生效，状态恢复和`mj_forward`完整返回。
+- `ncon=1 / nefc=12`；修复前相同模型为`247 / 1220`，异常约束已基本消失。
+- 唯一初始接触为`default (1) <-> geom_13`，1个接触点，`dist=-0.004098 m`。
+  两个名称均为RunScene中原先存在的序列化MjGeom，不属于本次动态创建的`_Hull_`
+  凸包；生成后机器人位移`0.0000 m`、转角`0.00°`，因此它不是本次支架凸包造成的
+  强制分离。
+- PhysX包围盒重叠0、确认穿透0；用户随后用Ctrl拖动机械臂接触支架，碰撞响应正常。
+- 后续BIT*完成2个任务，任务流程正常结束；当前Editor.log没有fatal signal、invalid
+  pointer、arena溢出或新的Nan/Inf QACC。`MUJOCO_LOG.TXT`修改时间仍停在16:25旧故障。
+- BIT*过程中出现少量采样超时警告，但每次搜索最终成功，与碰撞生成故障无关。
+
+### 问题原因整理
+
+1. **装配体卡顿和第一次大位移**：旧生成器每处理一个Mesh就激活MjBody/MjGeom并让出
+   一帧，31个零件触发31次完整MjScene重建；插件只有限恢复状态，造成明显停顿和机器人
+   15.6483米跳变。改为全部未激活生成、最后一次交换并完整保存/恢复运行状态。
+2. **批量后第一次闪退**：一次恢复全部几何后，由错误几何产生265个接触、1310个约束，
+   MuJoCo默认约200KB arena不足，在`mj_projectConstraint`栈分配失败。arena改为64M，并
+   用`2/1`过滤禁止固定场景凸包互相碰撞。
+3. **不再闪退但机器人仍被推开**：GLB网格顶点以毫米保存，glTFast把顶层`0.001`比例
+   保留在Unity Transform；PhysX会继承该比例，MuJoCo的`MjMeshShape`却只导出
+   `mesh.vertices`，忽略Transform缩放。结果MuJoCo中的支架凸包约放大1000倍，产生
+   `247/1220`接触/约束并把机器人推走1.0673米。现给MuJoCo单独使用烘焙完整层级变换
+   的网格副本，PhysX和可视化继续使用原网格。
+4. **缩放修复后的诊断闪退**：几何已经正确并降到`1/12`，但新增诊断调用自动生成的
+   `mj_id2name` C#字符串绑定，错误释放MuJoCo内部只读指针，触发
+   `munmap_chunk(): invalid pointer`。现改为按活动`MjGeom.MujocoId`构建纯托管名称映射。
+
+### 修改情况与当前结论
+
+- 本轮只更新项目内`.codex/WORKLOG.md`和`.codex/PROJECT_CONTEXT.md`，没有继续修改代码、
+  场景或碰撞参数。
+- 本问题现已通过运行验收：生成不再推飞机器人、不再闪退，规划和主动接触测试正常。
+- 当前诊断仍会输出“31个非单位缩放”“同时创建PhysX与MuJoCo”等提示，它们用于说明
+  模型特征和排障配置，不代表本次运行失败。
+
+### 后续建议
+
+- 保存一次该场景的`.collider.xml`后，再退出并重新进入RunScene测试自动加载路径；
+  `Simulation.CreateColliderObject`已使用同一缩放烘焙工具，但该持久化路径尚未得到本轮
+  实际运行验收。
+- 若以后导入其他单位或带非均匀缩放的GLB，应保留`[MuJoCo缩放诊断]`和接触对摘要，
+  以便快速判断模型单位问题。
+
+## 2026-08-13 - 缩放修复复测闪退：修复mj_id2name无效释放
+
+### 本次任务目标
+
+- 定位缩放烘焙版本生成结束后Unity再次闪退的直接原因。
+- 保留安全的接触对诊断，同时避免任何MuJoCo原生字符串内存所有权问题。
+
+### 读取的关键文件和证据
+
+- `AGENTS.md`、`.codex/WORKLOG.md`、`.codex/PROJECT_CONTEXT.md`
+- `Logs/Log_2026-08-13_16-40-39.log`、Unity `Editor.log`、项目`MUJOCO_LOG.TXT`
+- `Assets/AutoColliderGen_Final.cs`和MuJoCo `MjBindings.cs`、`MjComponent.cs`
+
+### 闪退证据与结论
+
+- 31个零件和80个凸包均完成生成，状态恢复后的`mj_forward`成功返回：arena为64M，
+  `ncon=1`、`nefc=12`。相比修复前的`247/1220`大幅下降，说明缩放烘焙本身有效，且
+  这次不是arena耗尽。
+- 上述日志之后立即出现`munmap_chunk(): invalid pointer`和fatal signal 6；调用位置正好
+  是新增接触名称诊断。
+- MuJoCo的`mj_id2name`返回模型内部只读`const char*`，但当前自动生成绑定声明为返回
+  C# `string`。Linux P/Invoke封送在返回后错误处理该指针，导致无效释放并终止Unity。
+- `MUJOCO_LOG.TXT`修改时间仍停留在16:25，未产生新的MuJoCo求解器错误。
+
+### 修改的文件与内容
+
+- `Assets/AutoColliderGen_Final.cs`
+  - 接触诊断完全移除`MujocoLib.mj_id2name`调用。
+  - 改为扫描当前活动`MjGeom`，使用已经绑定的`MujocoId`建立`id -> MujocoName`纯托管
+    字典；未找到的ID只显示`geom#数字`。
+  - 接触数组和距离统计保留，不读取、不修改也不释放MuJoCo名称缓冲区。
+- `.codex/PROJECT_CONTEXT.md`、`.codex/WORKLOG.md`
+
+### 验证情况
+
+- `dotnet build Assembly-CSharp.csproj --no-restore`通过：0错误，18条项目原有警告。
+- `git diff --check -- Assets/AutoColliderGen_Final.cs`通过。
+- 未修改场景、模型、碰撞参数、arena或机器人控制逻辑。
+
+### 当前状态与下次检查
+
+- 本次由诊断代码引入的原生无效释放已修复；仍需Unity重新运行确认不再退出。
+- 重新生成同一模型后，预期仍为约`ncon=1/nefc=12`，并能安全输出这一组接触对象。
+- 若机器人保持原位，则缩放问题完成；若仍有轻微异常，再根据唯一接触对名称判断它是
+  正常机器人-地面接触还是场景凸包与机器人接触。
+
+## 2026-08-13 - 机器人生成后散开：补充MuJoCo接触对与运行时缩放取证
+
+### 本次任务目标
+
+- 继续排查批量生成后Unity不再退出、但机械臂与底座被MuJoCo推散的问题。
+- 纠正把截图右上深蓝色UI画布误认成异常碰撞几何的判断。
+- 先增加不改变物理行为的诊断证据，再决定是否修改网格坐标或接触过滤。
+
+### 读取的关键文件和证据
+
+- `AGENTS.md`、`.codex/WORKLOG.md`、`.codex/PROJECT_CONTEXT.md`
+- `Assets/AutoColliderGen_Final.cs`、`Assets/ColliderGenerationDiagnostic.cs`
+- 本地MuJoCo插件的`MjEngineTool.cs`、`MjMeshShape.cs`、`MjcfGenerationContext.cs`、
+  `MjBindings.cs`
+- `Logs/Log_2026-08-13_16-29-48.log`与
+  `Files/9abf8d61-8941-4b75-a575-fe01ed3e385c/simple_20260813144530.glb`
+
+### 修改的文件
+
+- `Assets/AutoColliderGen_Final.cs`
+- `Assets/ColliderGenerationDiagnostic.cs`
+- `.codex/PROJECT_CONTEXT.md`
+- `.codex/WORKLOG.md`
+
+### 具体改动及原因
+
+- 在状态恢复后的第一次`mj_forward`之后，按几何体对汇总MuJoCo接触：输出总接触点数、
+  接触对象组数、最深20组几何体名称、每组接触点数和最小`dist`。这样能直接判断接触
+  来自生成场景与机器人、机器人内部，还是其他对象，同时限制日志数量避免刷屏。
+- 每个参与生成的源Mesh现在记录运行时层级路径、`lossyScale`、Mesh局部Bounds尺寸和
+  Renderer世界Bounds尺寸；生成摘要单独列出最多20个非单位缩放对象。
+- 进一步核对glTFast 6.14.1源码，确认其会把GLB矩阵比例写入`Transform.localScale`；
+  MuJoCo插件的网格导出和组件坐标转换均不处理该缩放，因此无需依赖截图即可确认比例
+  在MuJoCo路径中丢失。
+- 新增`MujocoMeshTransformUtility.CreateBakedMesh`：从Unity完整`localToWorldMatrix`
+  中剥离MuJoCo本来会写入的位置/旋转，把剩余缩放、镜像和剪切烘焙到专用网格副本。
+- 生成时只有`MjMeshShape`使用烘焙副本；MeshCollider、彩色诊断Mesh和原模型继续使用
+  原始网格，避免Unity重复缩放。`Simulation.CreateColliderObject`重新加载保存碰撞体时
+  也调用同一工具，保存文件仍保持原局部坐标。
+- 没有关闭场景与机器人接触，也没有修改现有接触过滤参数；用户指出的深蓝色UI画布
+  不再作为任何碰撞判断依据。
+
+### 当前判断
+
+- 16:30实测确认状态恢复成功后仍立即存在`247`个MuJoCo接触和`1220`个约束；约5秒后
+  机器人移动`1.0673 m`，而PhysX穿透为0。问题已从“反复重建/状态丢失”进一步收敛到
+  MuJoCo中的实际接触或坐标表示。
+- 原始GLB确有毫米网格和顶层`0.001`矩阵；glTFast保留该Transform比例，而MuJoCo导出
+  漏掉比例，因此生成碰撞体在MuJoCo中尺寸错误已由完整代码链确认。新增接触日志用于
+  验收修复后接触是否消失，并排除同时存在的其他接触问题。
+
+### 验证情况
+
+- 缩放烘焙和接触诊断完成后，`dotnet build Assembly-CSharp.csproj --no-restore`通过：
+  0错误，18条均为项目原有警告。
+- `git diff --check`对本轮两个脚本通过。
+- 未修改场景YAML、GLB、机器人控制、真实设备逻辑或碰撞行为。
+
+### 当前是否完成与下一步
+
+- 代码层缩放修复和诊断增强已完成，Unity运行验收尚未完成。
+- 在Unity重新生成一次后，搜索`[MuJoCo接触诊断]`和`[MuJoCo缩放诊断]`；重点保存最深
+  接触对名称、源Mesh的lossyScale和局部/世界尺寸。
+- 预期同一模型的`ncon/nefc`会从`247/1220`明显下降，机器人位移应接近0；若仍有接触，
+  直接按新增接触对名称继续处理实际相交零件，不再猜测。
+
+## 2026-08-13 - 批量 MuJoCo重建首次测试闪退与原生内存修复
+
+### 闪退证据与根因
+
+- 最新测试日志为 `Logs/Log_2026-08-13_16-25-03.log`；31个源 Mesh均完成 V-HACD，
+  项目日志在最后一个零件后立即中断，说明闪退发生在统一启用 MjGeom/重建阶段。
+- `MUJOCO_LOG.TXT` 在16:25:26给出明确原生错误：
+  `mj_stackAlloc: out of memory, stack overflow at mj_projectConstraint`；当时
+  `ncon=265`、`nefc=1310`，arena最大约204768字节、可用99864字节，但一次还需
+  104800字节。
+- 随后 `Editor-prev.log`记录 Unity收到 fatal signal 5并退出。这不是托管C#异常，也不是
+  状态数组越界的现有证据，而是一次性保留机器人当前位置后，较多接触约束超过 MuJoCo
+  默认自动分配的内部 arena。
+
+### 修复内容
+
+- `RunScene`的 `MjGlobalSettings.GlobalSizes.Memory`由`-1`改为`64M`；生成器也新增
+  `mujocoArenaMemory=64M`并在批量重建前运行时确保该设置生效，避免其他入口仍使用过小
+  自动值。
+- 新增`disableGeneratedGeomSelfCollision`：生成的场景凸包使用
+  `contype=2 / conaffinity=1`。依据本地 MuJoCo 3.3.7的`filterBitmask`规则，两个生成
+  凸包之间不会碰撞；默认`1/1`机器人仍能与生成场景发生接触。
+- `Simulation.CreateColliderObject`加载已保存碰撞体时同样应用2/1过滤，避免重新加载后
+  恢复无意义的场景内部接触。
+- 状态恢复的`mj_forward`成功返回后新增arena字节数、`ncon`和`nefc`日志，下一次可直接
+  判断内存余量与接触规模。
+
+### 验证与下一步
+
+- `dotnet build Assembly-CSharp.csproj`通过：0错误，18条项目既有警告。
+- 尚未完成Unity运行复测。下一次应先确认不再闪退，再检查日志中的arena、ncon/nefc、
+  MjScene重建次数和机器人位移；若ncon仍高且机器人移动，则说明机器人确实与某批
+  MuJoCo凸包接触，需要继续输出具体 geom接触对，而不是继续增加内存掩盖几何问题。
+
+## 2026-08-13 - MuJoCo碰撞体批量重建与运行状态保护
+
+### 修改目标
+
+- 修复装配体碰撞生成时每个源 Mesh分别触发一次 `MjScene.RecreateScene()`，导致机器人
+  位姿跳变15.6483米和明显卡顿的问题。
+- 恢复场景模型的 MuJoCo碰撞表示，使 BIT*/IK仍能使用新生成障碍物，而不是长期停留在
+  仅 PhysX诊断模式。
+
+### 修改文件
+
+- `Assets/AutoColliderGen_Final.cs`
+- `Assets/ColliderGenerationDiagnostic.cs`
+- `Assets/SimulationPlatform/Scenes/RunScene.unity`（只将实际运行引用的生成器重新开启
+  MuJoCo，并明确启用两个新保护开关；保留场景中其他既有改动）
+- `.codex/PROJECT_CONTEXT.md`
+- `.codex/WORKLOG.md`
+
+### 实现内容
+
+- 新增 `batchMujocoSceneRebuild`，默认开启。运行时生成的新 `_MjRoot`先保持未激活，全部
+  V-HACD凸包准备完成后在同一帧统一启用；旧生成物也在同一次批量交换中移除。
+- 新增 `restoreMujocoStateAfterRebuild`，默认开启。在批量交换前保存 MuJoCo的时间、
+  `qpos/qvel/act/ctrl`、warm-start、外力和 mocap状态；等待唯一一次重建完成后恢复状态，
+  调用 `mj_forward`并同步 Unity对象。
+- 不再在每个零件开始时单独清理旧 `_MjRoot`，避免重新生成时因逐零件 OnDisable再次造成
+  多次重建。
+- 移除循环中每10个 Mesh执行的 `GC.Collect/WaitForPendingFinalizers`，保留每个源 Mesh
+  后短暂让出主线程，但此时 MuJoCo组件尚未激活，不会触发重建。
+- 清理命令改为直接查找所有生成根节点，能覆盖未激活的批量节点。
+- 诊断位姿错误提示不再一概归因于碰撞强制分离：有 PhysX穿透时提示检查凸包；无穿透
+  但发生 MjScene重建时提示检查重建和状态恢复。
+- 诊断现在以“MjScene仅重建1次”为批量成功标志；超过1次会明确提示存在其他脚本同时
+  增删 MjComponent。
+
+### 验证情况与下一步
+
+- `dotnet build Assembly-CSharp.csproj --no-restore`通过：0错误，18条均为项目既有警告。
+- 尚未在 Unity运行时执行新的 MuJoCo对照测试。下一次应使用同一装配体生成，预期日志：
+  `MjGeom=80`、`MjScene重建=1`、机器人位移接近0、PhysX穿透0，并出现
+  `[MuJoCo批量重建] ...成功恢复重建前运行状态`。
+- 若仍发生位姿变化，应保留本次日志再核对重建前后 qpos地址；不要先扩大改动到真实设备
+  控制或规划逻辑。
+
+## 2026-08-13 - 仅 PhysX 对照实验确认机器人位姿跳变根因
+
+### 测试配置与结果
+
+- 用户取消 `createMujocoGeoms`，保留 `createUnityPhysicsColliders`，使用同一装配体
+  `simple_20260813144530` 再次生成。
+- 最新项目日志：`Logs/Log_2026-08-13_16-07-46.log`。
+- 本次仍由31个源 Mesh生成80个凸包，最终 MeshCollider仍为111个，说明 V-HACD与
+  PhysX凸包生成流程完整执行；MjGeom为0、MjScene重建为0。
+- 结束检查：PhysX疑似重叠0、确认穿透0，机器人位移0.0000米、转角0.00°。
+- 耗时由同时创建 MuJoCo时的18.29秒下降到10.95秒，减少7.34秒，约快40%。
+
+### 已确认结论
+
+- 同模型、同80个凸包，在仅 PhysX模式下机器人完全不移动；启用 MuJoCo时机器人移动
+  15.6483米且发生31次 MjScene重建。因此本次“机器人被弄飞”的主因已经锁定为运行中
+  逐零件添加 MjGeom导致的 MuJoCo场景反复重建/状态同步跳变，不是 PhysX切割凸包
+  对机器人的强制分离。
+- 现有原始31个 MeshCollider与新增80个凸包 MeshCollider仍属于重复物理表示，可能影响
+  后续性能和碰撞精度，但不是本次机器人位姿突变的直接原因。
+- 后续修复方向应是先离线/批量建立全部 MjBody/MjGeom，再只请求一次 MjScene重建，并
+  在重建前后完整保存、恢复和前向计算机器人状态；修复前不应恢复当前逐零件 MuJoCo
+  动态生成方式。
+- 本轮只复核日志并确认根因，没有修改运行代码或场景。
+
+## 2026-08-13 - 首次装配体碰撞诊断结果复核
+
+### 日志位置纠正
+
+- 用户在 15:59 已实际执行诊断。Unity 随后发生过重启/日志轮转，本次完整控制台记录
+  位于 `~/.config/unity3d/Editor-prev.log`，不是新的 `Editor.log`。
+- 项目内对应运行日志为 `Logs/Log_2026-08-13_15-58-55.log`。后续排查必须先按时间
+  检查 `Editor.log`、`Editor-prev.log` 和项目 `Logs`，避免因轮转漏掉本次执行。
+
+### 本次实测结果
+
+- 当前模型 `simple_20260813144530`：源 Mesh 31，理论凸包上限 992，实际生成凸包
+  80，耗时 18.29 秒。
+- 生成前已有 31 个 MeshCollider；生成后为 111 个 MeshCollider，并新增 80 个
+  MjGeom。80 个 V-HACD输出均缺法线，已由新代码补算。
+- 生成结束检查：PhysX包围盒疑似重叠 0，`Physics.ComputePenetration`确认穿透 0。
+- 同一期间机器人记录到 15.6483 米位移、0.76°转角；MjScene共重建 31 次，数量与
+  装配体源 Mesh数完全一致。
+
+### 当前判断
+
+- 现有结果不支持把这次 15.65 米跳变直接归因于“最终凸包仍压住机器人”。结束时没有
+  PhysX重叠；虽然一次性结束检查不能完全排除生成过程中的瞬时穿透，但 31 次 MjScene
+  重建与位姿突变同时出现，使 MuJoCo运行时逐零件重建/状态恢复不完整成为第一嫌疑。
+- 诊断脚本当前红色提示把明显位姿变化直接解释成碰撞强制分离，措辞过度，需要后续改为
+  同时提示“瞬时物理穿透或 MuJoCo场景重建导致的状态跳变”，并用隔离测试再下结论。
+- 下一次应先测仅 PhysX：`createUnityPhysicsColliders=true`、
+  `createMujocoGeoms=false`。若 MjScene重建降为 0 且机器人不再移动，即可确认主要根因
+  是 MuJoCo动态重建；再决定批量创建后单次重建及完整状态保存方案。
+- 轮转日志中大量 Gizmo缺法线及 MuJoCo运行时异常包含更早的执行/脚本热重载阶段；本次
+  15:59生成区间内未出现新的异常堆栈，不能把整份历史计数直接算到本次生成上。
+- `LoginScene` 等场景的 Missing Script警告是另一项场景引用清理问题，目前没有证据表明
+  它导致此次机器人位姿跳变。
+
+## 2026-08-13 - 装配体碰撞生成诊断脚本与卡顿根因定位
+
+### 本次任务目标
+
+- 为 `My project21.5` 的 V-HACD 碰撞生成增加一次性诊断工具。
+- 定位整体模型和装配体模型在切割后都可能把机器人推飞、装配体还会明显变卡的原因。
+- 本轮以诊断和隔离测试为主，保留现有默认碰撞生成行为，不直接决定最终物理方案。
+
+### 读取的关键文件和证据
+
+- `AGENTS.md`、`.codex/WORKLOG.md`、`.codex/PROJECT_CONTEXT.md`
+- `Assets/AutoColliderGen_Final.cs`、`Assets/MissionController.cs`、`Assets/RobotData.cs`
+- `ModelImport.cs`、`SceneEdit.cs`、`Simulation.cs`、`ColliderManager.cs`
+- 本地 MuJoCo Unity插件的 `MjComponent.cs`、`MjScene.cs`、`MjMeshShape.cs`
+- Unity `Editor.log`
+
+### 修改的文件
+
+- `Assets/ColliderGenerationDiagnostic.cs`（新增）及其 `.meta`
+- `Assets/AutoColliderGen_Final.cs`
+- `.codex/PROJECT_CONTEXT.md`
+- `.codex/WORKLOG.md`
+
+### 具体改动及原因
+
+- 生成器默认自动给场景模型添加 `ColliderGenerationDiagnostic`。
+- 每次生成统计有效源 Mesh数、理论凸包上限、实际凸包/顶点/三角面数、每个零件
+  的凸包数和耗时、原有/最终 MeshCollider数、最终 MjGeom数及 MjScene重建次数。
+- 诊断网格默认使用多种半透明颜色；与机器人 Collider包围盒相交的凸包标红。
+- 生成结束后只检查一次 PhysX重叠，尽量用 `Physics.ComputePenetration` 输出凸包、
+  机器人碰撞体、分离方向和深度；详细日志限制前20条，避免诊断自身刷屏。
+- 自动记录生成前后机器人位移/转角，超过 `0.01 m / 1°` 时提示状态突变。
+- 增加 `createUnityPhysicsColliders`、`createMujocoGeoms` 隔离开关，可做仅 PhysX、
+  仅 MuJoCo和仅显示测试；两项默认都开，保持旧行为。
+- 将写死的 `doVHACD = true` 改为 `forceVHACDForAllMeshes`；默认仍开，关闭后才真正
+  按 `hollowParts` 区分 V-HACD和快速实心模式。
+- V-HACD输出在交给 `MjMeshShape` 前检查并补算法线，避免 Scene Gizmo持续报缺法线错误。
+- `ShouldSkip` 会检查整个父层级是否位于 `_MjRoot` 下，避免仅 PhysX模式的可视 Mesh
+  在下一次生成时被再次分解。
+- 移除了在空根节点上调用且实际不会添加任何碰撞体的
+  `ModelTool.AddMeshCollidersToModel(root, true)`。
+
+### 当前定位结论
+
+- 旧代码无条件让所有 Mesh执行 V-HACD；`hullCount=32` 是每个 Mesh最多32个，不是
+  整个装配体最多32个，零件数增加会使凸包和组件数成倍增长。
+- 模型导入时已有原始 `MeshCollider`；分解后又添加凸包 `MeshCollider` 并同时创建
+  `MjGeom`，存在原始整网格、PhysX凸包和 MuJoCo凸包多重碰撞表示。
+- MuJoCo插件在运行中新增 `MjComponent` 会请求重建整个 MjScene；生成器每个零件后
+  `await` 让出一帧，装配体可能触发多次整场景重建。插件只缓存恢复关节 qpos/qvel，
+  不完整恢复 act/ctrl，是卡顿和机器人状态突变的重要嫌疑。
+- 生成器每10个源 Mesh同步执行 `GC.Collect/WaitForPendingFinalizers`，会周期性停顿。
+- 当前 `Editor.log` 统计到124次缺少 positions/normals 的 Gizmo错误，确认控制台刷屏
+  也是编辑器变卡的实际原因；新生成网格已补法线。
+
+### 验证情况
+
+- 临时将新脚本加入 Unity自动生成的 `Assembly-CSharp.csproj` 后执行 `dotnet build`：
+  编译成功，0错误；仅工程既有18条警告。随后撤销了对自动生成 csproj的临时修改。
+- 对本轮脚本执行的 `git diff --check` 通过；全仓检查仍会报告用户原有场景/窗口脚本
+  改动中的行尾空格，本轮未改动或格式化那些文件。
+- 未自动操作用户当前 Unity场景，实际凸包数、重叠对象和重建次数需下一次测试确认。
+- 没有修改场景 YAML、模型文件、数据库或真实设备控制逻辑。
+
+### Unity手动检查与下一步
+
+- 进入 `RunScene` 后先 Clear Console，再用当前装配体生成；搜索 `[碰撞诊断]`，记录
+  生成统计、红色凸包、重叠明细、机器人位移和 MjScene重建次数。
+- 清理生成物后依次测试：仅 PhysX（true/false）、仅 MuJoCo（false/true）、仅显示
+  （false/false）。
+- 若红色凸包覆盖机器人，优先检查模型坐标和切割结果；若仅 MuJoCo会飞且重建次数
+  大于0，下一步应批量生成后只重建一次并完整保存 qpos/qvel/act/ctrl；若仅 PhysX
+  会飞，则应去掉原始与凸包 MeshCollider的重复表示。
+
+## 2026-07-26 - 视觉服务自动切换独立 Python 环境
+
+### 本次任务目标
+
+- 配合正式工控机的 Python 3.11 独立视觉环境，使现有 Unity 构建继续通过
+  `/usr/bin/python3` 启动脚本时，也能安全切换到 GPU视觉环境。
+
+### 读取的关键文件
+
+- `AGENTS.md`
+- `.codex/WORKLOG.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `ExternalCode/realsense_image_server.py`
+- `Assets/VisionImageReceiver.cs`
+- `Assets/Editor/ExternalRuntimeBuildPostprocessor.cs`
+- `TEST/AGENTS.md` 及 TEST 上下文
+
+### 修改的文件
+
+- `ExternalCode/realsense_image_server.py`
+- `.codex/PROJECT_CONTEXT.md`
+- `.codex/WORKLOG.md`
+- 同时在顶层 `TEST` 增加正式工控机安装验证 TXT
+
+### 具体改动及原因
+
+- 脚本在导入 OpenCV/RealSense 前查找独立解释器：
+  - 优先使用 `VISION_PYTHON_EXECUTABLE`。
+  - 默认根据软件目录定位 `/home/a/software/vision_env/bin/python`。
+- 切换前用独立解释器检查 OpenCV、NumPy、RealSense、PyTorch、
+  Ultralytics和 CUDA；全部通过才使用 `os.execve()` 重启自身。
+- 环境不存在、依赖不完整或 CUDA不可用时不切换，继续使用现有系统 Python，
+  保留普通实时图降级能力。
+- 这样无需让 V26拧紧程序共用视觉依赖，也无需修改 `/usr/bin/python3`。
+
+### 当前状态与验证
+
+- 代码修改完成，`python3 -m py_compile` 语法检查通过，
+  `git diff --check` 未发现空白错误。
+- 未连接或控制机械臂、电批和相机；独立解释器切换、CUDA和模型加载仍需在正式
+  工控机按 TXT 验证。
+- 正式工控机必须将新版脚本复制到现有软件的 `ExternalCode`，或重新打包软件。
+
+### 下一步和 Unity 检查
+
+- 先完成独立环境依赖/GPU验证，再单独启动视觉服务验证两个模型。
+- 最后在真实运行 UI 点击“开启视觉”，确认 `preview_mode=processed`、
+  推理计数增长、双击放大和关闭相机均正常。
+- 同时确认启动拧紧程序后力矩曲线未受独立视觉环境影响。
+
+## 2026-07-25 - 正式工控机视觉原图降级根因确认
+
+### 工控机环境补充
+
+- 系统 Python：`/usr/bin/python3` 为 Python `3.8.10`。
+- 显卡：检测到 NVIDIA PCI 设备 `2b87`，具体型号和驱动/CUDA 能力仍需通过
+  `nvidia-smi` 确认。
+- 软件所在分区：总容量约 `1.9T`，可用约 `1.7T`，不存在磁盘空间不足问题。
+- 后续应优先使用独立视觉 Python 环境；不要向拧紧程序共用的系统 Python
+  直接安装或升级整套视觉依赖。
+
+### 状态证据和结论
+
+- 用户提供 `http://127.0.0.1:8080/status`：
+  - `ok=true`、`preview_ready=true`。
+  - D435 RGB-D启动正常，USB为 `3.2`，深度可用，普通帧持续增长。
+  - 两个模型路径均正确指向构建目录的 `ExternalCode/models`。
+  - `inference_count=0`，说明尚未进入任何一次推理。
+  - `vision.model_error` 和 `last_error` 明确为
+    `No module named 'ultralytics'`。
+- 根因已确定为 Unity实际调用的 `/usr/bin/python3` 未安装 Ultralytics，不是
+  相机、USB、权重路径、HTTP或Unity显示问题。
+
+### 建议和后续
+
+- 不建议直接把最新版 Ultralytics/Torch安装进共享的系统/用户 site-packages：
+  该机的 `/usr/bin/python3` 同时运行 V26拧紧曲线，直接安装可能再次升级
+  NumPy/OpenCV并破坏系统 Matplotlib兼容性。
+- 推荐建立视觉专用虚拟环境，并让视觉脚本自动切换到该解释器；V26继续使用原来的
+  `/usr/bin/python3`。
+- 安装前先采集 `/usr/bin/python3 --version`、CPU/GPU信息和磁盘空间，再确定
+  CPU版或CUDA版 Torch及兼容版本。
+- 本轮只确认根因和安装边界，没有安装软件、修改依赖或控制设备。
+
+## 2026-07-25 - 视觉模型已复制但仍原图降级的排查方案
+
+### 本次任务目标和现象
+
+- 用户已将 `best.pt`、`sam2_b.pt` 放入构建软件的
+  `ExternalCode/models`，但 Unity日志仍显示 `raw_fallback`。
+- 截图中普通 `1280×720` 实时图正常，说明相机、8080 HTTP服务、Unity拉流和
+  降级机制均正常；故障范围仅在模型加载或视觉推理。
+
+### 排查结论和顺序
+
+- 第一证据来源是保持“开启视觉”时访问
+  `http://127.0.0.1:8080/status`：
+  - `vision.state=raw_fallback`
+  - `vision.model_error` 记录模型文件、Ultralytics/Torch或权重加载错误。
+  - `vision.last_error` 记录运行期 YOLO/SAM处理错误。
+- 若是依赖错误，必须用 Unity实际调用的 `/usr/bin/python3` 检查
+  `torch`、`ultralytics` 版本和加载位置，不能只检查另一个虚拟环境或 `pip`。
+- 若依赖导入正常，再在软件根目录单独加载两个权重，区分 YOLO权重、SAM权重或
+  Ultralytics版本接口不兼容。
+- 若权重能加载但服务仍降级，应以 `/status` 的 `vision.last_error` 为准检查
+  推理调用；连续3次异常后服务会按设计熔断回原图。
+- 本轮只提供只读诊断步骤，没有安装依赖、修改代码或控制机械臂。
+
+### 手动检查
+
+- 保持“关闭视觉”按钮可见（表示服务正在运行）时获取 `/status` 完整 JSON并回传。
+- 同时可检查两个 `.pt` 的文件大小，排除零字节、不完整复制或错文件。
+- Unity Inspector本轮无需检查。
+
+## 2026-07-25 - V26实时曲线 JPEG/PNG 正式兼容修复
+
+### 本次任务目标
+
+- 将此前在正式工控机手动完成的 PNG修改正式写回工程，确保以后重新打包不再手动
+  修改 V26 Python文件。
+
+### 修改内容
+
+- 修改 `ExternalCode/servo_tcp_client_fault_control_v26_28Nm_abnormal_stop_only.py`：
+  - 优先使用 `print_jpg`，其次使用 `print_jpeg`。
+  - 有 JPEG接口但不接受 `pil_kwargs` 时使用兼容调用。
+  - 两个 JPEG接口都不存在时自动使用 `print_png`。
+  - HTTP响应使用实际 `image/jpeg` 或 `image/png`，不再固定声明 JPEG。
+  - `/status` 新增 `content_type`。
+- 曲线 URL、Unity C#、最终 CSV/PNG保存、力矩算法、电批命令和安全逻辑均未改变。
+
+### 验证情况
+
+- Python语法编译通过。
+- 模拟 Canvas的 JPEG和仅 PNG两条分支均通过。
+- 使用 `127.0.0.1:1` 假电批地址安全启动嵌入模式，曲线服务返回
+  `ok=true`、`render_count>0`、`last_error=""`；开发机选择
+  `content_type=image/jpeg`。
+- 测试没有发送正转或反转命令，结束时正常关闭。
+
+### 当前状态和手动检查
+
+- 工程源文件已修复，后续打包会自动带上，不需要再手改工控机。
+- 正式工控机更新脚本后，应检查 `/status` 为 `ok=true`、
+  `content_type=image/png`、`last_error=""`，并确认曲线正常显示。
+- 本轮无需 Inspector检查，没有连接或驱动真实电批。
+
+## 2026-07-25 - 视觉程序使用两个模型的职责说明
+
+- 本轮目标：解释 `best.pt` 和 `sam2_b.pt` 为什么同时存在，未修改代码。
+- 检查了 `measure copy.py` 的模型加载及处理链路：
+  - `best.pt` 是视觉同学训练的 YOLO检测模型，负责识别目标并给出矩形框。
+  - `sam2_b.pt` 是 SAM分割模型，以 YOLO框为提示获得精确像素轮廓。
+  - 程序随后从轮廓计算最小外接旋转矩形、中心和角度，再结合 D435I深度计算 XYZ。
+- 当前忠实复现原算法需要两个模型；若只保留 YOLO，可直接使用检测框中心，速度更快
+  但中心/角度精度通常下降。长期可训练一个 YOLO分割模型，直接输出掩膜并移除 SAM。
+- 本轮无需 Unity Editor手动检查；下一步由用户确认优先保持原算法，还是先采用单
+  YOLO轻量方案。
+
+## 2026-07-25 - 视觉处理失败自动返回普通实时图
+
+### 本次任务目标
+
+- 开始实施视觉程序第一阶段集成。
+- 保证 YOLO/SAM 模型缺失、依赖缺失、模型加载失败或推理异常时，Unity
+  “现场视频”仍能显示普通 RealSense 实时图像，不出现黑屏。
+
+### 读取和检查的关键文件
+
+- `AGENTS.md`
+- `.codex/WORKLOG.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `ExternalCode/measure copy.py`
+- `ExternalCode/realsense_image_server.py`
+- `Assets/VisionImageReceiver.cs`
+- `Assets/Editor/ExternalRuntimeBuildPostprocessor.cs`
+- `ExternalCode/point_move_demo.py`
+
+### 修改的文件和内容
+
+- `ExternalCode/realsense_image_server.py`
+  - 改为单一常驻 RGB-D 相机服务；独立采集线程持续保留普通彩色 JPEG。
+  - 优先启动对齐的彩色/深度流；RGB-D配置失败时重试彩色流。
+  - 后台异步加载 `ExternalCode/models/best.pt` 和 `sam2_b.pt`。
+  - 模型缺失、依赖/加载失败时进入 `raw_fallback`，继续返回普通实时图。
+  - 模型就绪后执行 YOLO、SAM、轮廓/旋转矩形/中心点绘制和相机 XYZ 计算。
+  - 连续3次处理异常后自动熔断回原图。
+  - 增加 `X-Vision-Mode` 响应头、详细 `/status` 和结构化 `/result`。
+- `Assets/VisionImageReceiver.cs`
+  - 按钮文字改为“开启视觉/关闭视觉”，保留原 public 方法和场景绑定。
+  - 仅在模式变化时记录“显示处理图”或“自动显示普通实时图”，避免刷屏。
+- `Assets/Editor/ExternalRuntimeBuildPostprocessor.cs`
+  - Linux构建后可选复制 `ExternalCode/models` 下的 `.pt` 文件。
+  - 模型缺失只警告，不阻止打包；软件仍可使用原图模式。
+- `ExternalCode/models/README.txt`
+  - 记录默认模型文件名和环境变量覆盖方式。
+
+### 为什么这样改
+
+- RealSense必须保持唯一所有者，不能由原视频服务和视觉原型各打开一次。
+- 模型加载和推理比采集更容易受权重、依赖和算力影响，算法异常不能同时破坏现场
+  观察能力。
+- Unity仍请求 `127.0.0.1:8080/latest.jpg`，现有小窗、双击放大、启停和
+  Texture生命周期无需重写。
+
+### 验证情况
+
+- Python语法编译通过。
+- 无模型降级测试通过：状态进入 `raw_fallback`，不会在模块导入时强制加载
+  Ultralytics。
+- 原图选择测试通过：视觉未就绪时返回普通 JPEG和 `raw_fallback`。
+- `Assembly-CSharp-Editor.csproj` 编译通过，0错误；仅有工程既有警告。
+- 开发机当前没有连接 RealSense；真机启动测试只能确认“无设备”，无法在本机
+  验证实际 RGB-D 帧与模型推理。
+
+### 当前状态、遗留问题和手动检查
+
+- 第一阶段“算法失败仍有原图”代码已经完成。
+- 工程当前没有两个 `.pt`，所以点击“开启视觉”应显示普通实时图并提示原图降级，
+  这是预期行为。
+- 下一步需将正确权重放到：
+  - `ExternalCode/models/best.pt`
+  - `ExternalCode/models/sam2_b.pt`
+- 还需在装有模型及 Torch/Ultralytics 的电脑上验证当前 Ultralytics版本的
+  SAM调用、推理帧率、标注布局和 `/result` 数值。
+- Unity Editor手动检查：
+  - 按钮显示“开启视觉/关闭视觉”。
+  - 无模型时视频仍正常且只提示一次降级。
+  - 双击小图仍能放大。
+  - `/status` 显示 `preview_mode=raw_fallback` 和明确的模型错误。
+- 本阶段没有接入或执行 `point_move_demo.py`，没有向 CR10AF 下发命令。
+
+## 2026-07-25 - 视觉处理程序替换现场视频的集成方案分析
+
+### 本次任务目标
+
+- 在视觉机械臂运动逻辑尚未完成前，规划如何先把视觉检测/分割程序集成到 Unity。
+- 判断视觉程序是否应始终打开相机，以及是否可以用处理后的图像直接替换现有
+  “现场视频”区域。
+
+### 读取和检查的关键文件
+
+- `AGENTS.md`
+- `.codex/WORKLOG.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `ExternalCode/measure copy.py`
+- `ExternalCode/realsense_image_server.py`
+- `ExternalCode/point_move_demo.py`
+- `Assets/VisionImageReceiver.cs`
+- `Assets/Editor/ExternalRuntimeBuildPostprocessor.cs`
+
+### 当前程序行为与结论
+
+- `measure copy.py` 在进程启动时立即：
+  - 加载 YOLO 和 SAM 模型。
+  - 独占启动 D435I 彩色和深度 `1280×720@30 FPS`。
+  - 在无限循环中逐帧取同步 RGB-D。
+  - 每帧执行 YOLO；每个检测框再执行一次 SAM。
+  - 在 `result_img` 上绘制分割轮廓、旋转矩形、中心点和相机坐标 XYZ。
+  - 同时打开“Center Position”和“Depth”两个 OpenCV 窗口。
+  - 直到按 `q` 或程序退出才停止并释放相机。
+- 因此当前原型确实是“进程存活期间持续开相机并持续推理”，但不建议从软件登录
+  到退出无条件一直运行；更合理的是“开启视觉/自动任务开始”时启动，任务结束、
+  切回仿真或用户关闭时释放。
+- 可以而且推荐用 `result_img` 直接替换现有“现场视频”里的原始彩色图：
+  - 保留现有 UI 位置、RawImage、双击放大和 Unity 拉流逻辑。
+  - 将现有 `realsense_image_server.py` 与视觉原型合并成唯一视觉服务。
+  - 继续由 `127.0.0.1:8080/latest.jpg` 返回最新处理结果图。
+- 不能让旧相机服务与 `measure copy.py` 同时运行；两者都会创建独立
+  RealSense pipeline 并抢占同一台 D435I。
+
+### 推荐运行结构
+
+- 相机采集和视觉推理解耦：
+  - 单一采集线程持续取得对齐后的 RGB-D。
+  - 推理线程按受控频率处理最新帧，避免 HTTP 每次请求都触发一次 YOLO/SAM。
+  - HTTP `/latest.jpg` 只返回最新 `result_img`，Unity仍可按现有方式刷新。
+- 第一阶段可以在“开启视觉”后持续推理并显示标注图；考虑 YOLO+SAM算力，
+  实际处理帧率应以工控机实测为准，不要求达到相机 30 FPS。
+- 为后续全自动流程预留：
+  - `/status`：相机、模型、推理帧率、最近错误。
+  - `/result`：最新 XYZ、像素中心、矩形角度、置信度和时间戳。
+  - `/measure`：机械臂确认静止后触发一次或一组稳定测量。
+  - `/save`：替代键盘 `s`，由 Unity 控制保存。
+- 相机可在完整真实任务阶段保持打开，但“相机在线”不等于“测量结果可用于运动”；
+  机械臂运动时只预览，只有反馈确认静止后才采纳新的视觉测量。
+- 保存内容继续保留原程序的彩色图、16位深度图、结果图和中心坐标文本，但保存根目录
+  改为软件目录下的相对路径，不能继续使用 Windows `F:\...`。
+
+### 当前阻塞和下一步
+
+- 本轮只完成架构分析，没有修改用户提供的视觉原型、Unity 或场景。
+- 当前还缺：
+  - YOLO `best.pt` 和 SAM `sam2_b.pt` 的确定位置。
+  - Linux工控机上的 Torch/Ultralytics运行环境和实际推理性能。
+  - 模型路径、保存路径改为相对/可配置。
+  - HTTP状态、图像和测量结果接口。
+  - 构建后处理复制 `.pt` 模型文件。
+- `point_move_demo.py` 是新出现的未跟踪 Dobot直连运动示例，当前会独立连接
+  29999/30004并执行示例点位，不应在本阶段随视觉服务启动，也不应绕过 Unity
+  的 CR10AF 单一控制权方案。
+- 下一步建议先把视觉原型改造成“不连接机械臂的本地视觉服务”，先验收
+  “开启视觉→显示处理图→读取结果→保存→关闭并释放相机”，再接自动流程。
+
+## 2026-07-25 - Unity“开始拧紧”首次点击无动作说明
+
+### 本次任务目标
+
+- 分析正式工控机中 V26 已启动、实时曲线已恢复，但点击 Unity
+  “开始拧紧”后电批没有动作，而单独运行 Python 程序时按钮可直接动作的问题。
+
+### 读取和检查的关键文件
+
+- `AGENTS.md`
+- `.codex/WORKLOG.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `Assets/ServoTighteningController.cs`
+- 用户提供的 Unity 运行截图和日志
+
+### 诊断结论
+
+- 截图已显示 `First live torque curve received: 960x540`，说明前述 PNG
+  兼容修改有效，实时曲线链路已经恢复。
+- 日志 `Motion confirmation required: forward` 表明 Unity 已收到第一次
+  “开始拧紧”点击，但按既有真机安全设计只进入待确认状态，没有下发 `forward`。
+- 第一次点击后按钮文字会临时变为“再次确认”；必须在 3 秒内再次点击同一个按钮，
+  第二次点击才会临时解锁真实电批运动并发送命令。
+- 单独运行 Python 图形程序时没有 Unity 这一层二次确认，所以单击就会动作，两种
+  表现符合当前代码设计。
+- `UpdateButtonState()` 只有在 `ProgramReady && ToolConnected` 时才允许点击
+  “开始拧紧”。截图中首次点击已经进入确认逻辑，因此当前不是曲线格式修改造成的，
+  也不是按钮事件失效。
+
+### 当前状态、后续问题和手动检查
+
+- 本轮仅说明现有安全交互，没有修改 Unity、Python 或场景。
+- 在确保人员、工件和急停条件安全后，按“开始拧紧”一次，并在按钮显示
+  “再次确认”的 3 秒内再按一次。
+- 若第二次点击后仍不动作，应保留第二次点击之后的新日志，检查是否出现
+  `forward_queued`、电批连接中断或设备无回传；不要在未确认现场安全时连续点击。
+- 不建议为方便测试直接删除真机二次确认。后续自动流程应通过明确的流程状态、
+  电批连接状态和运动安全开关解锁，而不是模拟人工双击。
+
+## 2026-07-25 - 正式工控机力矩曲线 HTTP 503 初步诊断
+
+### 本次任务目标
+
+- 分析另一台正式工控机点击“启动程序”后，拧紧程序保持运行但右下角实时力矩
+  曲线黑屏，并持续出现 `HTTP/1.1 503 Service Unavailable` 的原因。
+
+### 读取和检查的关键文件
+
+- `AGENTS.md`
+- `.codex/WORKLOG.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `Assets/ServoTighteningController.cs`
+- `ExternalCode/servo_tcp_client_fault_control_v26_28Nm_abnormal_stop_only.py`
+- 用户提供的正式工控机运行截图和 Unity 日志
+
+### 诊断结论
+
+- 此次现象与实验工控机先前的 NumPy/Matplotlib 导入失败不同：
+  - Unity 已显示 `V26 bridge is ready at 127.0.0.1:9100`。
+  - “启动程序”按钮已切换为“关闭程序”。
+  - 因此 Python 主进程、9100 控制桥和 Unity 到本机的控制通信均已启动，
+    不是整个 Python 程序提前退出。
+- Unity 随后请求 `http://127.0.0.1:9101/curve.jpg`，收到的是 Python
+  曲线服务主动返回的 HTTP 503。
+- 按当前 Python 实现，只有 `latest_curve_jpeg is None` 时才会返回该 503；
+  这说明 9101 HTTP 服务已经在线，但后台 `curve_render_worker` 尚未成功生成
+  第一张 JPEG。
+- 该线程会把具体绘图异常写入
+  `http://127.0.0.1:9101/status` 的 `last_error`。在读取正式工控机的
+  `last_error` 前，不能准确判定是 Pillow/JPEG、Matplotlib API、中文字体文件
+  还是其他渲染环境问题。
+- 端口被占用或普通网络不通的可能性较低：如果 9101 没有监听，Unity 通常会得到
+  连接失败，而不是由当前曲线服务返回的 HTTP 503。
+- 电批尚未连接也不是空闲曲线无法显示的原因；设计上即使没有电批数据，后台也应
+  生成带坐标轴的空闲曲线。
+- 正式工控机随后通过 `/status` 返回了准确异常：
+  `'FigureCanvasAgg' object has no attribute 'print_jpg'`。
+- 因此最终根因已确定：该机加载的 Matplotlib Agg 后端没有项目脚本调用的
+  `print_jpg()` 接口。曲线线程在第一次 JPEG 编码时异常，导致
+  `render_count` 始终为 `0`、`latest_curve_jpeg` 始终为空并持续返回 503。
+- 正式工控机进一步确认使用 Ubuntu 系统包 Matplotlib `3.1.2`，并且
+  `print_jpg=False`、`print_jpeg=False`。因此不能只更换 JPEG 方法名。
+- 更适合多台工控机部署的修复方向，是在脚本中优先使用 JPEG 接口；当两个 JPEG
+  接口都不存在时退回 Agg 一直支持的 PNG 输出，同时由 HTTP 响应返回正确的
+  `image/png` 类型。Unity 的 `DownloadHandlerTexture` 可继续读取该纹理，
+  无需更改力矩数据、控制协议或最终 CSV/PNG 保存逻辑。
+
+### 当前状态、下一步和手动检查
+
+- 本轮只做诊断，没有修改 Unity、Python业务代码、场景或设备参数。
+- 已完成 `/status` 取证，无需继续检查网络和端口。
+- 下一步采用 JPEG/PNG 自动回退的代码级兼容修复，重新打包或只替换构建目录中的
+  V26 Python 文件；重启后验证 `/status` 的 `ok=true`、
+  `render_count>0`，且 Unity 曲线区域出现空闲坐标图。
+- Unity Editor 本轮无需检查 Inspector；这是目标工控机 Python 曲线渲染阶段的
+  运行时诊断。
+
+## 2026-07-25 - CR10AF 视觉引导集成与控制权架构分析
+
+### 本次任务目标
+
+- 检查视觉同学放入 `ExternalCode` 的程序。
+- 分析“仿真规划→粗定位→视觉引导→拧紧”流程中，越疆 CR10AF 应持续由
+  Unity 连接，还是在视觉阶段断开并把连接交给 Python。
+
+### 读取和检查的关键文件
+
+- `AGENTS.md`
+- `.codex/WORKLOG.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `ExternalCode/measure copy.py`
+- `ExternalCode/realsense_image_server.py`
+- `Assets/DobotController.cs`
+- `Assets/ConnectCommander.cs`
+- `Assets/RealRobotFollower.cs`
+- `Assets/MissionController.cs`
+- `Assets/ArmController.cs`
+- `Assets/VisionImageReceiver.cs`
+- `Assets/Editor/ExternalRuntimeBuildPostprocessor.cs`
+- `RunScene.unity` 中的 CR10AF IP、端口和按钮绑定
+- 越疆 CRAF/CRA 产品资料及 TCP/IP 二次开发接口 V4.6.0
+
+### 代码检查结论
+
+- 新文件 `ExternalCode/measure copy.py` 当前不包含任何 Socket、机械臂 IP、
+  端口或运动指令，不会与 Unity 抢占 CR10AF 控制连接。
+- 该脚本当前功能是：
+  - 独占打开 D435I 彩色流和深度流，均为 `1280×720@30 FPS`。
+  - 使用 YOLO 检测和 SAM 分割。
+  - 用目标轮廓最小外接矩形中心及 11×11 深度中值计算相机坐标
+    `X/Y/Z`，单位毫米。
+  - 通过 OpenCV 独立窗口显示，并按 `s` 保存 PNG/TXT。
+- 当前尚不能直接打包或由 Unity 调用：
+  - YOLO 权重路径硬编码为 Windows `F:\...best.pt`。
+  - 保存目录硬编码为 Windows `F:\...center_result`。
+  - `sam2_b.pt`、YOLO `best.pt` 均未放入工程。
+  - 开发机当前未安装 `ultralytics` 和 `torch`。
+  - 构建后处理只复制 `ExternalCode/*.py`，不会复制 `.pt` 权重。
+  - 脚本没有启动/停止/状态/测量结果 API，只有键盘和终端输出。
+  - 它会再次独占 RealSense pipeline，不能与现有
+    `realsense_image_server.py` 同时打开同一台相机。
+  - 当前结果只有相机坐标 XYZ，没有完成相机到 CR10AF 基坐标的手眼标定变换，
+    也没有提供拧紧所需的可靠 6D 姿态、结果稳定性、置信度和时间戳。
+
+### CR10AF 当前连接链路
+
+- RunScene 中 CR10AF 地址为 `192.168.192.19`。
+- `DobotController` 使用：
+  - `29999`：Dashboard 控制和命令应答。
+  - `30005`：每 200ms、1440 字节的机械臂反馈。
+- Unity 连接后发送 `RequestControl()`，然后通过同一控制器执行
+  `EnableRobot()`、`SpeedFactor()` 和 `MovJ(...)`。
+- `ConnectCommander` 将仿真规划结果转换为六关节角并调用
+  `DobotController.MoveJoints()`。
+- 当前机械臂“完成”主要依赖估算等待时间；虽然 Unity 已接收实际关节和 RobotMode，
+  但尚未在 `SendArmRoutine` 中用反馈闭环确认到位。这一点必须在触发视觉测量前补齐。
+
+### 推荐控制权架构
+
+- 推荐 Unity 在进入真实运行后，持续保持 CR10AF 的 29999 控制连接和
+  30005 反馈连接，作为整条自动流程的唯一机械臂运动控制者。
+- 视觉 Python 进程只作为计算服务：
+  - 从唯一的 RealSense 相机服务取得同步 RGB-D。
+  - 返回相机坐标下的目标位置/姿态、置信度和时间戳。
+  - 不直接连接 CR10AF，不直接发运动命令。
+- Unity 用状态机串联：
+  `粗定位→反馈确认静止/到位→视觉测量→坐标变换与安全检查→精定位→反馈确认→拧紧`。
+- “持续连接”不代表持续发命令；视觉和拧紧阶段可保持 TCP 在线但禁止机械臂运动。
+- 不推荐粗定位后断开 Unity、让视觉程序接管，再切回 Unity：
+  - 增加控制权交接竞态、重连失败、反馈中断和状态过期。
+  - 越疆 V4 的 `RequestControl()` 只有在未上电或下使能状态才允许切换到 TCP 模式，
+    反复交接可能迫使机器人下使能。
+  - Unity 的停止、状态显示和后续全自动恢复会失去统一入口。
+- 如果未来需要高频连续视觉伺服，应增加一个始终独占 CR10AF 的“机器人网关”进程，
+  Unity 和视觉都只向网关提交经过仲裁的请求；仍然不让两个进程轮流直连机器人。
+
+### 当前状态、后续问题和手动检查
+
+- 本轮只完成只读分析，没有修改视觉、Unity、场景或真实设备配置。
+- 新视觉文件保持用户原样，仍为 Git 未跟踪文件。
+- 下一步建议先把视觉脚本改造成可独立测试的本地服务，统一相机所有权和模型相对路径，
+  暂时只返回测量结果，不接机械臂。
+- 随后补齐：
+  - 确认相机是眼在手上还是固定安装。
+  - 手眼标定矩阵、工具坐标系和坐标单位。
+  - 粗定位真实反馈闭环。
+  - 视觉结果稳定性和最大修正范围。
+  - CR10AF 真机 TCP 模式、固件/控制器版本和各命令返回码验证。
+- Unity Editor 暂时无需绑定新组件；后续实现时先在真实运行 UI 添加视觉服务状态，
+  再做不下发运动的“只测量”联调。
+
+## 2026-07-25 - 工控机力矩曲线程序提前退出诊断
+
+### 本次任务目标
+
+- 分析 v1.6 打包程序在开发电脑运行正常、复制到工控机后力矩曲线失效的问题。
+
+### 读取和检查的关键内容
+
+- `AGENTS.md`
+- `.codex/WORKLOG.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `Assets/ServoTighteningController.cs`
+- `ExternalCode/servo_tcp_client_fault_control_v26_28Nm_abnormal_stop_only.py`
+- `DEPLOYMENT.md`
+- 用户提供的工控机终端报错和 Unity 运行日志
+- 开发电脑当前 Python 模块版本
+- NumPy 官方兼容性说明及 PyPI 上 `opencv-python 5.0.0.93` 的依赖元数据
+
+### 诊断结论
+
+- 不是 Unity 曲线 RawImage、HTTP 拉流或 UI 自适应先发生故障，而是 V26
+  Python 进程在启动阶段就已退出。
+- Unity 日志“拧紧程序启动后提前退出，退出码: 1”与控制器的进程存活检测一致；
+  Python 进程退出后，`127.0.0.1:9100` 控制服务和
+  `127.0.0.1:9101/curve.jpg` 曲线服务都不会启动。
+- 工控机当前从用户目录加载 `NumPy 2.2.6`，但从
+  `/usr/lib/python3/dist-packages` 加载由 NumPy 1.x ABI 编译的系统
+  Matplotlib。脚本在第 47 行导入 Matplotlib 时触发二进制 ABI
+  不兼容并退出。
+- 冲突来源是工控机安装了 `opencv-python 5.0.0.93`；该版本在
+  Python 3.9 及以上声明需要 `NumPy >= 2`，因此直接安装最新 OpenCV
+  会把 NumPy 升到 2.x。
+- 开发电脑可用组合为：
+  - Python 3.8.10
+  - NumPy 1.24.4
+  - Matplotlib 3.7.5
+  - OpenCV 4.10.0.84
+- 力矩脚本本身不导入 OpenCV；OpenCV 只供 RealSense 图像服务使用，
+  但两个程序当前共用 `/usr/bin/python3`，所以相机依赖升级破坏了力矩绘图环境。
+
+### 当前状态、建议和后续
+
+- 本轮只完成诊断，没有修改 Unity、Python 业务代码，也没有在工控机卸载或安装模块。
+- 短期修复不应只降级 NumPy；还需要把 OpenCV 从 5.0 降到支持 NumPy 1.x
+  的版本，并一次性验证 `numpy`、`matplotlib`、`cv2`、`pyrealsense2`
+  四个导入。
+- 长期推荐给外部 Python 程序建立独立、固定版本的运行环境，并让 Unity
+  明确使用该环境的 Python，避免目标电脑的系统包和用户级 pip 包混用。
+- 下次继续位置：先在工控机采集 `python3 -m pip show` 和四模块导入结果，
+  再按确认后的固定版本方案处理环境，随后测试 V26 的 9100/9101 服务及相机 8080 服务。
+- Unity Editor 手动检查：本轮无需检查 Inspector；环境修复后应在真实运行页面验证
+  “启动程序”、空闲曲线、开始拧紧、最终 CSV/PNG 保存和现场视频。
+
+## 2026-07-24 - Ubuntu 1850×1015 自适应窗口
+
+### 本次任务目标
+
+- 解决 1920×1080 Ubuntu 桌面无法完整容纳 1920×1080 窗口内容区的问题。
+- 保留按 1920×1080 设计的正式界面，同时避免右侧曲线、视频区域和底部按钮发生重叠。
+
+### 读取的关键文件
+
+- `AGENTS.md`
+- `.codex/WORKLOG.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `ProjectSettings/ProjectSettings.asset`
+- `ProjectSettings/EditorBuildSettings.asset`
+- `Assets/SimulationPlatform/Scripts/Tool/SceneWindowSetting.cs`
+- LoginScene、Main、RunScene、MainScene 中的窗口配置和 Canvas Scaler
+
+### 修改的文件和内容
+
+- `ProjectSettings/ProjectSettings.asset`
+  - Player 默认窗口恢复为 `1850×1015`。
+- `Assets/SimulationPlatform/Scripts/Tool/SceneWindowSetting.cs`
+  - 新组件默认窗口尺寸改为 `1850×1015`。
+- Build Settings 中四个正式场景的 `SceneWindowSetting`
+  - LoginScene、Main、RunScene、MainScene 均统一为 `1850×1015`。
+- Main、RunScene、MainScene 的正式屏幕空间 Canvas
+  - `UI Scale Mode` 改为 `Scale With Screen Size`。
+  - `Reference Resolution` 改为 `1920×1080`。
+  - `Screen Match Mode` 改为 `Expand`。
+- LoginScene 原本已经使用自适应 Canvas，因此没有改动其 Canvas Scaler。
+- RunScene 中用于世界空间指示物的 `PointerCanvas` 保持原配置，未被误改。
+
+### 为什么这样改
+
+- 1920×1080 内容区再加上 Ubuntu 顶栏、标题栏和窗口边框，物理上无法完整放进 1920×1080 桌面。
+- 只把窗口缩回 1850×1015、但继续使用 `Constant Pixel Size`，会重新造成固定像素 UI 重叠。
+- 使用 1920×1080 作为设计参考并选择 `Expand`，可以将正式 UI 等比缩小到可用窗口内，同时保证设计区域完整可见。
+
+### 验证情况
+
+- Main、RunScene、MainScene 的场景差异均严格为 Canvas Scaler 的 3 个参数。
+- LoginScene 在清理换行符差异后没有产生实际修改。
+- 四个正式场景和脚本默认值均核对为 `1850×1015`。
+- 完整 `Assembly-CSharp` 编译通过，没有错误；仅有工程原有警告。
+- 没有执行 Player 打包，也没有连接或控制真实设备。
+
+### 当前状态、遗留问题及手动检查
+
+- 代码和场景配置修改已完成。
+- 需要在 Unity Game 视图中使用 `1850×1015` 检查 Main、RunScene、MainScene：
+  - 顶部导航、右侧状态栏和底部工具栏完整可见。
+  - “实时力矩曲线”和现场视频不侵入底栏。
+  - 日志、视频、拧紧程序及三个拧紧动作按钮没有重叠。
+- 重新打包后，需在目标 Ubuntu 电脑上确认窗口完整放入桌面，并检查登录和场景切换后窗口尺寸保持一致。
+- `ProjectSettings.asset` 仍有用户先前产生的
+  `Server: ObservParam;(1)` Scripting Define Symbols，本次未改动；正式打包前建议单独确认并清理。
+- 下次继续位置：先完成上述 1850×1015 编辑器和 Player 视觉验收；如仍有个别控件偏移，再只调整对应控件锚点，不改回固定 1920×1080 窗口。
+
+## 2026-07-24 - 1920×1080 Ubuntu 窗口容纳问题评估
+
+### 本次任务目标
+
+- 评估固定 1920×1080 Player 在 1920×1080 Ubuntu 桌面中无法完整容纳的问题。
+
+### 检查内容与结论
+
+- 确认当前 Player 和四个正式场景均请求窗口内容区 `1920×1080`。
+- Ubuntu 窗口模式还需要系统顶栏、应用标题栏和边框，因此 1080 像素高的内容区不可能完整放进 1080 像素高的桌面。
+- LoginScene 已使用 `Scale With Screen Size`；Main、RunScene、MainScene 的正式屏幕空间 Canvas 仍为 `Constant Pixel Size`。
+- 只恢复 `1850×1015` 会重新引入底部按钮和右侧曲线重叠；只使用 1920×1080 则窗口放不下。
+
+### 推荐方案
+
+- 保留窗口模式，将 Player 和四个正式场景恢复为适合 Ubuntu 桌面的 `1850×1015`。
+- 将 Main、RunScene、MainScene 的正式屏幕空间 Canvas 改为：
+  - `Scale With Screen Size`
+  - Reference Resolution `1920×1080`
+  - Screen Match Mode `Expand`
+- 这样 UI 按 1920×1080 设计稿整体缩放到 1850×1015，避免固定像素重叠。
+- 备选方案是 1920×1080 无边框全屏，但在 2560×1440 等显示器上仍需考虑 Canvas 自适应。
+
+### 当前状态
+
+- 本轮只完成检查和方案评估，没有再次修改窗口尺寸或 Canvas。
+- 等用户确认采用“自适应窗口”还是“无边框全屏”后再实施。
+
+## 2026-07-24 - 四个正式场景统一为 1920×1080
+
+### 本次任务目标
+
+- 修复 Player 被场景脚本重新改为 `1850×1015`，导致右侧曲线和底部按钮重叠的问题。
+
+### 读取的关键文件
+
+- `AGENTS.md`
+- `.codex/WORKLOG.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `ProjectSettings/EditorBuildSettings.asset`
+- `ProjectSettings/ProjectSettings.asset`
+- `Assets/SimulationPlatform/Scripts/Tool/SceneWindowSetting.cs`
+- LoginScene、Main、RunScene、MainScene
+
+### 修改的文件和内容
+
+- `Assets/SimulationPlatform/Scripts/Tool/SceneWindowSetting.cs`
+  - 新组件默认窗口尺寸改为 `1920×1080`。
+- Build Settings 中四个启用场景的 `SceneWindowSetting` 序列化参数均由
+  `1850×1015` 改为 `1920×1080`：
+  - `LoginScene.unity`
+  - `Main.unity`
+  - `RunScene.unity`
+  - `MainScene.unity`
+- 每个场景差异均严格为两行数值修改，没有改变其他对象、组件、锚点或资源。
+
+### 为什么这样改
+
+- `SceneWindowSetting.Awake()` 会覆盖 Player Settings；只修改 Player 面板不足以改变最终窗口尺寸。
+- 四个场景必须保持一致，否则切换场景时仍会重新缩回 1850×1015。
+
+### 验证情况
+
+- 四个场景逐一检查，均为 `windowWidth=1920`、`windowHeight=1080`。
+- 完整 `Assembly-CSharp` 编译通过，没有新增错误；仅有项目原有警告。
+- 没有执行 Player 打包，也没有连接真实设备。
+
+### 当前状态、遗留问题及手动检查
+
+- 固定 1920×1080 的场景配置修复已完成。
+- 重新打包并运行后，Player 日志应显示
+  `requesting resize 1920 x 1080`，不应再出现 1850×1015。
+- 需要在真实运行界面检查右侧曲线不侵入底栏、“立即停止”不再与“重置底盘”重叠。
+- `ProjectSettings.asset` 当前仍有用户未提交的
+  `Server: ObservParam;(1)` Scripting Define Symbols，本次未改动；正式打包前仍建议清除。
+
+## 2026-07-24 - Player 与 Game 视图尺寸不一致诊断
+
+### 本次任务目标
+
+- 查明 Game 视图设为 `1920×1080` 时正常，但 Linux Player 中右侧曲线和底部按钮发生重叠的原因。
+
+### 读取的关键文件与证据
+
+- `AGENTS.md`
+- `.codex/WORKLOG.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `ProjectSettings/ProjectSettings.asset`
+- `Assets/SimulationPlatform/Scripts/Tool/SceneWindowSetting.cs`
+- `Assets/SimulationPlatform/Scenes/RunScene.unity`
+- Linux Player 日志与
+  `~/.config/unity3d/DefaultCompany/飞机导管拧紧系统/prefs`
+
+### 诊断结论
+
+- Player Settings 当前默认值虽已改为 `1920×1080`，但 `RunScene/RunObject`
+  上的 `SceneWindowSetting` 仍序列化为 `1850×1015`。
+- `SceneWindowSetting.Awake()` 会调用
+  `Screen.SetResolution(windowWidth, windowHeight, isFullScreen, 0)`，
+  所以进入 Login、Main、RunScene 等场景后会覆盖 Player Settings。
+- Player 日志多次明确记录：
+  - `requesting resize 1850 x 1015`
+  - `resizing window to 1850 x 1015`
+- Player prefs 也已记住当前分辨率 `1850×1015`，默认分辨率才是
+  `1920×1080`。
+- 正式 UI 根 Canvas 使用 `Constant Pixel Size`，不会随 1850×1015 自动缩放。
+- 右侧力矩区域使用固定顶部锚点和 `y=-725`，底部工具栏按钮也使用固定像素位置；
+  高度减少 65 像素、宽度减少 70 像素后就会侵入底栏并互相覆盖。
+- Unity Game 视图选择固定 `1920×1080` 时不会按 Player 的场景窗口方式呈现，
+  因此编辑器内看起来正常。
+
+### 当前状态
+
+- 本次只做诊断，没有修改场景、Canvas 或窗口脚本。
+- `v1.6` 已由用户提交并推送。
+- 当前 `ProjectSettings.asset` 还有用户未提交修改：
+  - 默认分辨率改为 `1920×1080`。
+  - 意外出现 `Server: ObservParam;(1)` Scripting Define Symbols；打包前应移除。
+
+### 推荐下一步
+
+- 当前固定 1920×1080 版本：统一四个 Build Settings 场景的
+  `SceneWindowSetting` 为 `1920×1080`，并清理旧 Player prefs。
+- 后续若要支持不同显示器：再将主 Canvas 改为
+  `Scale With Screen Size / 1920×1080 / Match 0.5`，并逐项校正右侧曲线和底部按钮锚点。
+- 修改后至少验证 `1920×1080`、`1850×1015` 两种 Game 视图尺寸。
+
 ## 2026-07-24 - v1.6 发布与 GitHub 上传准备（进行中）
 
 ### 本次任务目标
@@ -1580,3 +2700,828 @@
   - `关节数组为空或长度不足`
   - `严重超出限位`
   - `找不到末端 Site`
+
+## 2026-08-13 - 单点成功、多点失败只读排查
+
+### 本次任务目标
+
+- 只读排查“单点规划成功、多点规划失败”是否由底盘无法移动造成。
+- 本次不修改业务代码、场景或参数。
+
+### 读取的关键文件
+
+- `Logs/Log_2026-08-13_19-31-52.log`
+- `Assets/MissionController.cs`
+- `Assets/ChassisController.cs`
+- `Assets/ArmController.cs`
+- `Assets/RobotData.cs`
+- `Assets/SimulationPlatform/Scripts/Function/Simulation.cs`
+- `Assets/SimulationPlatform/Scripts/Behaviour/ModelCollisionHighlighter.cs`
+- `Assets/SimulationPlatform/Scripts/Manage/PathPointManager.cs`
+- `Assets/SimulationPlatform/Scenes/RunScene.unity`
+
+### 排查结论
+
+- 最新一次三目标预计算中，第一个目标的 IK 和 BIT* 直连成功；后两个目标是原模型与生成 Hull 的重复物理位置，均在 IK 阶段失败。
+- 失败发生在真正启动底盘之前，不是底盘运动执行报错。第二目标首次 IK 检查时，MuJoCo 末端初始位置与第一目标完全相同，说明多目标预计算没有把虚拟底盘移动到第二目标附近。
+- `DeepPrecomputeAll()` 调用 `NavMesh.CalculatePath()` 后没有检查返回值和 `NavMeshPath.status`。路径没有角点时，会静默缓存 `{ simPos }` 单点路径，`finalStopPoint` 保持原地，随后直接在原地对远目标执行 IK。
+- 当前目标直接使用被选中模型/Hull 的 `Transform.position` 作为 NavMesh 终点。该点通常位于模型内部或离地，容易不是有效 NavMesh 点；代码没有先用 `NavMesh.SamplePosition()` 获取可导航终点。
+- 同一次鼠标点击同时命中了原模型和生成的 Hull；日志显示二者都被加入 `SeletectedObjects`，因此实际目标数从用户期望的两个变成三个，并重复规划同一位置。
+- 同一日志中曾有 2 点和 3 点预计算成功，但这些成功目标的位置相同或机械臂原地可达，不能证明底盘发生了平移；它能证明多点循环本身并非必然失败。
+
+### 当前是否完成
+
+- 只读根因排查已完成。
+- 除本工作日志外未修改代码、场景和参数。
+
+### 建议的下一步
+
+- 下一轮若获准修改，先为每个目标输出 `simPos`、目标点、NavMesh 返回值/status/corners、`finalStopPoint` 和 `moveDelta`，验证静默原地回退。
+- 再修正导航终点采样和完整路径校验；无完整路径时应停止该目标预计算，不应继续原地 IK。
+- 对原模型与自动生成 Hull 做选择去重，只保留一个逻辑目标。
+
+## 2026-08-13 - 多点底盘停靠路径与 Hull 重复选点修复
+
+### 本次任务目标
+
+- 按上一轮排查结论修复“单点成功、多点失败”：不再在 NavMesh 失败后让底盘原地做远目标 IK。
+- 同时解决一次点击把原模型和自动生成 Hull 都加入任务列表的问题。
+
+### 读取的关键文件
+
+- `AGENTS.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `.codex/WORKLOG.md`
+- `Logs/Log_2026-08-13_19-31-52.log`
+- `Assets/MissionController.cs`
+- `Assets/ChassisController.cs`
+- `Assets/RobotData.cs`
+- `Assets/AutoColliderGen_Final.cs`
+- `Assets/SimulationPlatform/Scripts/Behaviour/ModelCollisionHighlighter.cs`
+- `Assets/SimulationPlatform/Scripts/Manage/PathPointManager.cs`
+- `Assets/SimulationPlatform/Scripts/Function/Simulation.cs`
+
+### 修改的文件
+
+- `Assets/MissionController.cs`
+- `Assets/SimulationPlatform/Scripts/Behaviour/ModelCollisionHighlighter.cs`
+- `.codex/PROJECT_CONTEXT.md`
+- `.codex/WORKLOG.md`
+
+### 具体改动
+
+- `MissionController.TryBuildChassisPath()`：
+  - 目标超出机械臂工作半径时，先把目标 XZ 投影到与底盘同高的位置。
+  - 使用 `NavMesh.SamplePosition()` 分别验证底盘起点和目标附近停靠点。
+  - 调用 `NavMesh.CalculatePath()` 后同时检查返回值、`PathComplete` 和角点数量。
+  - 沿完整路径的所有线段按 0.05m 采样，选择首个进入机械臂工作半径的停靠点，并截短执行路径。
+  - 输出 `[底盘预计算]` 日志，记录采样点、路径状态、角点、停靠点、移动量和路径点数。
+- `DeepPrecomputeAll()`：
+  - 底盘路径或机械臂 IK 任一失败立即终止整组预计算。
+  - 失败时清空底盘缓存、诊断快照和真机任务清单，并保持 `hasPrecalculated=false`。
+  - 只有所有目标全部成功才允许执行缓存路径。
+- `StartMissionSequence()`：
+  - 预计算失败后回到 `Idle` 并返回，不再进入 `WaitingToStartPath` 或底盘执行状态。
+- `ModelCollisionHighlighter`：
+  - `_MjRoot` 下的自动生成 Hull 高亮组件在 `Awake()` 中停用点击处理，但保留 Collider/Rigidbody/MuJoCo 碰撞功能。
+  - 新增逻辑目标解析，将 Hull 统一映射回原模型 Transform。
+  - 选择和取消选择均使用逻辑目标。
+- `ControlMission()`：
+  - 按逻辑 Transform 的 InstanceID 做第二层去重，并输出 `[路径点去重]` 日志。
+
+### 为什么这样改
+
+- 旧代码忽略 `NavMesh.CalculatePath()` 的返回值和路径状态，失败时缓存 `{simPos}`，导致底盘实际不平移而机械臂直接求解远目标。
+- 目标 Transform 常位于模型内部或离地，直接作为 NavMesh 终点不稳定；先在同高地面附近采样更符合底盘导航含义。
+- 原模型和生成 Hull 都挂有高亮脚本，同一次射线点击会被两个 `Update()` 同时处理；Hull 应仅作为碰撞代理。
+
+### 验证情况
+
+- `git diff --check -- Assets/MissionController.cs Assets/SimulationPlatform/Scripts/Behaviour/ModelCollisionHighlighter.cs` 通过。
+- `dotnet build Assembly-CSharp.csproj --no-restore` 未进入编译阶段：Unity 生成的
+  `Temp/obj/Assembly-CSharp/project.assets.json` 不存在，报 `NETSDK1004`。
+- 当前没有运行中的 Unity Editor，因此还不能用 Editor 自动脚本编译和实际 NavMesh/MuJoCo 运行验证。
+
+### 当前是否完成
+
+- 代码修改和静态差异检查已完成。
+- 需要在 Unity Editor 中进行多目标运行验收。
+
+### 还存在的问题
+
+- `NavMesh.SamplePosition()` 的 `1.15m` 目标搜索半径沿用当前 `armReachDistance`；如果某些大型模型的可停靠边缘更远，会明确报告“目标附近没有可用 NavMesh 停靠点”，不会再原地误规划。
+- 本次未修改 `Simulation.cs`、碰撞生成器、场景、视觉或外部 Python 的既有未提交改动。
+
+### 下次继续开发从哪里开始
+
+- 先查看 Unity 是否有 C# 编译错误。
+- 选取两个真实不同的位置运行规划，检查 `[底盘预计算]` 中第二目标的 `移动量` 是否非零、路径状态是否为 `PathComplete`。
+- 如果仍失败，根据日志中的起点采样、终点采样和失败原因调整 NavMesh 或停靠半径，而不是先改 IK。
+
+### 需要在 Unity Editor 检查
+
+- 同一次点击只应新增一个路径点，列表数量不应因 `_Hull_0` 再增加一次。
+- 规划两个相距超过 `armReachDistance` 的目标，第二目标应显示非零底盘移动量和至少两个执行路径点。
+- Scene 视图打开 `Show NavMesh`，确认白色全局路径在目标附近停下。
+- 路径不可达时任务应停在 `Idle`，Console 明确打印失败原因，底盘不应执行原地伪路径。
+
+## 2026-08-13 - 首目标底盘先小幅转向再转回的只读排查
+
+### 本次任务目标
+
+- 排查多点规划成功后，第一个目标执行时底盘先旋转、短距离前进、再转向主路径的原因。
+- 本次不修改业务代码。
+
+### 读取的关键文件
+
+- `AGENTS.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `.codex/WORKLOG.md`
+- `Logs/Log_2026-08-13_20-11-19.log`
+- `Assets/MissionController.cs`
+- `Assets/ChassisController.cs`
+- `Assets/RobotDiagnosticUI.cs`
+
+### 排查结论
+
+- 第一个目标的实际底盘起点为 `(0,0,0)`，NavMesh 起点采样为
+  `(-0.021,0.083,0.164)`，水平偏移约 `0.165m`。
+- 当前 `TryBuildChassisPath()` 同时把实际起点和 NavMesh 起点采样加入执行路径，因而
+  第一个目标缓存了3个路径点：实际起点、采样起点、最终停靠点。
+- 第一小段方向约为世界航向 `-7.3°`，从采样点到最终停靠点的主路径方向约为
+  `72.7°`，方向相差约 `80°`。`ChassisController` 到达每个角点后都会切回
+  `Rotating`，所以表现为先旋转和短移，再转回主方向继续前进。
+- 第二个目标的实际起点 `(0.218,0,0.239)` 与采样点 `(0.218,0.083,0.239)` 的 XZ
+  一致，去重后只有2个执行路径点，因此没有同样的小幅折返。
+- 这不是 IK、机械臂动作或底盘执行器异常，而是上一轮新增的起点 NavMesh 采样点被
+  当成独立执行角点造成的路径形状问题。
+
+### 修改的文件
+
+- 仅更新 `.codex/PROJECT_CONTEXT.md` 和 `.codex/WORKLOG.md` 记录结论。
+- 未修改业务代码、场景或参数。
+
+### 建议的下一步
+
+- 推荐对小偏移起点采用“只用于 NavMesh 计算，不加入执行路径”的策略：执行路径从
+  真实 `simPos` 直接接到 `navPath.corners[1]` 或截短后的首个主路径点。
+- 增加起点采样偏移阈值；例如偏移在约 `0.25m` 内时跳过采样角点，偏移过大时明确
+  报告底盘起点不在 NavMesh 附近，避免无条件穿越不可导航区域。
+- 修改后验证第一个目标的 `执行路径点数` 从3变为2，并确认只旋转一次后沿主路径移动。
+
+### 当前是否完成
+
+- 原因已确认，尚未修改业务代码。
+
+### 需要在 Unity Editor 检查
+
+- 当前可在 Scene 视图查看第一条白色路径，应能看到原点到
+  `(-0.021,0,0.164)` 再折向 `(0.218,0,0.239)` 的小折线。
+- 后续修复后该折线应合并为从真实起点直接指向主路径/停靠点的一段。
+
+## 2026-08-13 - 起点采样短折线修复与当日迁移清单
+
+### 本次任务目标
+
+- 修复首目标底盘先转向并短移到 NavMesh 起点采样，再转回主路径的问题。
+- 整理今天所有有意修改的文件及跨版本移植顺序，避免与工作区其他未提交改动混淆。
+
+### 修改的文件
+
+- `Assets/MissionController.cs`
+- `.codex/PROJECT_CONTEXT.md`
+- `.codex/WORKLOG.md`
+- `.codex/PORTING_NOTES_2026-08-13.md`（新增）
+
+### 具体修改
+
+- `TryBuildChassisPath()` 增加 `0.25m` 起点采样水平偏差阈值。
+- 偏差不超过阈值时，`sourceHit` 仍作为 `NavMesh.CalculatePath()` 的合法计算起点，
+  但不再加入执行 `route`；执行路径从真实 `simPos` 直接连接
+  `navPath.corners[1]` 及后续主路径。
+- 偏差超过阈值时明确返回失败，避免底盘从明显不在 NavMesh 上的位置直接穿越到路径。
+- `[底盘预计算]` 日志增加起点偏移和“采样点仅用于路径计算”说明。
+- 新建当天迁移清单，区分 7 个功能代码/资源文件、3 个项目记录文件，以及当前工作区
+  中不属于今天这批修复的脏文件；同时记录依赖关系、迁移顺序和验收标准。
+
+### 静态验证
+
+- `git diff --check -- Assets/MissionController.cs` 通过。
+- 对今天涉及的功能文件和三份 `.codex` 记录执行 `git diff --check`，全部通过。
+- `dotnet build Assembly-CSharp.csproj --no-restore` 未进入 C# 编译：Unity 当前没有生成
+  `Temp/obj/Assembly-CSharp/project.assets.json`，报 `NETSDK1004`。这是临时工程依赖缺失，
+  不是本次代码的编译错误证据。
+- 当前没有运行中的 Unity Editor，仍需 Editor 完成脚本编译与运行验收。
+
+### 需要在 Unity Editor 检查
+
+- 重现原第一目标，日志中的起点偏移应约为 `0.165m`，并显示采样点仅用于路径计算。
+- 第一目标的执行路径点数应从 3 降为 2；底盘应直接沿主路径运动，不再先走短折线。
+- 第二目标原有完整路径、多目标 IK/BIT* 和 Hull 选点去重行为不应退化。
+
+## 2026-08-13 - 鼠标悬停模型持续 NullReference 的只读排查
+
+### 本次任务目标
+
+- 排查鼠标移动到场景模型上时持续出现、但暂时不影响功能的
+  `NullReferenceException`。
+- 本次只确认原因，不修改业务代码。
+
+### 读取的关键文件和证据
+
+- `AGENTS.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `.codex/WORKLOG.md`
+- `Logs/Log_2026-08-13_20-31-58.log`
+- `Logs/Log_2026-08-13_20-11-19.log`
+- `Assets/SimulationPlatform/Scripts/Behaviour/ModelCollisionHighlighter.cs`
+- `Assets/AutoColliderGen_Final.cs`
+- `Assets/SimulationPlatform/Scripts/Function/Simulation.cs`
+- `Assets/SimulationPlatform/Scripts/Tool/ModelTool.cs`
+
+### 排查结论
+
+- 最新日志中的160条异常全部落在
+  `ModelCollisionHighlighter.SetModelOpacity()` 第179行；入口包括
+  `OnMouseEnter()`、`OnMouseExit()`，以及另一高亮对象在 `Update()` 中取消旧高亮。
+- `SetModelOpacity()` 第179行会遍历 `allRenderers`，该字段和 `propBlock` 只在
+  `Start()` 中初始化。
+- 碰撞生成器会在每个动态 Hull 上添加 `ModelCollisionHighlighter`；上一轮为解决重复
+  选点，又让这些 Hull 组件在 `Awake()` 中执行 `enabled=false`。被禁用后 `Start()`
+  不运行，所以这两个运行时字段保持为空。
+- Hull 仍有 `MeshCollider`，Unity 的旧式鼠标消息仍可能调用其
+  `OnMouseEnter/OnMouseExit`。脚本随后进入透明度逻辑并访问未初始化字段，形成持续异常。
+- 嵌套的 `Update -> HighlightModel(false)` 调用栈是静态
+  `currentHighlightedObject` 已被代理 Hull 写入后，原模型尝试取消它的高亮造成的次生
+  异常；不是底盘、NavMesh、MuJoCo接触或材质资源本身为空。
+
+### 推荐修复方向
+
+- 首选：`AutoColliderGen_Final.CreateGeom()` 和
+  `Simulation.CreateColliderObject()` 都不再给生成 Hull 添加
+  `ModelCollisionHighlighter`。Hull 只保留碰撞/射线代理；原模型脚本现有的
+  `hit.transform.IsChildOf(transform)` 已能识别其子级 Hull，并统一完成高亮和选点。
+- 同时保留防御性初始化或代理早退，兼容旧保存数据中已经带有该组件的 Hull。
+- 不推荐只在 `SetModelOpacity()` 判空后返回：这样虽然不报错，代理仍会抢占
+  `currentHighlightedObject`，可能留下高亮状态和鼠标交互竞争。
+
+### 修改情况与当前状态
+
+- 仅更新 `.codex/PROJECT_CONTEXT.md`、`.codex/WORKLOG.md` 和
+  `.codex/PORTING_NOTES_2026-08-13.md` 记录结论与迁移警告。
+- 未修改 `Assets` 业务代码、场景、碰撞参数或模型。
+- 根因已确认，等待用户授权后再实施最小修复。
+
+### 修复后需要在 Unity Editor 检查
+
+- 重新生成碰撞体和重新加载 `.collider.xml` 两条入口都要测试。
+- 鼠标反复进入/离开原模型及彩色 Hull 区域，不应再出现
+  `ModelCollisionHighlighter.SetModelOpacity` 异常。
+- 模型仍应正常变色、点击只增加一个任务点，Hull 的 PhysX/MuJoCo碰撞能力保持不变。
+
+## 2026-08-13 - 鼠标悬停 Hull 空引用修复
+
+### 本次任务目标
+
+- 按上一轮定位结果，消除鼠标进入/离开生成 Hull 时持续出现的
+  `ModelCollisionHighlighter.SetModelOpacity()` 空引用。
+- 保留原模型高亮、单次选点以及 Hull 的 PhysX/MuJoCo碰撞能力。
+
+### 修改的文件
+
+- `Assets/AutoColliderGen_Final.cs`
+- `Assets/SimulationPlatform/Scripts/Function/Simulation.cs`
+- `Assets/SimulationPlatform/Scripts/Behaviour/ModelCollisionHighlighter.cs`
+- `.codex/PROJECT_CONTEXT.md`
+- `.codex/WORKLOG.md`
+- `.codex/PORTING_NOTES_2026-08-13.md`
+
+### 具体修改及原因
+
+- `AutoColliderGen_Final.CreateGeom()` 不再给新生成 Hull 添加
+  `ModelCollisionHighlighter`；Hull 继续保留 MeshCollider、Rigidbody、MjGeom 和诊断显示。
+- `Simulation.CreateColliderObject()` 同样移除保存碰撞体重载时的高亮组件创建，堵住另
+  一条复发入口。
+- `ModelCollisionHighlighter` 把 Renderer 数组和 `MaterialPropertyBlock` 的初始化提前到
+  `Awake()`，并保留 `Start()` 的幂等调用。
+- 对旧保存数据/场景中已带组件的 Hull，`Awake()`、`HighlightModel()`、
+  `SelectModel()`、`OnMouseEnter()` 和 `OnMouseExit()` 都会识别为碰撞代理并早退；同时
+  清理它可能占用的 `currentHighlightedObject/selectedObject` 静态引用。
+- 不能只在 `SetModelOpacity()` 判空：那只会隐藏异常，代理仍可能抢占全局高亮状态。
+  本次从组件创建和旧数据兼容两层消除竞争。
+
+### 验证情况
+
+- 两条 Hull 创建路径中已不存在 `AddComponent<ModelCollisionHighlighter>()`。
+- 对三个业务脚本执行 `git diff --check` 通过。
+- Unity 临时工程仍缺少 `Temp/obj/Assembly-CSharp/project.assets.json`，不能在当前终端执行
+  有效的 `dotnet build --no-restore`；需要 Unity Editor 完成实际脚本编译。
+
+### 当前状态与后续检查
+
+- 代码修复和项目内记录已完成，等待 Unity 运行验收。
+- 分别测试“现场重新生成碰撞体”和“退出后从 `.collider.xml` 重载碰撞体”。
+- 鼠标反复经过原模型和 Hull 区域，Console 不应再出现第179行空引用；原模型仍应正常
+  高亮，单击只新增一个任务点，碰撞测试仍应正常。
+
+## 2026-08-13 - 三点任务持续无解日志分析（只读）
+
+### 本次任务目标
+
+- 分析三个目标点多次规划仍找不到解的原因，不修改业务代码或场景参数。
+
+### 日志证据
+
+- 检查 `Logs/Log_2026-08-13_21-02-14.log`，确认三次独立尝试分别发生在
+  `21:09:37`、`21:14:03` 和 `21:30:23`。
+- 三次结果完全一致：目标1成功；目标2从目标1停靠点
+  `(0.179, 0.000, -0.728)` 开始，模型点为 `(0.975, 1.920, -0.024)`。
+- 目标2水平距离为 `1.063m`，小于 `armReachDistance=1.150m`，现有底盘逻辑因此直接
+  判定“已在机械臂工作半径内”，底盘保持原位，没有搜索更合适的站位或朝向。
+- 目标2随后进行了六轴/升降轴和多个末端滚转角的完整 IK 重试，但三次稳定得到相同
+  最优误差：`bestPosErr=0.01492m`、`bestRotErr=0.02640rad`。
+- `RunScene` 的近似解上限为位置 `0.01m`、姿态 `0.03rad`：姿态误差已达标，但位置
+  误差 `14.92mm` 超出 `10mm` 上限 `4.92mm`，所以 IK 未返回候选。
+- BIT* 在取得 IK 候选前即终止，并未进入随机路径搜索；整个三点预计算随目标2失败而
+  清空，所以日志中不存在“目标3/3”，第三个点实际上没有被求解。
+- 三次都得到同一误差，说明这是当前底盘站位、目标高度和强制观察位姿共同造成的稳定
+  可达性/验收边界问题；继续增加相同随机重试次数预计没有收益。
+- 本次三个选择对象互不相同，任务点数量正常增加到3，未发现重复选点复发；本轮日志也
+  未出现 `NullReferenceException`。
+
+### 根因判断与后续方向
+
+- 主要结构性原因是底盘预计算仅用水平半径判定机械臂可达，未用实际 IK 验证当前站位。
+  第二点高度为 `1.920m`，且手动观察方向固定为 `(-1,0,0)`，运行时观察距离为
+  `0.25m`；这些姿态约束下，上一目标留下的底盘位置/朝向处于 IK 可达边界之外。
+- 首选修复方向：当前站位 IK 失败时，在目标周围搜索多个 NavMesh 备用站位和朝向，
+  选取可解且余量较好的位置；并给 `1.15m` 名义半径增加舒适工作区余量。
+- 可用于确认而非正式修复的测试：将第二点单独作为首点、调整点序，或临时关闭
+  `enableLookAt`。若单独首点可解，则可进一步确认是多点间底盘站位继承问题。
+- 把 `maxAcceptedPositionError` 从 `0.01` 临时调到略高于 `0.01492` 会让该近似解通过，
+  但会牺牲定位精度，仅适合作为诊断，不建议作为首选正式修复。
+
+### 修改情况
+
+- 仅更新 `.codex/PROJECT_CONTEXT.md` 与 `.codex/WORKLOG.md`。
+- 未修改 `Assets` 业务代码、场景、模型或规划参数。
+
+## 2026-08-13 - 原第二点改为单点后的复测分析（只读）
+
+### 本次任务目标
+
+- 核对用户把上次第二点单独设为首点后仍无法求解的新日志，修正上一轮原因判断。
+
+### 读取的关键文件
+
+- `Logs/Log_2026-08-13_21-02-14.log`
+- `Assets/MissionController.cs`
+- `Assets/ArmController.cs`
+- `Assets/MujocoStaticIKSolver.cs`
+- `Assets/SimulationPlatform/Scenes/RunScene.unity`
+
+### 新日志事实
+
+- `21:59:04` 只选择了 `1x.001`，任务数量为1；不存在重复选点或第三点干扰。
+- 模型点为 `(0.975, 1.920, -0.024)`。底盘从原点开始，水平距离 `0.975m` 小于
+  `armReachDistance=1.150m`，所以代码直接输出“底盘保持原位”，没有进行 NavMesh
+  站位搜索。
+- 实际交给 IK 的观察位姿为 `(0.725, 1.920, -0.024)`、旋转 `(0,90,0)`；这是手动
+  观察向量 `(-1,0,0)` 和运行时 `0.25m` 观察距离形成的强制末端位姿。
+- `q_start` 体检为有效；求解器依次尝试原姿态和 `±45/±90/±135/180°` roll，且每种
+  姿态都先尝试六轴、再释放 `0~0.5m` 的升降轴，共最多320次求解。
+- 最佳无碰撞候选误差为 `bestPosErr=0.03886m`、`bestRotErr=0.08360rad`；位置和姿态
+  都超过场景允许的 `0.01m/0.03rad`，因此没有候选交给 BIT*。
+- 同一目标在上一轮第一点停靠位 `(0.179,0,-0.728)` 曾达到
+  `0.01492m/0.02640rad`。从原点反而变差，说明问题不是目标顺序本身，而是该固定观察
+  位姿对底盘站位/相对方位高度敏感。
+- 本次碰撞生成后机器人位移为0、PhysX穿透为0、MuJoCo初始仅有原有1组接触；没有证据
+  表明生成凸包再次把机器人推开。
+
+### 修正后的判断
+
+- 已排除“必须先经过第一个点才失败”；该点在当前原点站位本身也没有可接受解。
+- 底盘并非驱动失效，而是 `MissionController` 只看模型点水平半径后主动决定不移动。
+- 当前日志只记录通过碰撞检查后的最佳候选；更接近的候选若因碰撞被丢弃不会留下统计，
+  因而还不能仅凭现有日志断言是纯运动学不可达。最可能范围已收敛为：固定LookAt姿态在
+  当前站位接近关节/奇异边界，或更优姿态会与机器人/支架碰撞。
+- 下一步最小隔离测试应先保持单点：临时关闭 `enableLookAt` 验证纯位置IK；随后恢复
+  LookAt，仅在不执行运动的前提下临时关闭 `checkCollision` 验证是否为碰撞过滤。两项
+  结果可决定先改底盘站位搜索还是先查具体碰撞对。
+- 正式修复仍应取消“进入名义半径就必定原地”的假设：先验证当前站位IK，失败后在目标
+  周围 NavMesh 搜索多个位置和朝向，并以实际观察位姿、IK精度和碰撞余量共同评分。
+
+### 修改情况
+
+- 仅更新项目内 `.codex/PROJECT_CONTEXT.md` 与 `.codex/WORKLOG.md`。
+- 未修改业务代码、场景、模型或规划参数。
+
+## 2026-08-14 - 关闭固定方向后的多次成功复核（只读）
+
+### 本次任务目标
+
+- 核对同一目标关闭方向约束后的多次实测，最终确认此前IK失败的决定因素。
+
+### 读取的关键文件
+
+- `Logs/Log_2026-08-14_09-25-24.log`
+- `Assets/ArmController.cs`
+- `Assets/MujocoStaticIKSolver.cs`
+- `Assets/MissionController.cs`
+- `Assets/SimulationPlatform/Scenes/RunScene.unity`
+
+### 实测结果
+
+- 三次任务均为同一单点 `1x.001`，模型点仍为 `(0.975,1.920,-0.024)`，底盘仍因水平
+  距离 `0.975m < 1.15m` 保持原点不动。
+- 唯一关键变化是日志中的目标旋转从固定测试时的 `(0,90,0)` 变为 `None`。
+- 三次均返回3个去重、通过碰撞检查的IK候选，并完成BIT*与整项任务；其中两次候选1
+  可直接连接，另一次BIT*搜索5次后成功。
+- 最佳位置误差分别约为 `0.86mm`、`0.77mm`、`0.86mm`，其余返回候选也在
+  `0.84~0.99mm` 范围，均达到场景严格 `1mm` 收敛阈值。
+- 所有成功候选的升降轴值均为 `0.0000m`，说明该目标不需要升降缸即可由六轴到达。
+- 相同碰撞体和开启的IK碰撞检查下仍稳定成功，因此此前失败不是目标位置不可达、升降
+  轴故障、底盘驱动失效或场景凸包阻挡，而是完整末端方向约束造成。
+
+### 根因与推荐正式方案
+
+- `CalculateObservationPose()` 在手动方向 `(-1,0,0)` 下生成固定前向，并构造完整
+  Quaternion；IK同时约束末端前向轴和上向轴。目标点的位置有大量可行解，但强制
+  `(0,90,0)` 后这些解会落入关节/奇异或碰撞边界。
+- 当前 `rollFallback` 只是按 `±45/±90/±135/180°` 选择若干完整姿态重新求解；它没有
+  真正把绕观察轴的roll变成连续自由度，也不会改变不可行的接近方向。
+- 若现场任务仍需要相机/工具朝向目标，不建议永久关闭 `enableLookAt`。首选正式方案是
+  新增“指向型IK”：只约束末端前向轴指向目标，放开上向轴/roll；若仍失败，再搜索邻近
+  观察方向或备用底盘站位。完全位置模式只作为明确可配置的最后降级方案并输出警告。
+
+### 修改情况与后续检查
+
+- 本轮仅更新项目内 `.codex/PROJECT_CONTEXT.md` 与 `.codex/WORKLOG.md`。
+- 未修改业务代码、场景或参数。
+- 若用户授权实施，下一步应先修改IK姿态误差维度和候选评分，保留现有完整姿态模式作
+  可选项，再用当前单点及原三点任务回归验证。
+
+## 2026-08-14 - 现有“指向型IK”基础与版本历史核对（只读）
+
+### 本次任务目标
+
+- 核对用户记忆中已经实现过的“末端朝向目标但放开自身滚转”功能，判断现有代码距离
+  正式 DirectionOnly 模式还差什么。
+
+### 读取与对比
+
+- `Assets/RobotData.cs`
+- `Assets/ArmController.cs`
+- `Assets/MujocoStaticIKSolver.cs`
+- `Assets/BITStarPlanner.cs`
+- `v1.2`、`v1.4`、`v1.5` 对上述文件的 Git 历史与 `git blame`
+
+### 已经具备的部分
+
+- `v1.2` 已有 `enableLookAt`、`faceAxis`、手动观察向量以及
+  `CalculateObservationPose()`，能够生成“末端指定轴朝向目标”的观察位置和Quaternion。
+- IK已有 `rotWeight`、角速度Jacobian、位置/姿态联合DLS，以及带姿态的BIT*入口。
+- `v1.4` 提交 `2deef7d (SoftWare1.4)` 新增 `enableRollFallback` 和
+  `rollFallbackSteps`；原始完整姿态失败后，会保持观察前向并尝试
+  `±45/±90/±135/180°` 的不同roll。`v1.5`继续保留该实现。
+
+### 为什么还不是真正的DirectionOnly
+
+- `BuildRotationAttempts()` 只是生成8个离散的完整Quaternion目标。
+- `RunDampedLeastSquares()` 对每个目标同时计算末端前向轴误差和上向轴误差，再把二者
+  相加形成3维旋转误差；因此选定某个roll后，上向轴依然被锁定。
+- 换句话说，现有功能是“枚举几个可能的完整姿态”，不是“只约束观察轴，roll作为连续
+  自由度由求解器自行选择”。当前高位点在全部离散姿态下失败，正好暴露了该差别。
+
+### 推荐复用方式
+
+- 保留现有观察位置、`faceAxis`、BIT*接口、候选/碰撞检查和FullPose逻辑。
+- 增加明确的姿态模式：`PositionOnly / DirectionOnly / FullPose`；默认建议
+  `DirectionOnly`。
+- DirectionOnly只使用末端前向轴与目标观察方向的叉积作为姿态误差，不再加入上向轴
+  误差；roll fallback在该模式下无需执行。
+- 验收应至少覆盖当前高位单点、原三点顺序、碰撞检查开启、升降轴与底盘保持原配置，
+  并核对末端前向夹角而不是完整Quaternion误差。
+
+### 修改情况
+
+- 仅更新项目内 `.codex/PROJECT_CONTEXT.md` 与 `.codex/WORKLOG.md`。
+- 未修改业务代码、场景、Prefab或规划参数。
+
+## 2026-08-14 - 实现真正的 DirectionOnly 指向型 IK
+
+### 本次任务目标
+
+- 按用户确认的第二种方案，将“末端前向指向目标、绕前向轴 roll 连续自由”正式实现，
+  同时保留纯位置和完整姿态模式。
+
+### 代码与场景修改
+
+- `Assets/MujocoStaticIKSolver.cs`
+  - 新增 `PositionOnly / DirectionOnly / FullPose` 三种 `OrientationConstraintMode`。
+  - `DirectionOnly` 使用末端 Site 的 Z 前向轴与目标前向轴之间的最短轴角误差，不再加入
+    Up 轴误差；对正反向恰好相反的180度情况使用稳定垂直轴，避免叉积为零被误判成功。
+  - 对角速度 Jacobian 应用 `P = I - ff^T` 投影，移除绕当前前向轴的分量，使 roll 真正
+    成为求解零空间中的连续自由度，而不是仍被隐式压成固定值。
+  - `FullPose` 保持原有前向+上向完整姿态约束和离散 roll fallback；`DirectionOnly` 不再
+    进行无意义的离散 roll 枚举。
+  - 无目标 Quaternion、`rotWeight` 为零时仍自动退化为 `PositionOnly`，保持既有无姿态
+    调用接口兼容；新增 `[IK姿态]` 日志输出实际生效模式。
+- `Assets/SimulationPlatform/Scenes/RunScene.unity`
+  - 正式运行求解器设置 `orientationConstraintMode = 1`（DirectionOnly）。
+  - 将上一轮纯位置隔离测试留下的 `enableLookAt = 0` 恢复为 `1`，让规划入口继续生成
+    指向目标的 Quaternion，再由 DirectionOnly 只取其中前向方向。
+  - 场景本来还包含用户其他未提交修改；本轮只新增/修改上述两个精确字段，没有清理或
+    替换其他场景差异。
+
+### 验证
+
+- 首次 `dotnet build "My project21.5.sln" --no-restore` 因 Unity `Temp/obj` 中缺少
+  `project.assets.json` 未进入源码编译；随后普通 build 重建临时依赖清单。
+- 编译发现并修正一次 `[Header]` 放在枚举而非字段上的标注错误。
+- 最终执行 `dotnet build "My project21.5.sln" --no-restore` 成功：0 error，17项均为
+  项目原有 warning。
+- 尚需用户在 Unity 中对当前高位单点和原三点任务做运行回归，日志应出现
+  `[IK姿态] mode=DirectionOnly`；同时观察末端前向是否指向目标、roll 是否能选择自然
+  关节姿态、碰撞检查是否继续通过。
+
+## 2026-08-14 - DirectionOnly 首次运行仍无解分析（只读）
+
+### 本次任务目标
+
+- 核对 DirectionOnly 上线后的首次实测，确认新模式是否真正生效，以及失败位于哪一层。
+
+### 读取的关键文件
+
+- `Logs/Log_2026-08-14_09-51-47.log`
+- `Assets/MujocoStaticIKSolver.cs`
+- `Assets/MissionController.cs`
+- `Assets/ArmController.cs`
+- `Assets/RobotData.cs`
+- `Assets/BITStarPlanner.cs`
+- `Assets/SimulationPlatform/Scenes/RunScene.unity`
+
+### 日志事实
+
+- 两次单点任务均明确输出
+  `[IK姿态] mode=DirectionOnly, targetRotation=True, rotWeight=0.100, rollFallback=False`，
+  说明新脚本和场景配置已经生效，不是 Unity 没有重新加载修改。
+- 目标仍是模型点 `(0.975,1.920,-0.024)`；实际观察位置为
+  `(0.725,1.920,-0.024)`、目标旋转 `(0,90,0)`，即末端 Z 前向轴必须沿 Unity `+X`
+  水平指向模型。
+- 底盘仍因模型点水平距离 `0.975m < armReachDistance 1.15m` 保持原点，没有搜索备用
+  站位或朝向。
+- 两次 DirectionOnly 都先运行六轴、再释放升降轴，最终得到完全相同的最佳无碰撞候选：
+  `bestPosErr=0.03178m`、`bestRotErr=0.06950rad`（约3.98度）。
+- 场景近似验收上限仍是位置 `0.01m`、方向 `0.03rad`（约1.72度），因此该候选同时
+  超出位置和方向阈值，在 BIT* 随机路径搜索开始前被拒绝。
+- 相比旧 FullPose 单点结果 `0.03886m / 0.08360rad`，释放 roll 后位置和方向误差都
+  有约17~18%的改善，但不足以达到验收范围；这证明旧 Up/roll 约束确实是一部分负担，
+  但固定 `+X` 接近方向本身仍是主要约束。
+- 同一点 PositionOnly 已实测可达到约 `0.77~0.99mm` 且升降轴为0，因此目标位置、底盘
+  驱动和升降轴本身没有故障。
+
+### 当前判断与下一步
+
+- 失败层位于 DirectionOnly IK/候选验收，不是 BIT* 路径搜索失败。
+- 当前 `bestObserved` 只统计通过最终碰撞检查的候选；日志尚未记录碰撞拒绝数量、碰撞前
+  最优误差、失败候选 qpos/关节限位和最终前向，因此还不能区分：精确 `+X` 方向确实
+  不可达、DLS陷入局部极小值，或更精确候选被碰撞过滤。
+- 不建议只增加相同随机重试次数，也不建议直接放大位置误差上限到31.78mm。
+- 推荐下一步先补失败候选诊断；若确认是数值局部极小，采用 PositionOnly 可行解预热后
+  再执行位置优先 DirectionOnly；若确认精确方向几何不可达，再由用户确认是否接受约
+  5度的方向锥容差，或改为搜索备用底盘站位/接近方向。
+
+### 修改情况
+
+- 本轮未修改业务代码、场景或参数。
+- 仅更新项目内 `.codex/WORKLOG.md` 与 `.codex/PROJECT_CONTEXT.md`。
+
+## 2026-08-14 - 后续 IK 方案含义说明（只读）
+
+### 本次任务目标
+
+- 向用户详细解释“PositionOnly 可行解预热 → 位置优先 DirectionOnly 精化”、失败诊断、
+  5度方向锥和备用底盘站位分别解决什么问题，以及它们是否会降低精度。
+
+### 说明要点
+
+- 预热不是最终取消方向，而是先用已验证可达的纯位置解作为 DirectionOnly 的初始关节
+  姿态，避免从默认/随机姿态同时追位置和方向而陷入局部极小。
+- 位置优先表示把末端位置作为一级硬任务，方向只在不破坏位置精度的关节零空间中继续
+  优化；这与当前把位置和方向加权折中不同，不需要放大10mm位置验收阈值。
+- 补充诊断用于区分局部极小、关节限位、碰撞过滤和真实几何不可达，避免盲目修改权重。
+- 约5度方向锥会真实降低方向精度，只是后备方案；备用底盘站位不降低末端精度，但会
+  增加底盘搜索和运动。
+
+### 修改情况
+
+- 未修改业务代码、场景或参数；仅补充本项目工作记录。
+
+## 2026-08-14 - PositionOnly 预热与位置优先 DirectionOnly 实现
+
+### 本次任务目标
+
+- 在不放宽位置、方向和碰撞验收标准的前提下，实现
+  `PositionOnly 可行解预热 → 位置优先 DirectionOnly 精化`，并补齐失败候选诊断。
+
+### 读取的关键文件
+
+- `AGENTS.md`
+- `.codex/WORKLOG.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `Assets/MujocoStaticIKSolver.cs`
+- `Assets/SimulationPlatform/Scenes/RunScene.unity`
+
+### 修改的业务文件
+
+- `Assets/MujocoStaticIKSolver.cs`
+
+### 具体修改
+
+- DirectionOnly每个默认/随机候选先运行一次内部 PositionOnly DLS，得到已经靠近目标位置
+  的关节构型，再从该状态精化方向；中间状态只写入临时 MuJoCo 状态，候选结束后仍由
+  原有快照恢复，不会在 Game 画面执行，也不会下发给真实机器人。
+- 新增 `enablePositionWarmStart=true`、`enablePositionPriorityDirectionSolve=true` 和
+  `positionWarmStartMaxIterations=2000` 三个可回退配置；只影响DirectionOnly。
+- DirectionOnly精化改用分层加权DLS：先计算位置一级任务；构造
+  `N = I - Jp#Jp` 位置零空间；方向二级任务只通过 `JdN` 使用剩余自由度，并补偿一级
+  位置步对方向的瞬时影响。
+- DirectionOnly阶段不再叠加原有rest pose偏置，避免未投影的舒适姿态偏置重新破坏位置
+  一级任务；PositionOnly和FullPose原路径保留。
+- 候选先捕获数值结果、再执行碰撞检查，分别统计碰撞前最佳候选和通过碰撞后的最佳候选；
+  不会让碰撞候选进入accepted列表。
+- 新增诊断：
+  - `[IK预热汇总]`：预热次数、严格收敛次数、最佳位置误差、分层开关；
+  - `[IK碰撞汇总]`：计算候选数、碰撞拒绝数和通过数；
+  - `[IK失败诊断]`：预热状态及候选来源；
+  - `[IK方向诊断]`：目标/实际前向和夹角；
+  - `[IK关节限位]`：各执行关节值、范围、最近限位余量；
+  - `[IK碰撞候选]`：最深穿透、Geom ID及通过托管MjGeom解析的名称。
+- 失败碰撞名称仍不调用有原生字符串所有权风险的 `mj_id2name`。
+- 将旧的“每个随机候选都打印初始坐标”压缩为每轮首个候选打印，避免诊断刷屏。
+
+### 保持不变的内容
+
+- 本轮未修改 `RunScene.unity`；正式场景仍为 DirectionOnly、`enableLookAt=true`。
+- `maxAcceptedPositionError=0.01m`、`maxAcceptedRotationError=0.03rad`、
+  `checkCollision=true` 均未放宽。
+- 未启用5度方向锥，未修改底盘站位搜索，也未改 BIT*、MissionController 或真实机器人
+  下发逻辑。
+
+### 验证
+
+- `dotnet build "My project21.5.sln" --no-restore` 成功：0 error；17项均为项目原有
+  warning。
+- `MujocoStaticIKSolver.cs` 保持原CRLF格式，并通过带 `cr-at-eol` 的 diff whitespace检查。
+- 尚需 Unity 运行回归当前高位单点。先确认 `[IK预热汇总]` 中存在严格收敛的约1mm
+  PositionOnly预热，再查看最终是否返回候选；若仍失败，把新的方向、限位和碰撞诊断
+  作为决定备用底盘站位或方向锥的依据。
+
+### 当前状态
+
+- 代码实现和静态编译已完成，等待 Unity 场景运行验收。
+
+## 2026-08-14 - 分层 DirectionOnly 三次运行复测分析（只读）
+
+### 本次任务目标
+
+- 核对用户在启用 PositionOnly 预热和位置优先 DirectionOnly 后的多次失败日志，判断
+  新实现是否生效，以及失败是否来自位置、碰撞、关节限位或固定方向约束。
+
+### 日志证据
+
+- 检查 `Logs/Log_2026-08-14_10-35-19.log`，其中包含 10:35:42、10:35:52、
+  10:36:26 三次独立单点规划。
+- 三次均为 `mode=DirectionOnly`，预热分别严格收敛 30/40、30/40、29/40；最佳预热
+  位置误差为 `0.73~0.81mm`，且 `hierarchical=True`，说明新代码和两个关键开关确实
+  已生效。
+- 三次最终最佳无碰撞候选完全一致：位置误差 `2.90mm`，满足现有 `10mm` 近似验收
+  上限；方向误差 `0.20826rad = 11.933°`，明显超过 `0.03rad = 1.719°` 上限，故在
+  BIT* 路径搜索开始前由 IK 验收拒绝。
+- 每轮40个候选中分别有24、18、25个被碰撞检查拒绝，但全局最优候选本身通过碰撞检查；
+  因而当前失败不是碰撞过滤掉了更优候选。
+- 六个转动关节均不接近限位；只有升降缸 `joint10=0m` 位于下限。求解器已先做不允许
+  升降缸参与的六轴阶段，再释放升降缸，两阶段都未满足方向，因此不能把失败简单归因于
+  升降缸下限。
+- 底盘因目标模型点水平距离 `0.975m < 1.15m` 保持原位，没有搜索其他站位。
+
+### 当前结论
+
+- 分层求解把位置从旧 DirectionOnly 的 `31.78mm` 改善到 `2.90mm`，证明“先保证位置”
+  已按预期工作；代价是当前固定站位下方向稳定停在约 `11.93°` 的残差平台。
+- 位置可达、碰撞过滤和转动关节限位已基本排除。剩余主要可能性是：当前底盘站位下精确
+  Unity `+X` 接近方向不在该末端点的可达方向集合内，或零空间精化在该构型附近进入稳定
+  局部极小/奇异位形。
+- 40次候选、约30次成功位置预热仍反复得到同一最佳方向残差，继续单纯增加相同随机重试
+  次数的收益很低。
+- 当前残差约 `11.93°`，所以直接采用先前讨论的 `5°` 方向锥仍不足以接纳这个候选；更稳妥
+  的下一步是先做固定位置的方向可行性扫描，并让底盘在少量备用站位/朝向上重算，以区分
+  真正几何不可达和现有零空间算法局部极小，同时保持现有方向精度要求。
+
+### 修改情况
+
+- 本轮未修改业务代码、场景或求解参数。
+- 仅更新项目内诊断记录和迁移说明。
+
+## 2026-08-14 - 以相机可见性为目标的方向锥方案确认（只读）
+
+### 本次任务目标
+
+- 根据用户“只要相机能看到接头即可”的任务要求，评估是否可用更大的DirectionOnly方向锥
+  替代备用底盘站位搜索，并给出具体建议值和修改边界。
+
+### 检查结果与建议
+
+- 当前真实视频链路使用 `ExternalCode/realsense_image_server.py` 获取RealSense彩色图，历史
+  运行日志确认分辨率为1280x720；RunScene内名为`fixed`/`track`的Unity Camera不是这一路
+  真实相机画面，不能用其FOV代替RealSense视场。
+- 本轮尝试只读查询在线RealSense的真实内参/FOV，但设备访问未获授权，因此没有假定具体
+  相机型号或把Unity Camera参数当成硬件参数。
+- 当前最佳DirectionOnly方向残差为11.933度。建议第一档采用“半角15度”的方向锥
+  （完整锥角30度，弧度约0.261799），比当前候选留约3度余量；不建议一开始直接放到20度
+  以上，避免接头落在画面边缘且受安装偏差影响后离开有效识别区。
+- 实现时应只放宽DirectionOnly的最终近似验收上限；保持位置10mm、碰撞检查、方向优化
+  权重和严格收敛阈值不变。这样求解器仍会在候选中优先选择方向误差更小的解，只在没有
+  严格方向解时接纳15度锥内的候选。
+- “夹角小于相机半视场”只保证理论上可能入画，不自动保证目标未遮挡、尺寸足够或视觉模型
+  能识别。Unity复测时需要打开真实现场视频，确认接头位于画面中部而非刚好贴边；真机执行
+  前仍需低速/仿真验证。
+
+### 修改情况
+
+- 本轮未修改业务代码或场景参数，只确认推荐方案并更新项目记录。
+
+## 2026-08-14 - DirectionOnly角度误差几何含义说明（只读）
+
+### 本次任务目标
+
+- 解释方向误差是“末端到达观察点后的姿态误差”，还是“末端位置可以落在锥形区域”，并
+  对照当前ArmController和IK代码明确观察点、接头和相机视线的关系。
+
+### 代码链路与结论
+
+- `ArmController.CalculateObservationPose()` 先根据接头位置、机器人位置和
+  `observationDistance` 计算观察点：`p = target + dir * observationDistance`；当前复现
+  日志中接头约为 `(0.975,1.920,-0.024)`，IK观察点约为
+  `(0.725,1.920,-0.024)`，两者相距约0.25m。
+- 同一方法用 `Quaternion.LookRotation(target - p)` 生成从观察点精确指向接头的理想朝向；
+  当前 `faceAxis=(0,0,1)`，因此DirectionOnly比较的是`tip`的Z前向轴和这条理想视线。
+- IK位置误差与方向误差独立计算：位置误差是实际`tip`位置到固定观察点`p`的欧氏距离；
+  方向误差通过`Vector3.Angle(actualForward,targetForward)`等价的轴角计算得到。
+- 所谓“半角15度方向锥”的锥顶在实际末端/相机附近，中心轴是“观察点→接头”的理想方向；
+  被放宽的是前向向量可以在锥内偏转，不是末端位置可以在锥形体积内任意移动。末端位置
+  仍需满足现有10mm上限（当前候选为2.90mm）。
+- 接纳15度方向误差不代表实际光轴仍精确穿过接头，而是接头相对理想光轴最多可能偏约
+  15度。若相机光心/光轴与`tip`完全一致，0.25m距离下11.933度约对应画面目标相对中心线
+  5.3cm，15度约对应6.7cm；真实安装偏置会改变该数值。
+- 当前代码没有把RealSense外参显式纳入IK；只有在真实相机光轴与`tip` Z轴已经通过机械
+  安装或标定对齐时，IK的方向角才能直接等价为接头在真实相机画面中的离轴角。上线前仍
+  应用现场视频确认。
+
+### 修改情况
+
+- 本轮未修改业务代码或场景参数，只补充几何定义和验证边界。
+
+## 2026-08-14 - RunScene DirectionOnly方向锥放宽至半角15度
+
+### 本次任务目标
+
+- 按用户确认，将正式RunScene的DirectionOnly最终方向近似验收范围改为半角15度，使当前
+  11.933度方向残差、2.90mm位置误差的无碰撞候选可以进入后续BIT*规划。
+
+### 读取的关键文件
+
+- `AGENTS.md`
+- `.codex/WORKLOG.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `Assets/MujocoStaticIKSolver.cs`
+- `Assets/ArmController.cs`
+- `Assets/MissionController.cs`
+- `Assets/SimulationPlatform/Scenes/RunScene.unity`
+
+### 修改的业务文件
+
+- `Assets/SimulationPlatform/Scenes/RunScene.unity`
+
+### 具体修改
+
+- 仅将RunScene中`MujocoStaticIKSolver.maxAcceptedRotationError`从`0.03rad`
+  （约1.719度）改为`0.2617994rad`（15度）。
+- 未修改`stopRotThreshold=0.005rad`、`rotWeight=0.1`或DirectionOnly分层求解过程，因此
+  求解器仍继续优化方向并按现有评分选择误差更小的候选；15度只作为严格收敛失败后的最终
+  近似验收上限。
+- 未修改`maxAcceptedPositionError=0.01m`、`checkCollision=true`、接头观察距离、底盘
+  搜索、BIT*路径规划或真实机器人下发逻辑。
+- 本次只修改场景YAML中的一个现有标量，未覆盖RunScene内其他未提交修改。
+
+### 验证与待测
+
+- 文本检查确认RunScene现在保存`maxAcceptedRotationError: 0.2617994`，换算为15度。
+- 本次没有修改C#，无需新增编译依赖；仍需用户在Unity中重新运行此前单点，确认IK返回
+  候选并开始BIT*规划，然后打开真实现场视频检查接头是否位于可稳定识别区域。
+- 真机执行前应先在仿真/低速条件验证；如果日志方向误差超过15度仍会按预期拒绝。
+
+### 当前状态
+
+- 场景参数修改完成，等待Unity运行回归。

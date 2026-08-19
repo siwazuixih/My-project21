@@ -99,8 +99,16 @@ public class MissionController : MonoBehaviour
             Debug.Log("🔄 开始全任务预计算...");
             bool success = DeepPrecomputeAll(); 
             
-            if (success) Debug.Log($"🚀 [预计算] 成功计算 {mission.targets.Count} 个任务！IK全部通过。");
-            else Debug.LogError("⚠️ [预计算] 存在严重路径或IK问题！");
+            if (success)
+            {
+                Debug.Log($"🚀 [预计算] 成功计算 {mission.targets.Count} 个任务！底盘路径和IK全部通过。");
+            }
+            else
+            {
+                Debug.LogError("⚠️ [预计算] 存在严重路径或IK问题，任务已停止，不会执行不完整的缓存路径。");
+                currentState = MissionState.Idle;
+                return;
+            }
 
             currentMissionIndex = 0;
             refs.targetObject = mission.targets[0];
@@ -174,6 +182,196 @@ public class MissionController : MonoBehaviour
         chassisCtrl.CalculateAndStartPath(true);
     }
 
+    private bool TryBuildChassisPath(
+        int taskIndex,
+        Vector3 simPos,
+        Vector3 simFwd,
+        Transform destination,
+        out Vector3[] executionPath,
+        out Vector3 finalStopPoint,
+        out Vector3 finalFacingDir,
+        out bool hasNavigationPath,
+        out string failureReason)
+    {
+        executionPath = null;
+        finalStopPoint = simPos;
+        finalFacingDir = HorizontalDirectionOrFallback(simFwd, transform.forward);
+        hasNavigationPath = false;
+        failureReason = null;
+
+        if (destination == null)
+        {
+            failureReason = "目标对象为空";
+            return false;
+        }
+
+        float horizontalDistance = HorizontalDistance(simPos, destination.position);
+        Debug.Log(
+            $"[底盘预计算] 目标 {taskIndex + 1}/{mission.targets.Count}: " +
+            $"起点={simPos:F3}, 目标={destination.position:F3}, 水平距离={horizontalDistance:F3}m, " +
+            $"机械臂工作半径={chassis.armReachDistance:F3}m");
+
+        if (horizontalDistance <= chassis.armReachDistance)
+        {
+            executionPath = new[] { simPos };
+            Debug.Log($"[底盘预计算] 目标 {taskIndex + 1} 已在机械臂工作半径内，底盘保持原位。");
+            return true;
+        }
+
+        Vector3 sourceProbe = new Vector3(simPos.x, simPos.y, simPos.z);
+        float sourceSampleRadius = Mathf.Max(0.5f, chassis.stopDistance * 4f);
+        if (!NavMesh.SamplePosition(sourceProbe, out NavMeshHit sourceHit, sourceSampleRadius, NavMesh.AllAreas))
+        {
+            failureReason = $"底盘起点附近 {sourceSampleRadius:F2}m 内没有可用 NavMesh";
+            return false;
+        }
+
+        // SamplePosition 得到的是 NavMesh 上的计算起点，并不一定等于底盘的真实位置。
+        // 小偏移时只用它做 CalculatePath，避免底盘先去追这个采样点而产生短折线；
+        // 偏移过大则说明底盘已经明显离开导航面，继续执行会有穿越障碍的风险。
+        const float sourceSampleExecutionTolerance = 0.25f;
+        float sourceSampleOffset = HorizontalDistance(simPos, sourceHit.position);
+        if (sourceSampleOffset > sourceSampleExecutionTolerance)
+        {
+            failureReason =
+                $"底盘真实起点距最近 NavMesh 点 {sourceSampleOffset:F3}m，" +
+                $"超过允许偏差 {sourceSampleExecutionTolerance:F3}m";
+            return false;
+        }
+
+        // 目标对象的 Transform 往往位于模型内部或离地。先投影到与底盘同高的地面，
+        // 再在机械臂工作半径内寻找可导航点，避免直接把模型中心交给 CalculatePath。
+        Vector3 destinationProbe = new Vector3(destination.position.x, simPos.y, destination.position.z);
+        float targetSampleRadius = Mathf.Max(0.5f, chassis.armReachDistance);
+        if (!NavMesh.SamplePosition(destinationProbe, out NavMeshHit destinationHit, targetSampleRadius, NavMesh.AllAreas))
+        {
+            failureReason = $"目标附近 {targetSampleRadius:F2}m 内没有可用 NavMesh 停靠点";
+            return false;
+        }
+
+        float sampledDistance = HorizontalDistance(destinationHit.position, destination.position);
+        if (sampledDistance > chassis.armReachDistance + 0.01f)
+        {
+            failureReason =
+                $"最近 NavMesh 点距目标 {sampledDistance:F3}m，超过机械臂工作半径 {chassis.armReachDistance:F3}m";
+            return false;
+        }
+
+        NavMeshPath navPath = new NavMeshPath();
+        bool pathCalculated = NavMesh.CalculatePath(
+            sourceHit.position,
+            destinationHit.position,
+            NavMesh.AllAreas,
+            navPath);
+
+        int cornerCount = navPath.corners != null ? navPath.corners.Length : 0;
+        Debug.Log(
+            $"[底盘预计算] 目标 {taskIndex + 1}: 起点采样={sourceHit.position:F3}, " +
+            $"起点偏移={sourceSampleOffset:F3}m（采样点仅用于路径计算）, " +
+            $"终点采样={destinationHit.position:F3}, CalculatePath={pathCalculated}, " +
+            $"状态={navPath.status}, 角点数={cornerCount}");
+
+        if (!pathCalculated || navPath.status != NavMeshPathStatus.PathComplete || cornerCount == 0)
+        {
+            failureReason = $"NavMesh 路径无效或不完整（返回={pathCalculated}, 状态={navPath.status}, 角点={cornerCount}）";
+            return false;
+        }
+
+        List<Vector3> route = new List<Vector3>();
+        AddPathPointIfDistinct(route, simPos);
+        // navPath.corners[0] 是 sourceHit；执行路径从真实 simPos 直接接入主路径，
+        // 不把小偏移的 NavMesh 采样点当作必须到达的底盘航点。
+        for (int i = 1; i < cornerCount; i++)
+        {
+            AddPathPointIfDistinct(route, navPath.corners[i]);
+        }
+        AddPathPointIfDistinct(route, destinationHit.position);
+
+        List<Vector3> trimmedPath = new List<Vector3> { simPos };
+        bool foundStopPoint = false;
+        const float sampleStep = 0.05f;
+
+        for (int segmentIndex = 0; segmentIndex < route.Count - 1 && !foundStopPoint; segmentIndex++)
+        {
+            Vector3 segmentStart = route[segmentIndex];
+            Vector3 segmentEnd = route[segmentIndex + 1];
+            Vector3 horizontalSegment = segmentEnd - segmentStart;
+            horizontalSegment.y = 0f;
+            float segmentLength = horizontalSegment.magnitude;
+
+            if (segmentLength <= 0.0001f)
+            {
+                continue;
+            }
+
+            Vector3 segmentDirection = horizontalSegment / segmentLength;
+            int sampleCount = Mathf.Max(1, Mathf.CeilToInt(segmentLength / sampleStep));
+            for (int sampleIndex = 0; sampleIndex <= sampleCount; sampleIndex++)
+            {
+                float distanceOnSegment = Mathf.Min(sampleIndex * sampleStep, segmentLength);
+                Vector3 testPosition = segmentStart + segmentDirection * distanceOnSegment;
+                testPosition.y = simPos.y;
+
+                if (HorizontalDistance(testPosition, destination.position) <= chassis.armReachDistance)
+                {
+                    finalStopPoint = testPosition;
+                    finalFacingDir = segmentDirection;
+                    AddPathPointIfDistinct(trimmedPath, finalStopPoint);
+                    foundStopPoint = true;
+                    break;
+                }
+            }
+
+            if (!foundStopPoint)
+            {
+                Vector3 routePoint = segmentEnd;
+                routePoint.y = simPos.y;
+                AddPathPointIfDistinct(trimmedPath, routePoint);
+            }
+        }
+
+        if (!foundStopPoint)
+        {
+            failureReason =
+                $"完整 NavMesh 路径上没有找到距目标 {chassis.armReachDistance:F3}m 内的底盘停靠点";
+            return false;
+        }
+
+        executionPath = trimmedPath.ToArray();
+        hasNavigationPath = executionPath.Length > 1 && HorizontalDistance(simPos, finalStopPoint) > chassis.stopDistance;
+
+        Vector3 moveDelta = finalStopPoint - simPos;
+        Debug.Log(
+            $"[底盘预计算] 目标 {taskIndex + 1}: 停靠点={finalStopPoint:F3}, " +
+            $"移动量={moveDelta:F3}, 停靠后距目标={HorizontalDistance(finalStopPoint, destination.position):F3}m, " +
+            $"朝向={finalFacingDir:F3}, 执行路径点数={executionPath.Length}");
+        return true;
+    }
+
+    private static float HorizontalDistance(Vector3 a, Vector3 b)
+    {
+        float dx = a.x - b.x;
+        float dz = a.z - b.z;
+        return Mathf.Sqrt(dx * dx + dz * dz);
+    }
+
+    private static Vector3 HorizontalDirectionOrFallback(Vector3 direction, Vector3 fallback)
+    {
+        direction.y = 0f;
+        if (direction.sqrMagnitude > 0.0001f) return direction.normalized;
+
+        fallback.y = 0f;
+        return fallback.sqrMagnitude > 0.0001f ? fallback.normalized : Vector3.forward;
+    }
+
+    private static void AddPathPointIfDistinct(List<Vector3> points, Vector3 point)
+    {
+        if (points.Count == 0 || HorizontalDistance(points[points.Count - 1], point) > 0.001f)
+        {
+            points.Add(point);
+        }
+    }
+
     unsafe bool DeepPrecomputeAll()
     {
         Debug.Log("🔍 进入深度预计算...");
@@ -216,47 +414,22 @@ public class MissionController : MonoBehaviour
         for (int i = 0; i < mission.targets.Count; i++)
         {
             Transform dest = mission.targets[i];
-            float distToTarget = Vector3.Distance(new Vector3(simPos.x, 0, simPos.z), new Vector3(dest.position.x, 0, dest.position.z));
-            Vector3 finalStopPoint = simPos;
-            Vector3 finalFacingDir = simFwd;
-            NavMeshPath tempPath = new NavMeshPath();
-            Vector3[] chassisPathForExecution = null;
-            bool hasNavigationPath = false;
-            
-            if (distToTarget < chassis.armReachDistance) {
-                chassisPathForExecution = new Vector3[]{ simPos };
-            } else {
-                NavMesh.CalculatePath(simPos, dest.position, NavMesh.AllAreas, tempPath);
-
-                if (tempPath.corners.Length >= 2) {
-                    Vector3 pathStart = tempPath.corners[tempPath.corners.Length - 2];
-                    Vector3 pathEnd = tempPath.corners[tempPath.corners.Length - 1];
-                    Vector3 segmentDir = (pathEnd - pathStart).normalized;
-                    float segmentLen = Vector3.Distance(pathStart, pathEnd);
-                    float stepSize = 0.05f; 
-                    bool foundStop = false;
-                    finalStopPoint = pathEnd; finalFacingDir = segmentDir;
-
-                    for (float d = 0; d <= segmentLen; d += stepSize) {
-                        Vector3 testPos = pathStart + (segmentDir * d);
-                        float testDist = Vector3.Distance(new Vector3(testPos.x, 0, testPos.z), new Vector3(dest.position.x, 0, dest.position.z));
-                        if (testDist < chassis.armReachDistance) {
-                            finalStopPoint = testPos; finalStopPoint.y = simPos.y;
-                            finalFacingDir = segmentDir; foundStop = true; break;
-                        }
-                    }
-                }
-
-                if (tempPath.corners != null && tempPath.corners.Length > 0) {
-                    chassisPathForExecution = new Vector3[tempPath.corners.Length];
-                    System.Array.Copy(tempPath.corners, chassisPathForExecution, tempPath.corners.Length);
-                    chassisPathForExecution[chassisPathForExecution.Length - 1] = finalStopPoint;
-                    hasNavigationPath = chassisPathForExecution.Length > 1;
-                }
+            if (!TryBuildChassisPath(
+                    i,
+                    simPos,
+                    simFwd,
+                    dest,
+                    out Vector3[] chassisPathForExecution,
+                    out Vector3 finalStopPoint,
+                    out Vector3 finalFacingDir,
+                    out bool hasNavigationPath,
+                    out string pathFailureReason))
+            {
+                Debug.LogError($"[底盘预计算] 目标 {i + 1} 路径规划失败：{pathFailureReason}。已终止整组任务。");
+                allSuccess = false;
+                break;
             }
 
-            if (chassisPathForExecution == null || chassisPathForExecution.Length == 0)
-                chassisPathForExecution = new Vector3[]{ simPos };
             globalPathCache.Add(chassisPathForExecution);
 
             // 💡 3. 将底盘导航路径加入清单！
@@ -331,14 +504,26 @@ public class MissionController : MonoBehaviour
                 precalcArmTarget = tPos, ikSuccess = (armSolution != null && armSolution.Count > 0), precalcArmPlan = armSolution 
             });
 
-            if (armSolution == null) allSuccess = false;
+            if (armSolution == null || armSolution.Count == 0)
+            {
+                Debug.LogError($"[机械臂预计算] 目标 {i + 1} 未得到可执行解，已终止整组任务。");
+                allSuccess = false;
+                break;
+            }
+
             simPos = finalStopPoint; simFwd = finalFacingDir;
         }
 
         for(int i = 0; i < nq; i++) MjScene.Instance.Data->qpos[i] = backupQpos[i];
         MujocoLib.mj_forward(MjScene.Instance.Model, MjScene.Instance.Data);
 
-        hasPrecalculated = true;
+        hasPrecalculated = allSuccess;
+        if (!allSuccess)
+        {
+            globalPathCache.Clear();
+            snapshots.Clear();
+            if (connect.Commander != null) connect.Commander.ClearAllTasks();
+        }
         return allSuccess;
     }
 
@@ -367,7 +552,24 @@ public class MissionController : MonoBehaviour
             return;
         }
         mission.targets.Clear();
-        mission.targets.AddRange(seletectedObjects);
+        HashSet<int> uniqueTargetIds = new HashSet<int>();
+        foreach (Transform selectedTransform in seletectedObjects)
+        {
+            Transform logicalTarget = ModelCollisionHighlighter.ResolveLogicalSelectionTarget(selectedTransform);
+            if (logicalTarget == null || !uniqueTargetIds.Add(logicalTarget.GetInstanceID())) continue;
+            mission.targets.Add(logicalTarget);
+        }
+
+        if (mission.targets.Count == 0)
+        {
+            Debug.LogWarning("选中的路径点全部无效，退出控制。");
+            return;
+        }
+
+        if (mission.targets.Count != seletectedObjects.Count)
+        {
+            Debug.Log($"[路径点去重] 原始 {seletectedObjects.Count} 个，合并原模型/Hull后保留 {mission.targets.Count} 个逻辑目标。");
+        }
         if (chassisSpeed != null)
         {
             chassis.moveSpeed = chassisSpeed.Value;

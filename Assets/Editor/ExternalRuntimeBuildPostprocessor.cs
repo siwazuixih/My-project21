@@ -65,6 +65,11 @@ public sealed class ExternalRuntimeBuildPostprocessor :
             File.Copy(sourceFile, targetFile, true);
         }
 
+        int copiedModelCount = CopyOptionalVisionModels(
+            sourceExternalDirectory,
+            targetExternalDirectory
+        );
+
         string sourceFont =
             Path.Combine(projectRoot, "Assets", "微软雅黑.ttf");
         if (!File.Exists(sourceFont))
@@ -84,8 +89,62 @@ public sealed class ExternalRuntimeBuildPostprocessor :
         );
 
         Debug.Log(
-            "[Build] 已复制 ExternalCode Python 程序和中文曲线字体到: "
+            "[Build] 已复制 ExternalCode Python 程序、"
+            + copiedModelCount
+            + " 个视觉模型文件和中文曲线字体到: "
             + buildRoot
         );
+    }
+
+    private static int CopyOptionalVisionModels(
+        string sourceExternalDirectory,
+        string targetExternalDirectory
+    )
+    {
+        string sourceModelDirectory =
+            Path.Combine(sourceExternalDirectory, "models");
+        if (!Directory.Exists(sourceModelDirectory))
+        {
+            Debug.LogWarning(
+                "[Build] ExternalCode/models 不存在；视觉服务将以原图降级模式运行。"
+            );
+            return 0;
+        }
+
+        string targetModelDirectory =
+            Path.Combine(targetExternalDirectory, "models");
+        string[] modelFiles = Directory.GetFiles(
+            sourceModelDirectory,
+            "*.pt",
+            SearchOption.AllDirectories
+        );
+        foreach (string sourceFile in modelFiles)
+        {
+            string relativePath = sourceFile
+                .Substring(sourceModelDirectory.Length)
+                .TrimStart(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar
+                );
+            string targetFile = Path.Combine(
+                targetModelDirectory,
+                relativePath
+            );
+            string targetDirectory = Path.GetDirectoryName(targetFile);
+            if (!string.IsNullOrEmpty(targetDirectory))
+            {
+                Directory.CreateDirectory(targetDirectory);
+            }
+            File.Copy(sourceFile, targetFile, true);
+        }
+
+        if (modelFiles.Length == 0)
+        {
+            Debug.LogWarning(
+                "[Build] ExternalCode/models 中没有 .pt 文件；"
+                + "视觉服务将以原图降级模式运行。"
+            );
+        }
+        return modelFiles.Length;
     }
 }

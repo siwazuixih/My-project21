@@ -250,6 +250,7 @@ curve_image_lock = threading.Lock()
 plot_render_lock = threading.Lock()
 latest_curve_jpeg = None
 latest_curve_time = None
+latest_curve_content_type = "image/jpeg"
 curve_render_count = 0
 curve_render_error = ""
 
@@ -1319,9 +1320,33 @@ def unity_command_server():
 # =========================
 # Unity 实时力矩曲线图
 # =========================
+def encode_unity_curve_image(canvas, output):
+    """优先输出 JPEG；旧版 Agg 没有 JPEG 接口时自动回退 PNG。"""
+    jpeg_writer = getattr(canvas, "print_jpg", None)
+    if jpeg_writer is None:
+        jpeg_writer = getattr(canvas, "print_jpeg", None)
+
+    if jpeg_writer is not None:
+        try:
+            jpeg_writer(
+                output,
+                pil_kwargs={"quality": CURVE_JPEG_QUALITY},
+            )
+        except TypeError:
+            # 兼容有 JPEG 接口、但不接受 pil_kwargs 的旧 Matplotlib。
+            output.seek(0)
+            output.truncate(0)
+            jpeg_writer(output)
+        return "image/jpeg"
+
+    canvas.print_png(output)
+    return "image/png"
+
+
 def curve_render_worker():
     """在独立线程中绘制 Unity 预览图，不改变最终 CSV/PNG 保存逻辑。"""
     global latest_curve_jpeg, latest_curve_time
+    global latest_curve_content_type
     global curve_render_count, curve_render_error
 
     fig_live = Figure(figsize=(9.6, 5.4), dpi=100)
@@ -1413,15 +1438,16 @@ def curve_render_worker():
                 )
 
                 output = io.BytesIO()
-                canvas_live.print_jpg(
+                image_content_type = encode_unity_curve_image(
+                    canvas_live,
                     output,
-                    pil_kwargs={"quality": CURVE_JPEG_QUALITY},
                 )
                 image_bytes = output.getvalue()
 
             with curve_image_lock:
                 latest_curve_jpeg = image_bytes
                 latest_curve_time = time.time()
+                latest_curve_content_type = image_content_type
                 curve_render_count += 1
                 curve_render_error = ""
         except Exception as exc:
@@ -1448,13 +1474,14 @@ class CurveImageHandler(BaseHTTPRequestHandler):
         with curve_image_lock:
             image = latest_curve_jpeg
             rendered_at = latest_curve_time
+            content_type = latest_curve_content_type
 
         if image is None:
             self.send_error(503, "Curve image is not ready")
             return
 
         self.send_response(200)
-        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(image)))
         self.send_header("Cache-Control", "no-store")
         self.send_header(
@@ -1470,6 +1497,7 @@ class CurveImageHandler(BaseHTTPRequestHandler):
                 "ok": latest_curve_jpeg is not None and not curve_render_error,
                 "render_count": curve_render_count,
                 "last_render_time": latest_curve_time,
+                "content_type": latest_curve_content_type,
                 "last_error": curve_render_error,
             }
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

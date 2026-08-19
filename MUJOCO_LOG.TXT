@@ -895,3 +895,8 @@ WARNING: Nan, Inf or huge value in QACC at DOF 0. The simulation is unstable. Ti
 Tue Jan 20 15:21:48 2026
 WARNING: Nan, Inf or huge value in QACC at DOF 0. The simulation is unstable. Time = 0.0340.
 
+Thu Aug 13 16:25:26 2026
+ERROR: mj_stackAlloc: out of memory, stack overflow at mj_projectConstraint, line 2195
+  max = 204768, available = 99864, requested = 104800
+ nefc = 1310, ncon = 265
+

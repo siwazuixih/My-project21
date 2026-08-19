@@ -39,6 +39,7 @@ public sealed class VisionImageReceiver : MonoBehaviour
     private bool videoEnabled;
     private bool shuttingDown;
     private float nextErrorLogTime;
+    private string lastVisionMode = "";
     private readonly Color videoOffButtonColor =
         new Color(0.05f, 0.35f, 0.65f, 0.92f);
     private readonly Color videoOnButtonColor =
@@ -710,6 +711,7 @@ public sealed class VisionImageReceiver : MonoBehaviour
         videoEnabled = true;
         receivedFirstFrame = false;
         nextErrorLogTime = 0f;
+        lastVisionMode = "";
         targetImage.texture = null;
         targetImage.color = Color.black;
         targetImage.gameObject.SetActive(true);
@@ -737,6 +739,7 @@ public sealed class VisionImageReceiver : MonoBehaviour
 
         requestRunning = false;
         receivedFirstFrame = false;
+        lastVisionMode = "";
         CloseVideoPopup();
         ReleaseLatestTexture();
 
@@ -762,7 +765,7 @@ public sealed class VisionImageReceiver : MonoBehaviour
     {
         if (videoToggleButtonText != null)
         {
-            videoToggleButtonText.text = enabled ? "关闭视频" : "开启视频";
+            videoToggleButtonText.text = enabled ? "关闭视觉" : "开启视觉";
         }
 
         if (videoToggleButtonBackground != null)
@@ -896,6 +899,26 @@ public sealed class VisionImageReceiver : MonoBehaviour
                         + $"source={source ?? "unknown"}."
                     );
                     SetVideoButtonState(true);
+                }
+
+                string visionMode =
+                    request.GetResponseHeader("X-Vision-Mode") ?? "unknown";
+                if (visionMode != lastVisionMode)
+                {
+                    lastVisionMode = visionMode;
+                    if (visionMode == "processed")
+                    {
+                        UnityEngine.Debug.Log(
+                            "[VisionImage] 视觉模型已生效，当前显示处理图。"
+                        );
+                    }
+                    else if (visionMode == "raw_fallback")
+                    {
+                        UnityEngine.Debug.LogWarning(
+                            "[VisionImage] 视觉模型不可用或处理失败，"
+                            + "当前自动显示普通实时图像。"
+                        );
+                    }
                 }
             }
             else if (
