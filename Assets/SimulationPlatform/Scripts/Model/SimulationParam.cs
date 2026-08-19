@@ -31,4 +31,16 @@ public class SimulationParam
 
     [XmlAttribute]
     public bool ShowTarget { get; set; }
+
+    [XmlAttribute]
+    public float CameraCurrentX { get; set; }
+
+    [XmlAttribute]
+    public float CameraCurrentY { get; set; }
+
+    [XmlAttribute]
+    public float CameraCurrentDistance { get; set; }
+
+    [XmlElement]
+    public Vector3D CameraPanOffset { get; set; }
 }

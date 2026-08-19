@@ -3596,3 +3596,63 @@
   Unity场景、Prefab或运行参数。
 - `SoftWare1.7 / v1.7` 分支、标签及GitHub Release均已完成；本次新增的记录尚需另行提交
   才会同步到GitHub。
+
+## 2026-08-19 - 伍老师21.4改动深度对比与第一批集成
+
+### 本次任务目标
+
+- 以已发布的21.5/v1.7为基线，深度对比`My project21.4-wulaoshi`，处理7月23日反馈的
+  三类问题：视角和替换接头保存、替换后旧目标点残留、场景模型界面缺少网格切割。
+- 不整目录覆盖、不回退21.5现有的IK、NavMesh、碰撞体诊断、视觉和真机控制改动。
+
+### 对比结论
+
+- 伍老师目录与21.5从较早历史独立演进，不能用普通快进合并；其工作区显示的243个修改
+  文件经忽略行尾差异后均为0行真实修改，属于CRLF/LF噪声，真实功能改动都在提交历史中。
+- 与本次反馈直接相关的提交为：`fae2e2e`（视角保存）、`dc4bcd5`（替换时清理旧选择）、
+  `b820a07`（替换模型命名回退）、`4c26960`（替换记录回填和恢复）、`03c9c77`
+  （MainScene网格切割入口）。
+- 未整包移植`46a6269`的场景管理界面重排、`872ba48`的面板生命周期改动、`8f36012`的
+  调试立方体/材质，以及`fae2e2e`中把项目记录上限从50改成1的无关变更。
+- `9d35a04`的目标点持久化没有进入本批：原实现不能可靠恢复红色高亮，保存的点位语义和
+  路径标记不完全一致，同名/替换兄弟节点也可能匹配错误。本批只修复反馈明确要求的
+  “替换后旧接头仍作为隐藏目标参与规划”。
+
+### 修改的业务文件
+
+- `Assets/SimulationPlatform/Scripts/Behaviour/CameraController.cs`
+- `Assets/SimulationPlatform/Scripts/Behaviour/ModelCollisionHighlighter.cs`
+- `Assets/SimulationPlatform/Scripts/Function/ModelImport.cs`
+- `Assets/SimulationPlatform/Scripts/Function/Simulation.cs`
+- `Assets/SimulationPlatform/Scripts/Model/ProjectRecord.cs`
+- `Assets/SimulationPlatform/Scripts/Model/SimulationParam.cs`
+- `Assets/SimulationPlatform/Scenes/MainScene.unity`
+
+### 具体集成内容
+
+- `CameraController`新增受控视角状态读写，保存水平角、垂直角、缩放距离和平移偏移；
+  项目保存时同时写入`ProjectRecord`兼容字段和`SimulationParam`统一字段，加载模型和
+  自动取景完成后在帧末恢复视角，兼容伍老师版本已生成的XML。
+- 项目记录加载时真正回填`Replaces`，模型加载后按层级索引定位原接头、按JointId加载
+  对应GLB并逐条重放替换；全部完成后刷新替换记录列表、恢复视角并重建运行时NavMesh。
+- 替换接头前通过21.5现有的“逻辑选择目标”解析清除高亮、静态目标列表和
+  `PathPointManager`标记，保留21.5对自动生成`_MjRoot/_Hull_`碰撞代理的去重逻辑；
+  替换模型缺少名称时使用“替换接头”回退名。
+- `ModelImport`等待派生类`OnModelLoaded()`异步初始化完成，并在故障时终止后续初始化，
+  避免恢复任务与模型基础组件创建相互抢跑。
+- 仅在`MainScene`补充并绑定`ColliderBtn`，按钮文字为“网格切割”，放在保存按钮下方；
+  继续复用21.5现有`SceneEdit.OnColliderBtnClick()`和`AutoColliderGen_Final`，未覆盖整场景。
+
+### 验证
+
+- `dotnet build "My project21.5.sln" --no-restore -v:minimal`成功：0错误、25个既有警告。
+- `git -c core.whitespace=cr-at-eol diff --check`通过。
+- MainScene新增的9个Unity YAML fileID均唯一，按钮、文字、父子RectTransform和
+  `SceneEdit.ColliderBtn`引用已静态核对。
+- 当前无法用命令行替代Unity运行态交互测试；仍需在Unity中依次验证：保存后改变视角并
+  重新进入、保存替换接头后重新进入、替换已选目标后立即规划、MainScene点击网格切割。
+
+### 分支与当前状态
+
+- 集成在本地分支`integration/wulaoshi-21.4`进行，基点为`90e425b`；未提交、未推送，
+  不会改变已发布的`v1.7`标签。

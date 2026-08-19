@@ -734,6 +734,35 @@ public class ModelCollisionHighlighter : MonoBehaviour
         }
     }
 
+    public void ClearSelectionForReplacement()
+    {
+        if (IsGeneratedCollisionProxy())
+        {
+            ClearProxyStaticReferences();
+            return;
+        }
+
+        Transform logicalTarget = ResolveLogicalSelectionTarget(transform);
+
+        if (isSelected)
+        {
+            SelectModel(false);
+        }
+
+        if (selectedObject == this)
+        {
+            selectedObject = null;
+        }
+
+        SeletectedObjects.RemoveAll(
+            item => ResolveLogicalSelectionTarget(item) == logicalTarget);
+
+        if (logicalTarget != null)
+        {
+            PathPointManager.Instance?.RemovePoint(logicalTarget.gameObject);
+        }
+    }
+
     // 鼠标进入模型时触发
     private void OnMouseEnter()
     {

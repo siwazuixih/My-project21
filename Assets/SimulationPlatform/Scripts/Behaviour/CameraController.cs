@@ -282,4 +282,35 @@ public class CameraController : MonoBehaviour
         currentDistance = 5f;
         currentMoveSpeed = moveSpeed;
     }
+
+    public void GetCameraControlState(
+        out float horizontalAngle,
+        out float verticalAngle,
+        out float distance,
+        out Vector3 currentPanOffset)
+    {
+        horizontalAngle = currentX;
+        verticalAngle = currentY;
+        distance = currentDistance;
+        currentPanOffset = panOffset;
+    }
+
+    public void SetCameraControlState(
+        float horizontalAngle,
+        float verticalAngle,
+        float distance,
+        Vector3 savedPanOffset)
+    {
+        currentX = horizontalAngle;
+        currentY = verticalAngle;
+        currentDistance = Mathf.Clamp(distance, minDistance, maxDistance);
+        panOffset = savedPanOffset;
+
+        Quaternion rotation = Quaternion.Euler(currentY, currentX, 0f);
+        Vector3 pivotPosition = rotatePivot != null ? rotatePivot.position : Vector3.zero;
+        transform.position =
+            pivotPosition + panOffset - rotation * Vector3.forward * currentDistance;
+        transform.rotation = rotation;
+        lastSetPosition = transform.position;
+    }
 }

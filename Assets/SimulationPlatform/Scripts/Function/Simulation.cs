@@ -381,10 +381,20 @@ public class Simulation : ModelImport
             JointReplace.Simulation = this;
             Debug.Log($"已设置 JointReplace 的根游戏体: {model.name}");
 
-            LoadJointReplaceRecords();
+            bool replacementRestoreStarted = BeginLoadJointReplaceRecords();
+            if (replacementRestoreStarted)
+            {
+                return;
+            }
         }
 
         await Task.Yield();
+        FinalizeLoadedProjectState();
+    }
+
+    private void FinalizeLoadedProjectState()
+    {
+        LoadCameraState();
         RebuildRuntimeNavMesh();
     }
 
@@ -813,6 +823,7 @@ public class Simulation : ModelImport
         record.Replaces = SaveJointReplaceRecordsToRecord();
         record.SimulationParam = SaveSimulationParamsToRecord();
         record.RunParam = SaveRunParamsToRecord();
+        SaveCameraControlState(record);
 
         if (RunManager.Project.ProjectRecords == null)
         {
@@ -921,6 +932,50 @@ public class Simulation : ModelImport
         return param;
     }
 
+    private void SaveCameraControlState(ProjectRecord record)
+    {
+        if (record == null || modelCamera == null)
+        {
+            Debug.Log("未保存摄像机控制状态");
+            return;
+        }
+
+        CameraController cameraController = modelCamera.GetComponent<CameraController>();
+        if (cameraController == null)
+        {
+            Debug.Log("未找到 CameraController，未保存摄像机控制状态");
+            return;
+        }
+
+        cameraController.GetCameraControlState(
+            out float currentX,
+            out float currentY,
+            out float currentDistance,
+            out Vector3 panOffset);
+
+        Vector3D serializedPanOffset = new Vector3D(panOffset);
+
+        // 保留伍老师版本的 ProjectRecord 字段，确保其已有XML可双向兼容。
+        record.CameraCurrentX = currentX;
+        record.CameraCurrentY = currentY;
+        record.CameraCurrentDistance = currentDistance;
+        record.CameraPanOffset = serializedPanOffset;
+
+        if (record.SimulationParam == null)
+        {
+            record.SimulationParam = new SimulationParam();
+        }
+
+        record.SimulationParam.CameraCurrentX = currentX;
+        record.SimulationParam.CameraCurrentY = currentY;
+        record.SimulationParam.CameraCurrentDistance = currentDistance;
+        record.SimulationParam.CameraPanOffset = new Vector3D(panOffset);
+
+        Debug.Log(
+            $"已保存摄像机控制状态: X={currentX}, Y={currentY}, " +
+            $"Distance={currentDistance}, PanOffset={panOffset}");
+    }
+
     private void LoadProjectParams()
     {
         if (RunManager.Project == null)
@@ -948,21 +1003,45 @@ public class Simulation : ModelImport
         ProjectRecord lastRecord = RunManager.Project.ProjectRecords[RunManager.Project.ProjectRecords.Count - 1];
         Debug.Log($"加载最后一条项目记录，ID: {lastRecord.Id}，创建时间: {lastRecord.CreateTime}");
 
-        if (lastRecord.Replaces != null && lastRecord.Replaces.Count > 0)
+        if (RunManager.Project.Replaces == null)
         {
-            if (RunManager.Project.Replaces == null)
-            {
-                RunManager.Project.Replaces = new System.Collections.Generic.List<JointReplaceRecord>();
-            }
-            RunManager.Project.Replaces.Clear();
-            //RunManager.Project.Replaces.AddRange(lastRecord.Replaces);
-            Debug.Log($"已加载 {lastRecord.Replaces.Count} 条替换记录");
+            RunManager.Project.Replaces =
+                new System.Collections.Generic.List<JointReplaceRecord>();
         }
+
+        RunManager.Project.Replaces.Clear();
+        if (lastRecord.Replaces != null)
+        {
+            RunManager.Project.Replaces.AddRange(lastRecord.Replaces);
+        }
+        Debug.Log($"已加载 {RunManager.Project.Replaces.Count} 条替换记录");
 
         if (lastRecord.SimulationParam != null)
         {
             RunManager.Project.SimulationParam = lastRecord.SimulationParam;
             Debug.Log("已加载仿真参数");
+        }
+
+        // 兼容伍老师版本：旧记录把视角主要写在 ProjectRecord，而不是
+        // SimulationParam。只有后者缺少视角时才从旧字段回填。
+        if (lastRecord.CameraPanOffset != null)
+        {
+            if (RunManager.Project.SimulationParam == null)
+            {
+                RunManager.Project.SimulationParam = new SimulationParam();
+            }
+
+            if (RunManager.Project.SimulationParam.CameraPanOffset == null)
+            {
+                RunManager.Project.SimulationParam.CameraCurrentX =
+                    lastRecord.CameraCurrentX;
+                RunManager.Project.SimulationParam.CameraCurrentY =
+                    lastRecord.CameraCurrentY;
+                RunManager.Project.SimulationParam.CameraCurrentDistance =
+                    lastRecord.CameraCurrentDistance;
+                RunManager.Project.SimulationParam.CameraPanOffset =
+                    lastRecord.CameraPanOffset;
+            }
         }
 
         if (lastRecord.RunParam != null)
@@ -972,18 +1051,66 @@ public class Simulation : ModelImport
         }
     }
 
+    public void LoadCameraState()
+    {
+        if (modelCamera == null)
+        {
+            Debug.LogWarning("modelCamera 未设置，无法加载摄像机状态");
+            return;
+        }
+
+        SimulationParam param = RunManager.Project?.SimulationParam;
+        if (param == null || param.CameraPanOffset == null)
+        {
+            Debug.Log("没有摄像机状态需要加载");
+            return;
+        }
+
+        StartCoroutine(LoadCameraStateCoroutine(param));
+    }
+
+    private IEnumerator LoadCameraStateCoroutine(SimulationParam param)
+    {
+        // ModelImport 会在 OnModelLoaded 返回后设置导入模型自带的相机或自动取景。
+        // 延迟到帧末恢复，确保保存的用户视角最后生效。
+        yield return new WaitForEndOfFrame();
+
+        CameraController cameraController = modelCamera.GetComponent<CameraController>();
+        if (cameraController == null)
+        {
+            Debug.LogWarning("CameraController 未找到，无法恢复摄像机状态");
+            yield break;
+        }
+
+        cameraController.SetCameraControlState(
+            param.CameraCurrentX,
+            param.CameraCurrentY,
+            param.CameraCurrentDistance,
+            param.CameraPanOffset.GetVector3());
+
+        Debug.Log(
+            $"已恢复摄像机控制状态: X={param.CameraCurrentX}, " +
+            $"Y={param.CameraCurrentY}, Distance={param.CameraCurrentDistance}, " +
+            $"PanOffset={param.CameraPanOffset.GetVector3()}");
+    }
+
     public void LoadJointReplaceRecords()
+    {
+        BeginLoadJointReplaceRecords();
+    }
+
+    private bool BeginLoadJointReplaceRecords()
     {
         if (JointReplace == null)
         {
             Debug.LogWarning("JointReplace 未设置，无法加载替换记录");
-            return;
+            return false;
         }
 
         if (RunManager.Project.Replaces == null || RunManager.Project.Replaces.Count == 0)
         {
             Debug.Log("没有替换记录需要加载");
-            return;
+            return false;
         }
 
         if (JointReplace.ReplaceRecords == null)
@@ -994,6 +1121,98 @@ public class Simulation : ModelImport
         JointReplace.ReplaceRecords.Clear();
         JointReplace.ReplaceRecords.AddRange(RunManager.Project.Replaces);
         Debug.Log($"已加载 {JointReplace.ReplaceRecords.Count} 条替换记录到 JointReplace");
+
+        StartCoroutine(ApplyJointReplaceRecords());
+        return true;
+    }
+
+    private IEnumerator ApplyJointReplaceRecords()
+    {
+        // 等待 ModelImport 完成当前模型的基础组件和相机设置。
+        yield return new WaitForEndOfFrame();
+
+        foreach (JointReplaceRecord record in JointReplace.ReplaceRecords)
+        {
+            if (record == null)
+            {
+                continue;
+            }
+
+            GameObject replacedObject =
+                record.FindReplacedObject(JointReplace.RootGameObject);
+            if (replacedObject == null)
+            {
+                Debug.LogWarning(
+                    $"未找到被替换的物体: {record.ReplacedObjectName}, " +
+                    $"层级索引: {record.HierarchyIndices}");
+                continue;
+            }
+
+            JointModel jointModel = FindJointModelById(record.JointId);
+            if (jointModel?.Glb == null ||
+                string.IsNullOrEmpty(jointModel.Glb.FilePath))
+            {
+                Debug.LogWarning($"未找到接头模型或模型路径: {record.JointId}");
+                continue;
+            }
+
+            string fullModelPath = Path.Combine(
+                PathTool.GetExecutableDirPath(),
+                jointModel.Glb.FilePath);
+            if (!File.Exists(fullModelPath))
+            {
+                Debug.LogError($"模型文件不存在: {fullModelPath}");
+                continue;
+            }
+
+            Debug.Log(
+                $"正在恢复接头替换: {record.ReplacedObjectName} -> {jointModel.Name}");
+
+            Vector3 position =
+                record.Position != null
+                    ? record.Position.GetVector3()
+                    : replacedObject.transform.localPosition;
+            Quaternion rotation =
+                record.Rotation != null
+                    ? record.Rotation.GetQuaternion()
+                    : replacedObject.transform.localRotation;
+            Vector3 scale = replacedObject.transform.localScale;
+            Transform parent = replacedObject.transform.parent;
+
+            yield return StartCoroutine(
+                InstantiateReplacedModel(
+                    fullModelPath,
+                    position,
+                    rotation,
+                    scale,
+                    parent,
+                    replacedObject,
+                    jointModel,
+                    JointReplace.JointParam,
+                    MissionController));
+        }
+
+        JointReplace.RefreshReplaceRecordList();
+        Debug.Log("接头替换恢复完成");
+        FinalizeLoadedProjectState();
+    }
+
+    private JointModel FindJointModelById(string jointId)
+    {
+        if (ModelManager.XmlModel?.Joints == null)
+        {
+            return null;
+        }
+
+        foreach (JointModel joint in ModelManager.XmlModel.Joints)
+        {
+            if (joint.Id == jointId)
+            {
+                return joint;
+            }
+        }
+
+        return null;
     }
 
     private void LoadSimulationParams()

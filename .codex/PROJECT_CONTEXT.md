@@ -388,3 +388,24 @@
   工程调整、编译验证、注意事项”等内容并发布。
 - 后续建议在每次打标签前同步维护仓库根目录 `CHANGELOG.md`。GitHub Release 面向版本
   使用者，`CHANGELOG.md` 用于在仓库内长期保存完整版本历史。
+
+## 伍老师21.4功能集成边界（2026-08-19）
+
+- 跨版本集成以21.5/v1.7为主线，只移植伍老师版本中能对应具体反馈、且不会覆盖21.5
+  后续能力的小块改动；不要直接替换整个脚本、场景或项目目录。
+- 视角状态由`CameraController`提供读写接口，保存到`SimulationParam`，并同步写入
+  `ProjectRecord`字段兼容伍老师旧XML；恢复必须安排在模型相机复制/自动取景之后。
+- 项目记录中的`Replaces`必须在加载最后一条记录时清空并回填，随后等主模型实例化完成，
+  按`JointReplaceRecord.HierarchyIndices`和`JointId`逐条重放；完成后再恢复视角并重建
+  NavMesh。
+- 替换已选接头必须同时清理`ModelCollisionHighlighter.selectedObject`、
+  `SeletectedObjects`和`PathPointManager`标记，并通过`ResolveLogicalSelectionTarget()`处理
+  21.5新增的碰撞代理，不能只隐藏旧GameObject。
+- `MainScene`的`SceneEdit.ColliderBtn`已绑定“网格切割”按钮，继续复用现有
+  `AutoColliderGen_Final`生成流程；Main/MainScene不可互相整场覆盖，因为两者UI布局和
+  进入路径不同。
+- 伍老师的`SelectedObjectRecord`目标点持久化暂不采用：原方案没有可靠恢复红色高亮，
+  路径点坐标和节点匹配也存在歧义。若以后确实要跨会话保存规划目标，应重新设计稳定节点
+  标识、目标顺序、路径标记世界坐标和高亮恢复，而不是直接复制该提交。
+- 当前集成工作位于本地`integration/wulaoshi-21.4`分支；`v1.7`仍固定在发布提交，后续
+  需要Unity运行回归通过后再决定合并和发布新版本。

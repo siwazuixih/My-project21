@@ -21,6 +21,20 @@ public class ProjectRecord
     [XmlElement]
     public RunParam RunParam { get; set; }
 
+    // 兼容伍老师版本已经写入 ProjectRecord 的视角数据。新记录也会同时写入
+    // SimulationParam，便于所有仿真参数保持在同一数据对象中。
+    [XmlAttribute]
+    public float CameraCurrentX { get; set; }
+
+    [XmlAttribute]
+    public float CameraCurrentY { get; set; }
+
+    [XmlAttribute]
+    public float CameraCurrentDistance { get; set; }
+
+    [XmlElement]
+    public Vector3D CameraPanOffset { get; set; }
+
     public ProjectRecord()
     {
         Id = Guid.NewGuid().ToString();

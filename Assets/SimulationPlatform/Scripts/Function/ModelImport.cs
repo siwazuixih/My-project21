@@ -178,7 +178,14 @@ public class ModelImport : MonoBehaviour
                 currentModel = ModelParent.GetChild(ModelParent.childCount - 1).gameObject;
                 currentModel.name = Path.GetFileNameWithoutExtension(modelFilePath);
 
-                OnModelLoaded(currentModel);
+                Task onModelLoadedTask = OnModelLoaded(currentModel);
+                yield return new WaitUntil(() => onModelLoadedTask.IsCompleted);
+                if (onModelLoadedTask.IsFaulted)
+                {
+                    Debug.LogException(onModelLoadedTask.Exception);
+                    MessageManage.ShowMessage("模型初始化失败", 2);
+                    yield break;
+                }
 
                 // 检查模型是否自带相机
                 Camera[] modelCameras = currentModel.GetComponentsInChildren<Camera>();
@@ -478,6 +485,10 @@ public class ModelImport : MonoBehaviour
                     {
                         newModel.name = jointModel.Name;
                     }
+                    else
+                    {
+                        newModel.name = "替换接头";
+                    }
 
                     // 禁用模型自带相机
                     ModelTool.DisableModelCameras(newModel);
@@ -520,8 +531,28 @@ public class ModelImport : MonoBehaviour
                     if (oldObject != null)
                     {
                         //Destroy(oldObject);
-                        PathPointManager.Instance?.RemovePoint(oldObject);
-                        ModelCollisionHighlighter.selectedObject = null;
+                        ModelCollisionHighlighter oldHighlighter =
+                            oldObject.GetComponent<ModelCollisionHighlighter>();
+                        if (oldHighlighter != null)
+                        {
+                            oldHighlighter.ClearSelectionForReplacement();
+                        }
+                        else
+                        {
+                            Transform logicalTarget =
+                                ModelCollisionHighlighter.ResolveLogicalSelectionTarget(
+                                    oldObject.transform);
+                            ModelCollisionHighlighter.SeletectedObjects.RemoveAll(
+                                item =>
+                                    ModelCollisionHighlighter.ResolveLogicalSelectionTarget(item) ==
+                                    logicalTarget);
+                            if (logicalTarget != null)
+                            {
+                                PathPointManager.Instance?.RemovePoint(
+                                    logicalTarget.gameObject);
+                            }
+                            ModelCollisionHighlighter.selectedObject = null;
+                        }
                         oldObject.SetActive(false);
 
                         // 设置模型的位置、旋转和缩放与原高亮物体相同
