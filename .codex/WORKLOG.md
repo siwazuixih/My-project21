@@ -3525,3 +3525,74 @@
 ### 当前状态
 
 - 场景参数修改完成，等待Unity运行回归。
+
+## 2026-08-19 - SoftWare1.7 发布及 GitHub Release 流程固化
+
+### 本次任务目标
+
+- 将 `My project21.5` 中除已忽略大型资源外的当前改动发布为 `SoftWare1.7 / v1.7`。
+- 在 GitHub 上为 `v1.7` 创建包含更新内容和验证结果的正式 Release。
+- 将本次操作整理为后续版本可重复使用的发布流程。
+
+### 读取和检查的关键内容
+
+- `AGENTS.md`
+- `.codex/WORKLOG.md`
+- `.codex/PROJECT_CONTEXT.md`
+- `.gitignore`
+- `ProjectSettings/ProjectSettings.asset`
+- Git 暂存区、分支、标签和远程跟踪状态
+
+### 发布范围与大文件处理
+
+- 用户确认本次上传整个非忽略工作区，共24个文件，提交统计为6687行新增、469行删除。
+- 已确认以下大型资源未被Git跟踪，并继续由`.gitignore`排除：
+  - `Assets/dipan2.fbx`（约186MB）；
+  - `Assets/微软雅黑 SDF.asset`（约135MB）；
+  - `Assets/机舱.fbx`（约102MB）。
+- 暂存区中最大的文件为 `Assets/SimulationPlatform/Scenes/RunScene.unity`，约3.56MB，
+  其余待提交文件均低于GitHub单文件限制。
+
+### 版本和编译验证
+
+- 将 `ProjectSettings/ProjectSettings.asset` 中 `bundleVersion` 从 `1.6.0` 更新为
+  `1.7.0`；旧值来自2026-07-24的 `SoftWare1.6` 提交 `bae44a7`。
+- 执行 `dotnet build "My project21.5.sln" --no-restore` 成功：0错误、26个既有警告。
+- 编译警告主要来自旧API、隐藏继承成员、未使用字段、未等待异步调用和序列化状态字段，
+  未阻止本次发布。
+
+### Git 发布结果
+
+- 发布分支：`release/software-v1.0`。
+- 发布提交：`dad2be7521a875e0b9c6cdd6f1058dc70ba9b9c3`，提交说明 `SoftWare1.7`。
+- 分支已从远程提交 `bae44a7` 推进到 `dad2be7` 并成功推送到
+  `origin/release/software-v1.0`。
+- 创建并推送带注释标签 `v1.7`。
+- 最终 `HEAD`、`release/software-v1.0`、`origin/release/software-v1.0` 和 `v1.7`
+  均指向 `dad2be7`，发布后的工作区为干净状态。
+
+### GitHub Release
+
+- 用户已在 GitHub `Releases` 中选择已有标签 `v1.7`，发布 `SoftWare1.7` Release。
+- Release 内容按“新增功能、功能优化、工程调整、编译验证、注意事项”分节，包含内部
+  版本号 `1.7.0` 和本次0错误、26警告的编译结果。
+- GitHub Release 是面向使用者的版本说明；Git标签用于固定提交，二者不是同一个对象。
+
+### 后续标准流程
+
+1. 保存Unity场景并更新 `bundleVersion`。
+2. `git fetch origin` 后用 `git status -sb` 检查本地与远程关系。
+3. 确认提交范围和大文件排除规则；仅在整个非忽略工作区都属于本次发布时使用
+   `git add -A`。
+4. 用 `git --no-pager diff --cached --stat` 检查暂存内容，并完成编译验证。
+5. `git commit` 后先推送发布分支，再创建并单独推送带注释版本标签。
+6. 用 `git status -sb`、`git log -1 --decorate` 确认本地、远程和标签一致。
+7. 在GitHub上基于该标签创建Release并填写更新说明。
+8. 从下一个版本起，建议在打标签前同步更新仓库根目录 `CHANGELOG.md`，长期保留版本历史。
+
+### 修改情况与当前状态
+
+- 本轮仅更新 `.codex/WORKLOG.md` 和 `.codex/PROJECT_CONTEXT.md`，没有修改业务代码、
+  Unity场景、Prefab或运行参数。
+- `SoftWare1.7 / v1.7` 分支、标签及GitHub Release均已完成；本次新增的记录尚需另行提交
+  才会同步到GitHub。

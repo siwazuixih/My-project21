@@ -6,8 +6,10 @@
 - 主要运行场景包括 `Assets/SimulationPlatform/Scenes/RunScene16.unity`、`RunScene21.unity`、`RunScene.unity`、`Assets/Scenes/SampleScene.unity`。
 - 项目已有大量未提交修改，修改时应只碰当前任务相关文件，避免回退用户已有工作。
 - GitHub 远程仓库为 `https://github.com/siwazuixih/My-project21.git`；发布版本继续使用 `release/software-v1.0` 分支，并用 `v1.2`、`v1.3`、`v1.4` 等标签标记具体版本。
-- `SoftWare1.5` 已位于 `release/software-v1.0` 并创建 `v1.5` 标签；2026-07-24 当前视觉相机、力矩曲线和 V26 UI 控制版计划作为 `SoftWare1.6 / v1.6` 发布。
-- Player 产品名为“飞机导管拧紧系统”，当前发布版本号为 `1.6.0`。
+- `SoftWare1.7` 已于 2026-08-19 发布到 `release/software-v1.0`，提交为
+  `dad2be7521a875e0b9c6cdd6f1058dc70ba9b9c3`，并创建、推送 `v1.7` 标签和 GitHub
+  Release；后续版本继续沿用同一发布分支和独立版本标签。
+- Player 产品名为“飞机导管拧紧系统”，当前发布版本号为 `1.7.0`。
 - Linux Player 构建完成后，`Assets/Editor/ExternalRuntimeBuildPostprocessor.cs` 会把项目根目录 `ExternalCode/*.py` 和 `Assets/微软雅黑.ttf` 自动复制到软件输出目录，以匹配运行时现有相对路径。
 - 当前 Linux Player 的相机和 V26 控制器都默认调用 `/usr/bin/python3`，
   V26继续直接使用该解释器。视觉服务脚本会在启动早期查找软件目录上一级的
@@ -50,8 +52,8 @@
     提供相机、深度、模型和推理状态，`/result` 提供最新目标结果。
   - RGB-D启动失败会尝试彩色流降级；完全没有相机时仍无法提供图像。
 - `ExternalCode/measure copy.py`
-  - 2026-07-25 由视觉同学提供的原始 RGB-D 目标中心测量原型，当前仍为 Git
-    未跟踪文件，未接入 Unity。
+  - 2026-07-25 由视觉同学提供的原始 RGB-D 目标中心测量原型，已随 `v1.7` 纳入 Git，
+    当前仍未接入 Unity。
   - 同时打开 D435I `1280×720@30 FPS` 彩色/深度流，用 YOLO 检测、SAM
     分割、最小外接旋转矩形中心和深度邻域中值，输出相机坐标 XYZ（毫米）。
   - 当前没有任何 CR10AF 网络通信或运动指令；只有 OpenCV 窗口、终端输出和
@@ -67,8 +69,8 @@
     结构化测量结果。相机可在真实任务期间保持在线，但只有机械臂反馈确认静止后
     才允许自动流程采纳测量。
 - `ExternalCode/point_move_demo.py`
-  - 2026-07-25 新出现的未跟踪 Dobot点位运动示例，直接使用 `dobot_api`
-    连接 29999/30004并执行两个示例点位。
+  - 2026-07-25 新增并已随 `v1.7` 纳入 Git 的 Dobot点位运动示例，直接使用
+    `dobot_api` 连接 29999/30004并执行两个示例点位。
   - 当前只作为视觉同学的运动原型参考，不接入 Unity，不随视觉服务启动；正式运动
     仍由 Unity 的 `DobotController` 独占控制。
 - `Assets/ServoTighteningController.cs`
@@ -363,3 +365,26 @@
 - 2026-08-14经用户确认，RunScene已将`maxAcceptedRotationError`设为`0.2617994rad`
   （DirectionOnly半角15度）。严格方向停止阈值仍为0.005rad、位置近似上限仍为10mm、
   碰撞检查仍开启；因此这是最终近似候选验收放宽，不是取消方向优化或放宽末端位置。
+
+## GitHub 正式版本发布流程
+
+- 正式发布使用 `release/software-v1.0` 分支；每个发布版本创建对应的带注释标签，例如
+  `v1.7`，并在 GitHub 上基于该标签创建 Release、填写版本更新说明。
+- 发布前先在 `ProjectSettings/ProjectSettings.asset` 更新 `bundleVersion`，确保软件内部
+  版本号与 Git 标签一致。
+- 先执行 `git fetch origin` 和 `git status -sb`，确认本地分支与远程分支没有意外的
+  `ahead/behind`；若远程领先，应先停止并检查，不在脏工作区中盲目拉取。
+- 仅在已经确认整个非忽略工作区都属于本次版本时使用 `git add -A`。本项目的大型 FBX
+  和字体资源由 `.gitignore` 排除；发布前仍应用暂存区文件列表和大小检查确认它们没有
+  被跟踪或误加入。
+- 提交前使用 `git --no-pager diff --cached --stat` 检查范围，并执行
+  `dotnet build "My project21.5.sln" --no-restore`；编译必须为0错误，既有警告需在发布
+  记录中注明。
+- 推荐顺序为：提交代码、推送发布分支、确认标签不存在、创建带注释标签、单独推送标签：
+  `git commit` → `git push` → `git tag -a` → `git push origin <tag>`。分支和标签是不同
+  Git引用，普通分支推送不会自动上传标签。
+- 发布后用 `git status -sb` 和 `git log -1 --decorate` 确认本地分支、远程分支和版本
+  标签指向同一提交；随后在 GitHub `Releases` 中选择已有标签，填写“新增功能、功能优化、
+  工程调整、编译验证、注意事项”等内容并发布。
+- 后续建议在每次打标签前同步维护仓库根目录 `CHANGELOG.md`。GitHub Release 面向版本
+  使用者，`CHANGELOG.md` 用于在仓库内长期保存完整版本历史。
