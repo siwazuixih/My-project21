@@ -409,3 +409,42 @@
   标识、目标顺序、路径标记世界坐标和高亮恢复，而不是直接复制该提交。
 - 当前集成工作位于本地`integration/wulaoshi-21.4`分支；`v1.7`仍固定在发布提交，后续
   需要Unity运行回归通过后再决定合并和发布新版本。
+
+## 切割碰撞网格持久化（2026-08-27，第二阶段修正版）
+
+- 碰撞网格sidecar位于场景GLB同目录。场景基础缓存命名为`<模型>.collider.xml`；替换
+  接头后的项目最终装配命名为`<模型>.project-<Project.Id>.collider.xml`，不同项目互不覆盖。
+- `ColliderModel`当前格式为v2。每个Root保存可读的`ParentPath`和唯一定位用的
+  `ParentIndexPath`；GLB中同名节点很多，禁止恢复为单独调用`Transform.Find(ParentPath)`。
+  旧v1文件只在名称路径唯一时兼容恢复，发生歧义必须提示用户重新切割。
+- 切割结果必须从`_MjRoot`子级的`MeshCollider.sharedMesh`提取。默认关闭碰撞体可视化时
+  Hull没有`MeshFilter`，以后不要恢复为扫描`MeshFilter`，否则会保存原始显示网格。
+- `SceneEdit.OnColliderBtnClick()`在切割成功后立即调用保存；用户不需要再点一次“保存场景”。
+  但新建场景或替换GLB后必须先保存场景，让模型进入Scene专属Files目录，才能切割。
+- `ColliderManager.ApplyColliderDataAndWaitAsync()`是共用恢复入口：按索引路径定位并用名称
+  校验，创建`MjBody/MjGeom/MeshCollider/Rigidbody`，等待`MjScene.postInitEvent`后核验每个
+  `MjGeom`的MuJoCo名称和ID。恢复前清理已有`_MjRoot`，避免重复加载。
+- 项目加载顺序必须是“重放全部接头替换 -> 恢复项目级碰撞 -> 恢复相机和NavMesh”。项目
+  页切割后必须立即提取并按Project.Id保存最终装配；不能只调用`Generate()`。
+- 诊断日志统一使用`[碰撞持久化/*]`前缀。真正成功的判据是
+  `[碰撞持久化/MuJoCo验证] ... Result=PASS`，不能只看Unity创建了多少对象。
+- 项目`TagManager.asset`没有`VHACD` Tag，恢复代码不得执行`gameObject.tag = "VHACD"`；
+  是否为凸包使用`ColliderMeshData.IsVHACD`判断。
+- 生成和恢复时都必须直接设置`MjGeom.ShapeType = Mesh`；不能只在`UNITY_EDITOR`条件下
+  修改SerializedProperty，否则打包Player会使用默认Sphere。
+- 2026-08-27运行复测已确认项目级最终装配缓存闭环成功：重新进入包含替换接头的项目后
+  恢复31个Root、76个Mesh，MuJoCo绑定76/76并输出`Result=PASS`。这比只检查Unity层级
+  数量更可靠，后续仍应以`[碰撞持久化/MuJoCo验证]`为最终判据。
+- 刚切割与保存恢复使用相同调试颜色`RGBA=(0, 1, 0, 0.4)`。仿真界面的
+  `RuntimeConsole`会在日志按钮左侧动态创建“隐藏碰撞/显示碰撞”按钮；该按钮只切换
+  `_MjRoot`子级`MeshRenderer.enabled`，绝不能停用`MeshCollider`、`MjGeom`或整个对象。
+- `ModelTool.AddMeshCollidersToModel()`必须跳过`_MjRoot`生成代理，并复用已有
+  `MeshCollider/Rigidbody/ModelCollisionHighlighter`。否则模型管理页先恢复碰撞后，基础
+  导入初始化会把代理再次当普通显示模型处理，引发重复Rigidbody异常。
+- 网格数值使用`CultureInfo.InvariantCulture`和round-trip格式保存，读取时也必须使用同一
+  Culture；大网格超过65535顶点时设置`IndexFormat.UInt32`。
+- XML写盘采用同目录`.tmp`临时文件和`File.Replace/File.Move`，防止覆盖过程中留下半份
+  文件。完成后不应残留`.tmp`；替换成功后的`.bak`会尽力清理。
+- 本功能位于本地`feature/collider-persistence`分支，基线为SoftWare1.8提交`2c9ab48`。
+  Unity 2022.3.62f2c1批处理导入编译已通过。已有旧XML必须在模型管理页重新切割一次；
+  每个含替换接头的项目还需在项目页切割一次生成项目级缓存，再验证重进和真实碰撞。

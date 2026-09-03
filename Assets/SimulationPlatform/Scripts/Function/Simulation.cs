@@ -371,9 +371,6 @@ public class Simulation : ModelImport
             model.transform.rotation = Quaternion.Euler(loadedSceneRotation.Value);
         }
 
-        // 加载并应用碰撞体
-        LoadAndApplyColliders(model);
-
         // 设置 JointReplace 的根游戏体
         if (JointReplace != null)
         {
@@ -388,7 +385,9 @@ public class Simulation : ModelImport
             }
         }
 
-        await Task.Yield();
+        // 没有接头替换时直接恢复；有替换时由协程在全部接头替换完成后恢复。
+        // 碰撞网格必须对应最终装配，不能在替换前挂载到马上会被禁用的旧接头上。
+        await LoadAndApplyColliders(model);
         FinalizeLoadedProjectState();
     }
 
@@ -511,31 +510,32 @@ public class Simulation : ModelImport
     /// <summary>
     /// 加载并应用碰撞体
     /// </summary>
-    private void LoadAndApplyColliders(GameObject model)
+    private async Task<ColliderApplyReport> LoadAndApplyColliders(GameObject model)
     {
+        var emptyReport = new ColliderApplyReport();
         if (model == null)
         {
             Debug.LogWarning("模型为空，无法加载碰撞体");
-            return;
+            return emptyReport;
         }
 
         // 确保项目和场景信息完整
         if (RunManager.Project == null)
         {
             Debug.LogWarning("项目为空，无法加载碰撞体");
-            return;
+            return emptyReport;
         }
 
         if (RunManager.Project.Scene == null)
         {
             Debug.LogWarning("场景为空，无法加载碰撞体");
-            return;
+            return emptyReport;
         }
 
         if (string.IsNullOrEmpty(RunManager.Project.Scene.Id))
         {
             Debug.LogWarning("场景ID为空，无法加载碰撞体");
-            return;
+            return emptyReport;
         }
 
         // 通过 Scene.Id 从 ModelManager 获取 SceneModel
@@ -543,252 +543,90 @@ public class Simulation : ModelImport
         if (sceneModel == null)
         {
             Debug.LogWarning($"未找到场景模型，SceneId: {RunManager.Project.Scene.Id}");
-            return;
+            return emptyReport;
         }
 
         if (sceneModel.Glb == null)
         {
             Debug.LogWarning("场景的Glb模型为空");
-            return;
+            return emptyReport;
         }
 
         if (string.IsNullOrEmpty(sceneModel.Glb.FilePath))
         {
             Debug.LogWarning("场景的Glb文件路径为空");
-            return;
+            return emptyReport;
         }
 
-        // 加载碰撞体数据
-        Debug.Log($"尝试加载碰撞体数据，模型路径: {sceneModel.Glb.FilePath}");
-        ColliderModel colliderModel = ColliderManager.LoadColliderData(sceneModel.Glb.FilePath);
+        string projectId = RunManager.Project.Id;
+        Debug.Log(
+            $"[碰撞持久化/项目加载] Project={projectId ?? "<empty>"}, " +
+            $"Scene={sceneModel.Id}, Model={sceneModel.Glb.FilePath}");
+
+        // 优先读取“替换接头后的最终项目装配”；尚未在项目中切割过时，才回退到
+        // 场景基础碰撞。这样不同接头配置不会互相覆盖。
+        ColliderModel colliderModel = string.IsNullOrWhiteSpace(projectId)
+            ? null
+            : ColliderManager.LoadColliderData(sceneModel.Glb.FilePath, projectId);
+        bool usingProjectData = colliderModel != null;
+        if (colliderModel == null)
+        {
+            Debug.Log(
+                "[碰撞持久化/项目加载] 未找到项目级碰撞文件，回退到场景基础碰撞；" +
+                "若项目包含替换接头，请在项目内切割并保存一次最终装配");
+            colliderModel = ColliderManager.LoadColliderData(sceneModel.Glb.FilePath);
+        }
 
         if (colliderModel == null)
         {
             Debug.Log("未找到该场景的碰撞体数据");
-            return;
+            return emptyReport;
         }
 
-        if (colliderModel.MjRoots == null || colliderModel.MjRoots.Count == 0)
+        if (!string.IsNullOrEmpty(colliderModel.SceneId) &&
+            !string.Equals(
+                colliderModel.SceneId,
+                sceneModel.Id,
+                StringComparison.OrdinalIgnoreCase))
         {
-            // 兼容旧版本数据结构
-            Debug.Log("使用兼容模式处理碰撞体数据");
-            CreateColliderObjectsFromLegacyData(model, colliderModel);
-            return;
+            Debug.LogWarning(
+                $"碰撞体SceneId不匹配，已拒绝加载: 文件={colliderModel.SceneId}, 场景={sceneModel.Id}");
+            return emptyReport;
         }
 
-        // 创建碰撞体对象
-        int totalMeshes = 0;
-        foreach (var mjRoot in colliderModel.MjRoots)
+        if (usingProjectData &&
+            !string.IsNullOrEmpty(colliderModel.ProjectId) &&
+            !string.Equals(colliderModel.ProjectId, projectId, StringComparison.OrdinalIgnoreCase))
         {
-            totalMeshes += mjRoot.Meshes.Count;
+            Debug.LogWarning(
+                $"碰撞体ProjectId不匹配，已拒绝加载: 文件={colliderModel.ProjectId}, 项目={projectId}");
+            return emptyReport;
         }
-        Debug.Log($"找到 {colliderModel.MjRoots.Count} 个 MjRoot，共 {totalMeshes} 个碰撞体，正在重建...");
-        CreateColliderObjects(model, colliderModel);
-    }
 
-    /// <summary>
-    /// 使用兼容模式从旧数据创建碰撞体对象（当没有 MjRoot 信息时）
-    /// </summary>
-    private void CreateColliderObjectsFromLegacyData(GameObject model, ColliderModel colliderModel)
-    {
-        // 为了兼容旧版本，创建一个默认的 MjRoot
-        GameObject mjRootObj = new GameObject("Default_MjRoot");
-        mjRootObj.transform.SetParent(model.transform, false);
-        mjRootObj.transform.localPosition = Vector3.zero;
-        mjRootObj.transform.localRotation = Quaternion.identity;
-        mjRootObj.transform.localScale = Vector3.one;
-
-        // 添加 MjBody 组件
-        Mujoco.MjBody mjBody = mjRootObj.AddComponent<Mujoco.MjBody>();
-
-        int meshCount = 0;
-        
-        // 尝试从旧数据结构读取 Meshes
-        var oldMeshesField = colliderModel.GetType().GetField("Meshes");
-        if (oldMeshesField != null)
+        bool visualize = ColliderGen != null && ColliderGen.visualizeColliders;
+        ColliderApplyReport report = await ColliderManager.ApplyColliderDataAndWaitAsync(
+            model,
+            colliderModel,
+            visualize);
+        if (!report.IsSuccessful)
         {
-            var oldMeshes = oldMeshesField.GetValue(colliderModel) as System.Collections.IList;
-            if (oldMeshes != null)
-            {
-                foreach (var item in oldMeshes)
-                {
-                    // 使用反射获取 MeshData 的属性
-                    var meshData = item;
-                    var nameProp = meshData.GetType().GetProperty("Name");
-                    var verticesProp = meshData.GetType().GetProperty("Vertices");
-                    var trianglesProp = meshData.GetType().GetProperty("Triangles");
-                    var isVHACDProp = meshData.GetType().GetProperty("IsVHACD");
-
-                    if (nameProp != null && verticesProp != null && trianglesProp != null)
-                    {
-                        // 创建临时的 ColliderMeshData 对象
-                        ColliderMeshData tempMeshData = new ColliderMeshData
-                        {
-                            Name = nameProp.GetValue(meshData) as string,
-                            Vertices = verticesProp.GetValue(meshData) as string,
-                            Triangles = trianglesProp.GetValue(meshData) as string,
-                            IsVHACD = (isVHACDProp != null) && (bool)isVHACDProp.GetValue(meshData)
-                        };
-
-                        Mesh mesh = ColliderManager.ColliderMeshDataToMesh(tempMeshData);
-                        if (mesh != null)
-                        {
-                            CreateColliderObject(mjRootObj.transform, mesh, tempMeshData);
-                            meshCount++;
-                        }
-                    }
-                }
-            }
+            Debug.LogWarning(
+                $"[碰撞持久化/项目恢复失败] Source={(usingProjectData ? "project" : "scene")}, " +
+                $"Created={report.CreatedMeshCount}/{report.RequestedMeshCount}, " +
+                $"Bound={report.BoundMujocoGeomCount}, MissingParent={report.MissingParentCount}, " +
+                $"LegacyAmbiguous={report.AmbiguousLegacyPathCount}");
+            MessageManage.ShowMessage(
+                colliderModel.FormatVersion < 2
+                    ? "旧版碰撞文件无法可靠恢复，请重新切割保存"
+                    : "碰撞网格恢复验证失败，请查看日志",
+                2);
+            return report;
         }
 
-        Debug.Log($"兼容模式完成，创建了 {meshCount} 个碰撞体");
-    }
-
-    /// <summary>
-    /// 创建单个碰撞体对象的辅助方法
-    /// </summary>
-    private void CreateColliderObject(Transform parent, Mesh mesh, ColliderMeshData meshData)
-    {
-        GameObject colliderObj = new GameObject(meshData.Name);
-        colliderObj.transform.SetParent(parent, false);
-        colliderObj.transform.localPosition = Vector3.zero;
-        colliderObj.transform.localRotation = Quaternion.identity;
-        colliderObj.transform.localScale = Vector3.one;
-
-        // 添加 MjGeom 组件
-        Mujoco.MjGeom mjGeom = colliderObj.AddComponent<Mujoco.MjGeom>();
-
-        // 场景凸包均为固定障碍物，无需彼此产生接触。单独使用contype=2可减少装配体
-        // 内部相邻/重叠凸包的约束，同时仍保留与默认1/1机器人类别的碰撞。
-        Mujoco.MjGeomSettings geomSettings = mjGeom.Settings;
-        geomSettings.Filtering.Contype = 2;
-        geomSettings.Filtering.Conaffinity = 1;
-        mjGeom.Settings = geomSettings;
-
-#if UNITY_EDITOR
-        UnityEditor.SerializedObject so = new UnityEditor.SerializedObject(mjGeom);
-        var prop = so.FindProperty("ShapeType") ?? so.FindProperty("shapeType") ?? so.FindProperty("m_ShapeType");
-        if (prop != null)
-        {
-            prop.intValue = 6;
-            so.ApplyModifiedProperties();
-        }
-#endif
-
-        Mujoco.MjMeshShape shape = new Mujoco.MjMeshShape();
-        // 保存文件保留原始局部网格；重新载入时再次为MuJoCo烘焙Unity层级比例。
-        // PhysX继续使用下面的原始mesh，避免把缩放重复应用到Unity碰撞体。
-        shape.Mesh = MujocoMeshTransformUtility.CreateBakedMesh(mesh, colliderObj.transform);
-        mjGeom.Mesh = shape;
-
-        MeshCollider meshCollider = colliderObj.AddComponent<MeshCollider>();
-        meshCollider.sharedMesh = mesh;
-        meshCollider.convex = meshData.IsVHACD;
-
-        Rigidbody rigidbody = colliderObj.AddComponent<Rigidbody>();
-        rigidbody.isKinematic = true;
-        rigidbody.useGravity = false;
-        rigidbody.constraints = RigidbodyConstraints.FreezeAll;
-
-        // 保存碰撞体重载后仍只保留碰撞/射线代理；高亮和选点由原模型统一处理。
-        // 不给 Hull 添加 ModelCollisionHighlighter，避免代理参与鼠标高亮状态竞争。
-
-        if (meshData.IsVHACD)
-        {
-            colliderObj.tag = "VHACD";
-        }
-
-        Debug.Log($"已创建碰撞体: {meshData.Name} (VHACD: {meshData.IsVHACD})");
-    }
-
-    /// <summary>
-    /// 创建碰撞体对象
-    /// </summary>
-    private void CreateColliderObjects(GameObject model, ColliderModel colliderModel)
-    {
-        if (colliderModel.MjRoots == null || colliderModel.MjRoots.Count == 0)
-        {
-            Debug.LogWarning("碰撞体数据中没有 MjRoot 信息");
-            return;
-        }
-
-        // 为每个 MjRoot 创建层级结构
-        foreach (var mjRootData in colliderModel.MjRoots)
-        {
-            if (mjRootData.Meshes == null || mjRootData.Meshes.Count == 0)
-            {
-                continue;
-            }
-
-            // 查找或创建父物体
-            Transform parentTransform = FindOrCreateParentTransform(model, mjRootData.ParentPath);
-
-            // 创建 MjRoot
-            GameObject mjRootObj = new GameObject(mjRootData.Name);
-            mjRootObj.transform.SetParent(parentTransform, false);
-            mjRootObj.transform.localPosition = Vector3.zero;
-            mjRootObj.transform.localRotation = Quaternion.identity;
-            mjRootObj.transform.localScale = Vector3.one;
-
-            // 添加 MjBody 组件
-            Mujoco.MjBody mjBody = mjRootObj.AddComponent<Mujoco.MjBody>();
-
-            Debug.Log($"已创建 MjRoot: {mjRootData.Name}");
-
-            // 为每个 ColliderMeshData 创建 GameObject 作为 MjRoot 的子对象
-            foreach (var meshData in mjRootData.Meshes)
-            {
-                Mesh mesh = ColliderManager.ColliderMeshDataToMesh(meshData);
-                if (mesh == null)
-                {
-                    Debug.LogWarning($"无法重建 Mesh: {meshData.Name}");
-                    continue;
-                }
-
-                // 使用辅助方法创建碰撞体
-                CreateColliderObject(mjRootObj.transform, mesh, meshData);
-            }
-        }
-
-        Debug.Log("碰撞体重建完成");
-    }
-
-    /// <summary>
-    /// 根据路径查找或创建父物体
-    /// </summary>
-    private Transform FindOrCreateParentTransform(GameObject root, string parentPath)
-    {
-        if (string.IsNullOrEmpty(parentPath))
-        {
-            return root.transform;
-        }
-
-        Transform current = root.transform;
-        string[] pathSegments = parentPath.Split('/');
-
-        foreach (string segment in pathSegments)
-        {
-            if (string.IsNullOrEmpty(segment))
-            {
-                continue;
-            }
-
-            Transform child = current.Find(segment);
-            if (child == null)
-            {
-                // 如果找不到，创建新的
-                GameObject newObj = new GameObject(segment);
-                newObj.transform.SetParent(current, false);
-                newObj.transform.localPosition = Vector3.zero;
-                newObj.transform.localRotation = Quaternion.identity;
-                newObj.transform.localScale = Vector3.one;
-                child = newObj.transform;
-            }
-
-            current = child;
-        }
-
-        return current;
+        Debug.Log(
+            $"[碰撞持久化/项目恢复成功] Source={(usingProjectData ? "project" : "scene")}, " +
+            $"Mesh={report.CreatedMeshCount}, Bound={report.BoundMujocoGeomCount}");
+        return report;
     }
 
     private void OnBackClick()
@@ -1194,6 +1032,16 @@ public class Simulation : ModelImport
 
         JointReplace.RefreshReplaceRecordList();
         Debug.Log("接头替换恢复完成");
+
+        // 必须在接头全部替换完成后恢复项目碰撞。否则基础模型上的碰撞会随旧接头
+        // 一起被禁用，而新接头没有对应的MjGeom。
+        Task<ColliderApplyReport> colliderRestoreTask = LoadAndApplyColliders(currentModel);
+        yield return new WaitUntil(() => colliderRestoreTask.IsCompleted);
+        if (colliderRestoreTask.IsFaulted)
+        {
+            Debug.LogException(colliderRestoreTask.Exception);
+            MessageManage.ShowMessage("接头替换完成，但碰撞网格恢复异常", 2);
+        }
         FinalizeLoadedProjectState();
     }
 
@@ -1379,8 +1227,67 @@ public class Simulation : ModelImport
     {
         if (currentModel != null && ColliderGen != null)
         {
-            //GameObjectTreePanel.Show(currentModel, ColliderGen);
-            await ColliderGen.Generate();
+            if (RunManager.Project == null ||
+                RunManager.Project.Scene == null ||
+                string.IsNullOrWhiteSpace(RunManager.Project.Id))
+            {
+                Debug.LogWarning("项目或Project.Id为空，无法保存项目级碰撞网格");
+                MessageManage.ShowMessage("项目信息不完整，无法保存碰撞网格", 2);
+                return;
+            }
+
+            SceneModel sceneModel = ModelManager.GetScene(RunManager.Project.Scene.Id);
+            if (sceneModel?.Glb == null || string.IsNullOrWhiteSpace(sceneModel.Glb.FilePath))
+            {
+                Debug.LogWarning("场景模型路径为空，无法保存项目级碰撞网格");
+                MessageManage.ShowMessage("场景模型路径为空，无法保存碰撞网格", 2);
+                return;
+            }
+
+            if (ColliderGenButton != null)
+            {
+                ColliderGenButton.interactable = false;
+            }
+
+            try
+            {
+                //GameObjectTreePanel.Show(currentModel, ColliderGen);
+                ColliderGen.targetObject = currentModel;
+                ColliderGen.visualizeColliders = true;
+                await ColliderGen.Generate();
+
+                ColliderModel colliderModel = ColliderManager.ExtractColliderData(
+                    currentModel,
+                    RunManager.Project.Id,
+                    sceneModel.Id,
+                    RunManager.Project.Id,
+                    RunManager.Project.Name + "_FinalAssemblyColliders");
+                bool saved = ColliderManager.SaveColliderData(
+                    colliderModel,
+                    sceneModel.Glb.FilePath,
+                    RunManager.Project.Id);
+                if (!saved)
+                {
+                    throw new IOException("项目级碰撞网格文件保存失败");
+                }
+
+                Debug.Log(
+                    $"[碰撞持久化/项目切割完成] Project={RunManager.Project.Id}, " +
+                    $"Root={colliderModel.MjRoots.Count}");
+                MessageManage.ShowMessage("项目碰撞网格已切割并保存，下次进入将自动恢复", 1);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+                MessageManage.ShowMessage("碰撞网格生成或保存失败，请查看日志", 2);
+            }
+            finally
+            {
+                if (ColliderGenButton != null)
+                {
+                    ColliderGenButton.interactable = true;
+                }
+            }
         }
         else
         {

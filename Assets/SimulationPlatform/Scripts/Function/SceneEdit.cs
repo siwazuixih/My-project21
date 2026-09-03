@@ -56,6 +56,55 @@ public class SceneEdit : ModelImport
         // 加载已有的碰撞体数据
         LoadExistingColliders();
     }
+
+    protected override async Task OnModelLoaded(GameObject model)
+    {
+        await Task.Yield();
+
+        // 用户在编辑页重新导入另一个GLB时，Scene仍暂时指向旧文件。此时不能把旧
+        // sidecar碰撞网格挂到新模型上；等用户先保存新模型、再重新切割即可。
+        if (!CurrentModelMatchesSavedSceneFile())
+        {
+            m_cachedColliderModel = null;
+            m_colliderDataModified = false;
+            Debug.Log("当前为尚未保存的新导入模型，跳过旧碰撞网格自动恢复");
+            return;
+        }
+
+        // OnEnable会先启动GLB异步加载，再同步读取sidecar XML。这里在模型真正实例化后
+        // 才重建保存的碰撞网格，避免用户每次打开场景都重新切割。
+        if (m_cachedColliderModel == null)
+        {
+            LoadExistingColliders();
+        }
+
+        if (m_cachedColliderModel != null)
+        {
+            ColliderApplyReport report = await ColliderManager.ApplyColliderDataAndWaitAsync(
+                model,
+                m_cachedColliderModel,
+                true);
+            if (report.IsSuccessful)
+            {
+                Debug.Log($"场景编辑已自动恢复并验证 {report.CreatedMeshCount} 个保存的碰撞网格");
+                MessageManage.ShowMessage(
+                    $"已加载并验证保存的碰撞网格（{report.CreatedMeshCount}个）",
+                    1);
+            }
+            else
+            {
+                Debug.LogWarning(
+                    $"场景碰撞恢复未通过验证: 创建={report.CreatedMeshCount}/" +
+                    $"{report.RequestedMeshCount}, MuJoCo绑定={report.BoundMujocoGeomCount}, " +
+                    $"旧路径歧义={report.AmbiguousLegacyPathCount}");
+                MessageManage.ShowMessage(
+                    m_cachedColliderModel.FormatVersion < 2
+                        ? "旧版碰撞文件无法可靠定位，请重新切割并保存一次"
+                        : "碰撞网格恢复验证失败，请查看日志",
+                    2);
+            }
+        }
+    }
     
     private void InitializeInputFields()
     {
@@ -85,10 +134,18 @@ public class SceneEdit : ModelImport
 
     private async void OnColliderBtnClick()
     {
-        if (Scene == null)
+        if (Scene == null || Scene.Glb == null ||
+            string.IsNullOrWhiteSpace(Scene.Glb.FilePath))
         {
-            Debug.LogWarning("Scene 为空，请先保存 Scene");
-            MessageManage.ShowMessage("请先保存Scene", 2);
+            Debug.LogWarning("场景模型尚未保存，无法确定碰撞网格保存位置");
+            MessageManage.ShowMessage("请先保存场景模型，再进行网格切割", 2);
+            return;
+        }
+
+        if (!CurrentModelMatchesSavedSceneFile())
+        {
+            Debug.LogWarning("当前加载的是新导入模型，尚未保存到场景目录");
+            MessageManage.ShowMessage("模型已更换，请先保存场景，再进行网格切割", 2);
             return;
         }
 
@@ -102,152 +159,66 @@ public class SceneEdit : ModelImport
 
         Debug.Log("Collider button clicked, 开始生成碰撞体...");
 
+        AutoColliderGen_Final colliderGen = null;
+        if (ColliderBtn != null)
+        {
+            ColliderBtn.interactable = false;
+        }
+
         try
         {
             // 动态添加 AutoColliderGen_Final 组件
-            AutoColliderGen_Final colliderGen = currentModel.AddComponent<AutoColliderGen_Final>();
+            colliderGen = currentModel.GetComponent<AutoColliderGen_Final>();
+            if (colliderGen == null)
+            {
+                colliderGen = currentModel.AddComponent<AutoColliderGen_Final>();
+            }
             colliderGen.targetObject = currentModel;
+            colliderGen.visualizeColliders = true;
 
             // 生成碰撞体
             await colliderGen.Generate();
 
             // 从生成的模型中提取碰撞体数据
-            ExtractColliderMeshes(currentModel);
+            m_cachedColliderModel = ColliderManager.ExtractColliderData(
+                currentModel,
+                Scene.Id,
+                Scene.Id,
+                null,
+                Scene.Name + "_Colliders");
+            m_colliderDataModified = true;
 
-            // 清理临时组件
-            DestroyImmediate(colliderGen);
-
-            Debug.Log("碰撞体生成完成！");
-            MessageManage.ShowMessage("碰撞体生成完成", 1);
+            // 切割完成后立即保存，不再要求用户额外点击一次“保存”。
+            bool saved = SaveCollidersToXml();
+            if (saved)
+            {
+                Debug.Log("碰撞体生成并保存完成！");
+                MessageManage.ShowMessage("网格切割并保存完成，下次将自动加载", 1);
+            }
+            else
+            {
+                Debug.LogWarning("碰撞体已生成，但保存失败");
+                MessageManage.ShowMessage("网格已生成，但保存失败，请检查日志", 2);
+            }
         }
         catch (Exception e)
         {
             Debug.LogException(e);
             MessageManage.ShowMessage("碰撞体生成失败: " + e.Message, 2);
         }
+        finally
+        {
+            if (colliderGen != null)
+            {
+                DestroyImmediate(colliderGen);
+            }
+            if (ColliderBtn != null)
+            {
+                ColliderBtn.interactable = true;
+            }
+        }
     }
 
-    private void ExtractColliderMeshes(GameObject modelRoot)
-    {
-        m_cachedColliderModel = new ColliderModel
-        {
-            Id = Scene.Id,
-            SceneId = Scene.Id,
-            Name = Scene.Name + "_Colliders"
-        };
-        
-        // 标记碰撞体数据已修改
-        m_colliderDataModified = true;
-
-        // 查找所有 _MjRoot 对象
-        var allChildren = modelRoot.GetComponentsInChildren<Transform>();
-        int mjRootIndex = 0;
-
-        foreach (var child in allChildren)
-        {
-            if (child.name.Contains("_MjRoot"))
-            {
-                Debug.Log($"找到 MjRoot: {child.name}");
-                
-                var mjRootData = new ColliderMjRootData
-                {
-                    Name = child.name,
-                    ParentPath = GetTransformPath(child.parent, modelRoot)
-                };
-
-                // 查找这个 MjRoot 下的所有碰撞体
-                var meshFilters = child.GetComponentsInChildren<MeshFilter>();
-                int meshIndex = 0;
-
-                foreach (var mf in meshFilters)
-                {
-                    if (mf.sharedMesh == null) continue;
-                    if (mf == null) continue;
-
-                    // 检查是否为VHACD生成的碰撞体（名字包含 _Hull_）
-                    bool isVHACD = mf.gameObject.name.Contains("_Hull_");
-
-                    var meshData = ColliderManager.MeshToColliderMeshData(mf.sharedMesh, isVHACD);
-                    meshData.Name = mf.gameObject.name;
-                    mjRootData.Meshes.Add(meshData);
-
-                    meshIndex++;
-                }
-
-                if (mjRootData.Meshes.Count > 0)
-                {
-                    m_cachedColliderModel.MjRoots.Add(mjRootData);
-                    Debug.Log($"MjRoot {mjRootData.Name} 包含 {mjRootData.Meshes.Count} 个碰撞体");
-                }
-
-                mjRootIndex++;
-            }
-        }
-
-        // 如果没有找到 _MjRoot，兼容旧版本数据结构
-        if (m_cachedColliderModel.MjRoots.Count == 0)
-        {
-            Debug.LogWarning("未找到 _MjRoot，使用兼容模式提取");
-            var meshFilters = modelRoot.GetComponentsInChildren<MeshFilter>();
-            int meshIndex = 0;
-
-            // 为了兼容，创建一个默认的 MjRoot
-            var defaultMjRoot = new ColliderMjRootData
-            {
-                Name = "Default_MjRoot",
-                ParentPath = ""
-            };
-
-            foreach (var mf in meshFilters)
-            {
-                if (mf.sharedMesh == null) continue;
-
-                // 检查是否为VHACD生成的碰撞体（名字包含 _Hull_）
-                bool isVHACD = mf.gameObject.name.Contains("_Hull_");
-
-                var meshData = ColliderManager.MeshToColliderMeshData(mf.sharedMesh, isVHACD);
-                meshData.Name = mf.gameObject.name;
-                defaultMjRoot.Meshes.Add(meshData);
-
-                meshIndex++;
-            }
-
-            if (defaultMjRoot.Meshes.Count > 0)
-            {
-                m_cachedColliderModel.MjRoots.Add(defaultMjRoot);
-            }
-        }
-
-        int totalMeshes = 0;
-        foreach (var mjRoot in m_cachedColliderModel.MjRoots)
-        {
-            totalMeshes += mjRoot.Meshes.Count;
-        }
-        Debug.Log($"提取了 {m_cachedColliderModel.MjRoots.Count} 个 MjRoot，共 {totalMeshes} 个碰撞体网格数据");
-    }
-
-    private string GetTransformPath(Transform target, GameObject root)
-    {
-        if (target == null || target.gameObject == root)
-        {
-            return "";
-        }
-
-        System.Text.StringBuilder path = new System.Text.StringBuilder();
-        Transform current = target;
-
-        while (current != null && current.gameObject != root)
-        {
-            if (path.Length > 0)
-            {
-                path.Insert(0, "/");
-            }
-            path.Insert(0, current.name);
-            current = current.parent;
-        }
-
-        return path.ToString();
-    }
     protected override void OnExitBtnClick()
     {
         base.OnExitBtnClick();
@@ -381,6 +352,14 @@ public class SceneEdit : ModelImport
 
                 // 设置GlbModel的FilePath为相对路径
                 Scene.Glb.FilePath = relativePath;
+
+                // 后续碰撞网格必须保存在已复制的场景模型旁边。同步当前模型路径，
+                // 也能避免下一次保存时把同一个模型再次判定为“重新导入”。
+                modelFilePath = targetPath;
+                if (ModelPathInput != null)
+                {
+                    ModelPathInput.text = targetPath;
+                }
                 Debug.Log($"设置Scene.Glb.FilePath为相对路径: {relativePath}");
                 Debug.Log($"原始完整路径: {targetPath}");
             }
@@ -409,15 +388,46 @@ public class SceneEdit : ModelImport
     }
 
     /// <summary>
+    /// 确认预览中的模型就是Scene.Glb所指向的已保存文件。
+    /// 替换模型后若未先保存，不能把新模型的碰撞数据写到旧模型的sidecar XML。
+    /// </summary>
+    private bool CurrentModelMatchesSavedSceneFile()
+    {
+        if (Scene?.Glb == null ||
+            string.IsNullOrWhiteSpace(Scene.Glb.FilePath) ||
+            string.IsNullOrWhiteSpace(modelFilePath))
+        {
+            return false;
+        }
+
+        try
+        {
+            string savedModelPath = Path.GetFullPath(
+                PathTool.ResolvePhysicalPath(Scene.Glb.FilePath));
+            string loadedModelPath = Path.GetFullPath(
+                PathTool.ResolvePhysicalPath(modelFilePath));
+            return string.Equals(
+                savedModelPath,
+                loadedModelPath,
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning($"无法核对当前模型与场景模型路径: {e.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
     /// 将缓存的碰撞体数据保存到模型所在目录
     /// </summary>
-    private void SaveCollidersToXml()
+    private bool SaveCollidersToXml()
     {
         // 如果碰撞体数据没有被修改过，不需要保存
         if (!m_colliderDataModified)
         {
             Debug.Log("碰撞体数据未修改，跳过保存");
-            return;
+            return m_cachedColliderModel != null;
         }
 
         // 如果有缓存的碰撞体数据
@@ -448,15 +458,18 @@ public class SceneEdit : ModelImport
                 
                 // 保存成功后重置修改标记
                 m_colliderDataModified = false;
+                return true;
             }
             else
             {
                 Debug.LogWarning("碰撞体数据保存失败");
+                return false;
             }
         }
         else
         {
             Debug.Log("没有缓存的碰撞体数据或模型路径为空");
+            return false;
         }
     }
     
@@ -496,6 +509,7 @@ public class SceneEdit : ModelImport
         if (existingCollider != null)
         {
             m_cachedColliderModel = existingCollider;
+            m_colliderDataModified = false;
             int totalMeshes = 0;
             if (existingCollider.MjRoots != null)
             {

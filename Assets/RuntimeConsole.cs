@@ -6,6 +6,7 @@ using UnityEngine.UI;
 public class RuntimeConsole : MonoBehaviour
 {
     private const string ToggleButtonName = "RuntimeConsoleToggleButton";
+    private const string ColliderToggleButtonName = "ColliderVisualizationToggleButton";
 
     [Header("把刚刚建的 ConsoleLogText 拖到这里")]
     public TextMeshProUGUI logTextDisplay;
@@ -23,13 +24,32 @@ public class RuntimeConsole : MonoBehaviour
     private GameObject titleObject;
     private Button toggleButton;
     private TextMeshProUGUI toggleButtonText;
+    private Button colliderToggleButton;
+    private Image colliderToggleButtonImage;
+    private TextMeshProUGUI colliderToggleButtonText;
     private bool isCollapsed;
+    private bool colliderVisualizationVisible = true;
+    private float nextHiddenColliderRefreshTime;
 
     void Start()
     {
         CachePanelParts();
         CreateToggleButton();
+        CreateColliderToggleButton();
         SetCollapsed(startCollapsed);
+        UpdateColliderToggleButtonState();
+    }
+
+    private void Update()
+    {
+        // 用户隐藏后若又重新切割，新生成的Renderer默认会启用。低频补扫一次，
+        // 保证按钮状态持续生效；这里只关Renderer，不会关闭MeshCollider或MjGeom。
+        if (!colliderVisualizationVisible &&
+            Time.unscaledTime >= nextHiddenColliderRefreshTime)
+        {
+            nextHiddenColliderRefreshTime = Time.unscaledTime + 0.5f;
+            ApplyColliderVisualization(false, false);
+        }
     }
 
     // 当这个脚本被激活时，向 Unity 申请“监听所有日志”
@@ -181,6 +201,150 @@ public class RuntimeConsole : MonoBehaviour
             toggleButton.onClick.RemoveListener(ToggleCollapsed);
             toggleButton.onClick.AddListener(ToggleCollapsed);
             toggleButton.transform.SetAsLastSibling();
+        }
+    }
+
+    private void CreateColliderToggleButton()
+    {
+        if (toggleButton == null)
+        {
+            return;
+        }
+
+        RectTransform logButtonRect = toggleButton.GetComponent<RectTransform>();
+        if (logButtonRect == null || logButtonRect.parent == null)
+        {
+            return;
+        }
+
+        Transform existing = logButtonRect.parent.Find(ColliderToggleButtonName);
+        GameObject buttonObject;
+        if (existing != null)
+        {
+            buttonObject = existing.gameObject;
+        }
+        else
+        {
+            buttonObject = new GameObject(
+                ColliderToggleButtonName,
+                typeof(RectTransform),
+                typeof(CanvasRenderer),
+                typeof(Image),
+                typeof(Button));
+            buttonObject.layer = toggleButton.gameObject.layer;
+
+            RectTransform buttonRect = buttonObject.GetComponent<RectTransform>();
+            buttonRect.SetParent(logButtonRect.parent, false);
+            buttonRect.anchorMin = logButtonRect.anchorMin;
+            buttonRect.anchorMax = logButtonRect.anchorMax;
+            buttonRect.pivot = logButtonRect.pivot;
+            // 日志右侧已有视频、程序和设备控制按钮，碰撞显示按钮放在日志左侧。
+            buttonRect.anchoredPosition =
+                logButtonRect.anchoredPosition + new Vector2(-120f, 0f);
+            buttonRect.sizeDelta = logButtonRect.sizeDelta;
+            buttonRect.localRotation = logButtonRect.localRotation;
+            buttonRect.localScale = logButtonRect.localScale;
+
+            colliderToggleButtonImage = buttonObject.GetComponent<Image>();
+            colliderToggleButtonImage.color =
+                new Color(0.05f, 0.35f, 0.65f, 0.92f);
+
+            GameObject textObject = new GameObject(
+                "Text",
+                typeof(RectTransform),
+                typeof(CanvasRenderer),
+                typeof(TextMeshProUGUI));
+            textObject.layer = buttonObject.layer;
+            textObject.transform.SetParent(buttonObject.transform, false);
+
+            RectTransform textRect = textObject.GetComponent<RectTransform>();
+            textRect.anchorMin = Vector2.zero;
+            textRect.anchorMax = Vector2.one;
+            textRect.offsetMin = Vector2.zero;
+            textRect.offsetMax = Vector2.zero;
+
+            TextMeshProUGUI text = textObject.GetComponent<TextMeshProUGUI>();
+            text.alignment = TextAlignmentOptions.Center;
+            text.color = Color.white;
+            text.fontSize = toggleButtonText != null ? toggleButtonText.fontSize : 18f;
+            text.raycastTarget = false;
+            if (toggleButtonText != null && toggleButtonText.font != null)
+            {
+                text.font = toggleButtonText.font;
+            }
+        }
+
+        colliderToggleButton = buttonObject.GetComponent<Button>();
+        colliderToggleButtonImage = buttonObject.GetComponent<Image>();
+        colliderToggleButtonText =
+            buttonObject.GetComponentInChildren<TextMeshProUGUI>(true);
+        if (colliderToggleButton != null)
+        {
+            colliderToggleButton.colors = toggleButton.colors;
+            colliderToggleButton.transition = toggleButton.transition;
+            colliderToggleButton.targetGraphic = colliderToggleButtonImage;
+            colliderToggleButton.onClick.RemoveListener(ToggleColliderVisualization);
+            colliderToggleButton.onClick.AddListener(ToggleColliderVisualization);
+            colliderToggleButton.transform.SetAsLastSibling();
+        }
+    }
+
+    public void ToggleColliderVisualization()
+    {
+        colliderVisualizationVisible = !colliderVisualizationVisible;
+        ApplyColliderVisualization(colliderVisualizationVisible, true);
+        UpdateColliderToggleButtonState();
+    }
+
+    private void ApplyColliderVisualization(bool visible, bool writeLog)
+    {
+        int rendererCount = 0;
+        MeshRenderer[] renderers = FindObjectsOfType<MeshRenderer>(true);
+        foreach (MeshRenderer renderer in renderers)
+        {
+            if (renderer == null || !IsGeneratedColliderRenderer(renderer.transform))
+            {
+                continue;
+            }
+
+            renderer.enabled = visible;
+            rendererCount++;
+        }
+
+        if (writeLog)
+        {
+            Debug.Log(
+                $"[碰撞网格显示] Visible={visible}, Renderer={rendererCount}；" +
+                "只改变调试渲染，不改变PhysX或MuJoCo碰撞");
+        }
+    }
+
+    private static bool IsGeneratedColliderRenderer(Transform transform)
+    {
+        Transform current = transform;
+        while (current != null)
+        {
+            if (current.name.Contains("_MjRoot"))
+            {
+                return true;
+            }
+            current = current.parent;
+        }
+        return false;
+    }
+
+    private void UpdateColliderToggleButtonState()
+    {
+        if (colliderToggleButtonText != null)
+        {
+            colliderToggleButtonText.text =
+                colliderVisualizationVisible ? "隐藏碰撞" : "显示碰撞";
+        }
+        if (colliderToggleButtonImage != null)
+        {
+            colliderToggleButtonImage.color = colliderVisualizationVisible
+                ? new Color(0.02f, 0.55f, 0.30f, 0.96f)
+                : new Color(0.22f, 0.25f, 0.30f, 0.92f);
         }
     }
 }

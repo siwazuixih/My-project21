@@ -604,11 +604,9 @@ public class AutoColliderGen_Final : MonoBehaviour
                 mjGeom.Settings = settings;
             }
 
-            #if UNITY_EDITOR
-            SerializedObject so = new SerializedObject(mjGeom);
-            var prop = so.FindProperty("ShapeType") ?? so.FindProperty("shapeType") ?? so.FindProperty("m_ShapeType");
-            if (prop != null) { prop.intValue = 6; so.ApplyModifiedProperties(); }
-            #endif
+            // ShapeType是公开字段，必须在Player中也设置为Mesh；旧代码只在
+            // UNITY_EDITOR下改SerializedProperty，打包后会保留默认Sphere。
+            mjGeom.ShapeType = MjShapeComponent.ShapeTypes.Mesh;
 
             MjMeshShape shape = new MjMeshShape();
             // MuJoCo的mesh asset只导出vertices，不会读取Unity Transform缩放。

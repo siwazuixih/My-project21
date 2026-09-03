@@ -30,8 +30,19 @@ internal static class ModelTool
 
         foreach (MeshFilter meshFilter in meshFilters)
         {
+            // 保存后恢复的碰撞代理本身也有MeshFilter，但已经具备完整的
+            // MeshCollider/Rigidbody/MjGeom，不能再次按普通模型重复添加组件。
+            if (IsInsideGeneratedColliderRoot(meshFilter.transform))
+            {
+                continue;
+            }
+
             // 为每个带有MeshFilter的物体添加MeshCollider
-            MeshCollider meshCollider = meshFilter.gameObject.AddComponent<MeshCollider>();
+            MeshCollider meshCollider = meshFilter.GetComponent<MeshCollider>();
+            if (meshCollider == null)
+            {
+                meshCollider = meshFilter.gameObject.AddComponent<MeshCollider>();
+            }
             meshCollider.sharedMesh = meshFilter.sharedMesh;
             //meshCollider.convex = true; // 设置为凸碰撞体，确保碰撞检测正常工作
             AddRigidbodyToModel(meshFilter.gameObject, highlight);
@@ -47,16 +58,37 @@ internal static class ModelTool
     {
         if (model == null) return;
 
-        Rigidbody rigidbody = model.AddComponent<Rigidbody>();
+        Rigidbody rigidbody = model.GetComponent<Rigidbody>();
+        if (rigidbody == null)
+        {
+            rigidbody = model.AddComponent<Rigidbody>();
+        }
         rigidbody.isKinematic = true; // 设置为非运动学刚体，以便触发碰撞事件
         rigidbody.useGravity = false; // 不使用重力
         //rigidbody.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic; // 使用连续碰撞检测，提高准确性
         rigidbody.constraints = RigidbodyConstraints.FreezeAll; // 冻结所有运动，相当于运动学刚体但能触发碰撞事件
         if (highlight)
         {
-            model.AddComponent<ModelCollisionHighlighter>();
+            if (model.GetComponent<ModelCollisionHighlighter>() == null)
+            {
+                model.AddComponent<ModelCollisionHighlighter>();
+            }
         }
 
         Debug.Log($"为模型 {model.name} 添加了Rigidbody");
+    }
+
+    private static bool IsInsideGeneratedColliderRoot(Transform transform)
+    {
+        Transform current = transform;
+        while (current != null)
+        {
+            if (current.name.IndexOf("_MjRoot", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return true;
+            }
+            current = current.parent;
+        }
+        return false;
     }
 }

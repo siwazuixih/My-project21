@@ -3656,3 +3656,115 @@
 
 - 集成在本地分支`integration/wulaoshi-21.4`进行，基点为`90e425b`；未提交、未推送，
   不会改变已发布的`v1.7`标签。
+
+## 2026-08-27 - 切割碰撞网格持久化与自动恢复
+
+### 本次任务目标
+
+- 让场景模型切割得到的碰撞网格在切割完成后立即保存，重新进入场景编辑或仿真时自动
+  恢复，不再要求每次启动后重新执行耗时切割。
+- 保持21.5/v1.8现有场景结构和生成器参数，不覆盖Unity场景YAML。
+
+### 根因分析
+
+- 项目原本已经有`.collider.xml` sidecar格式和部分读写代码，但链路没有真正闭合。
+- `AutoColliderGen_Final`在默认`visualizeColliders=false`时不会给Hull创建`MeshFilter`；旧
+  `SceneEdit`却只从`MeshFilter`提取，可能把原始显示网格当成切割结果保存。真正生成的
+  Hull位于`MeshCollider.sharedMesh`。
+- 切割按钮只更新内存缓存，必须再点一次“保存场景”才写盘，用户退出时容易丢失结果。
+- 场景编辑重新打开后只读取XML到缓存，没有把网格重建进模型；仿真恢复代码还会给Hull
+  设置项目中不存在的`VHACD` Tag，Unity会抛出异常并中断恢复。
+
+### 实现内容
+
+- 在`feature/collider-persistence`分支修改：
+  - `Assets/SimulationPlatform/Scripts/Function/SceneEdit.cs`
+  - `Assets/SimulationPlatform/Scripts/Function/Simulation.cs`
+  - `Assets/SimulationPlatform/Scripts/Manage/ColliderManager.cs`
+- `SceneEdit`现在从每个`_MjRoot`下的`MeshCollider.sharedMesh`提取真实切割结果，切割成功
+  后立即写入GLB同目录、同基础文件名的`.collider.xml`。
+- 场景编辑模型实例化完成后会自动读取并重建保存的`MjBody/MjGeom/MeshCollider`；仿真页
+  也改为调用同一套`ColliderManager.ApplyColliderData()`，避免两份恢复逻辑继续分叉。
+- 恢复前会清理模型下已有`_MjRoot`，找不到已保存的父层级路径时跳过并记录警告，不凭空
+  创建错误层级；所有恢复节点先在禁用状态创建，完成后同一帧启用。
+- 不再设置不存在的`VHACD` Tag；凸包身份继续由XML中的`IsVHACD`和`_Hull_`命名保存。
+- 新导入/替换模型如果还未保存到当前Scene目录，切割按钮会要求先保存，防止把新模型的
+  碰撞数据误写到旧GLB旁。复制成功后同步`modelFilePath`，也避免同一模型被重复复制。
+- 浮点网格数据统一使用InvariantCulture往返序列化，并支持超过65535顶点的UInt32索引。
+- 保存采用同目录临时文件加原子替换；序列化过程中即使退出，也不会先截断旧的可用XML。
+
+### 验证
+
+- `git -c core.whitespace=cr-at-eol diff --check`通过。
+- 使用Unity 2022.3.62f2c1批处理模式实际导入并编译项目两次，最终退出码0，无C#编译
+  错误。日志仍有项目既有的过时API、隐藏基类`Start()`和未使用字段等警告。
+- 普通`dotnet build --no-restore`最初因Unity生成的`Temp/obj/*/project.assets.json`缺失
+  无法执行；启动Unity重新导入后已由Unity自身编译器完成更贴近运行环境的验证。
+- 尚需在Unity交互界面完成运行回归：保存场景后切割，确认XML生成；退出再进入场景编辑
+  确认无需切割即可出现同数量`_MjRoot/_Hull_`；进入仿真确认碰撞和路径规划正常；再次
+  切割确认旧根节点被替换而非重复叠加。
+
+### 当前状态
+
+- 功能代码与项目记录均保存在本地`feature/collider-persistence`分支，尚未提交、未合并、
+  未推送；`release/software-v1.0`和`v1.8`未被改变。
+
+### 运行日志复查后的根因修正与第二阶段实现
+
+- 复查`Logs/Log_2026-08-27_17-49-57.log`和实际sidecar后确认，旧日志中的“恢复31个Root、
+  80个Mesh”只是Unity对象创建数量，并不能证明碰撞可用。GLB的31个网格节点只有11条
+  唯一名称路径，同一名称路径最多出现7次；旧`Transform.Find(ParentPath)`会把多组Hull
+  错挂到第一个同名节点，因此会出现数量正确但位置错误、机械臂仍穿透的假成功。
+- 项目页17:52:05重新切割得到的76个最终装配Hull没有调用提取和保存，XML时间仍停在
+  17:51:13；再次进入项目只能加载替换接头之前的80个基础Hull。
+- 原加载顺序是在接头替换前恢复基础碰撞，随后旧接头被禁用，其子级碰撞也随之失效；
+  新导入接头没有对应的`MjGeom`。这就是项目内当次切割有效、退出重进失效的直接原因。
+- `ColliderModel`格式升级为v2，每个Root同时保存可读的`ParentPath`和从模型根开始的
+  `ParentIndexPath`（逐级SiblingIndex）。恢复以索引路径唯一定位，再用名称路径校验；
+  旧v1文件只有名称路径时仅允许唯一匹配，发现歧义会拒绝错误挂载并提示重新切割。
+- 场景基础缓存仍为`<model>.collider.xml`；项目最终装配新增
+  `<model>.project-<Project.Id>.collider.xml`。项目进入时先完成全部接头替换，再优先恢复
+  项目级缓存；不存在时才回退场景基础缓存。
+- 项目页“网格切割”现在会对替换后的最终装配执行生成、提取和原子保存；模型管理页与
+  项目页均开启碰撞网格可视化，保存恢复后可以直接看到绿色代理网格。
+- 恢复入口升级为`ColliderManager.ApplyColliderDataAndWaitAsync()`：先统计Unity创建数，
+  再等待`MjScene.postInitEvent`，逐个核对`MjGeom.MujocoName/MujocoId`，最终输出
+  `[碰撞持久化/定位成功]`、`[碰撞持久化/Unity重建]`、`[碰撞持久化/MuJoCo验证]`等日志。
+  只有请求数、创建数、MuJoCo绑定数全部一致且重建未超时，报告才是PASS。
+- `AutoColliderGen_Final`和恢复代码都直接把`MjGeom.ShapeType`设为Mesh，不再依赖
+  `UNITY_EDITOR`下的`SerializedObject`；因此打包后的Player不会把碰撞网格保留为默认球体。
+- 第二阶段新增修改文件：
+  - `Assets/AutoColliderGen_Final.cs`
+  - `Assets/SimulationPlatform/Scripts/Model/ColliderModel.cs`
+
+### 第二阶段验证
+
+- Unity 2022.3.62f2c1批处理编译：第一次准确检出`MjScene.Model`指针需要unsafe上下文；
+  改为独立unsafe查询函数后再次编译退出码0，无C#错误。
+- `dotnet build --no-restore`在Unity批处理启动前因`Temp/obj/*/project.assets.json`缺失失败，
+  属于Unity临时工程依赖未生成；最终以Unity自身编译结果为准。
+- 旧`.collider.xml`需要在模型管理页重新切割一次才能生成v2稳定索引；包含接头替换的每个
+  项目还需要在项目页重新切割一次，以生成各自的项目级最终装配缓存。
+- 仍需用户运行态回归：重新切割基础模型、退出重进模型管理页、进入含替换接头项目切割、
+  退出重进该项目，并在Scene视图Ctrl拖动机械臂确认不穿透；同时确认日志最终为
+  `[碰撞持久化/MuJoCo验证] ... Result=PASS`。
+
+### 运行复测通过、颜色统一与仿真显示开关
+
+- 复查 `Logs/Log_2026-08-27_19-01-40.log`、`Log_2026-08-27_19-02-24.log` 及实际
+  project sidecar：项目页在19:02:51首次保存最终装配缓存，数量为31个Root、76个Mesh；
+  19:03:11退出重进后按项目ID加载同一文件，索引路径全部定位成功，Unity重建31/76，
+  MuJoCo绑定76/76并输出`Result=PASS`。19:03:56再次切割后仍原子覆盖同一项目缓存。
+- 保存恢复后的颜色与刚切割颜色不一致不是网格数据问题，只是两处调试材质参数不同。
+  `ColliderManager`恢复材质现已精确统一为`RGBA=(0, 1, 0, 0.4)`，修改成本很小。
+- `Assets/RuntimeConsole.cs`在仿真底部工具栏中、日志按钮左侧120像素动态创建碰撞显示
+  开关。碰撞可见时按钮为绿色并显示“隐藏碰撞”，隐藏后为灰色并显示“显示碰撞”。
+- 开关只控制`_MjRoot`层级中`MeshRenderer.enabled`，不会停用GameObject，也不会改变
+  `MeshCollider`、`Rigidbody`或`MjGeom`，因此隐藏五颜六色/绿色调试网格后碰撞仍然生效。
+  隐藏期间每0.5秒低频补扫，确保之后重新切割产生的新Renderer也遵守隐藏状态。
+- 复测日志还发现模型管理页恢复后，基础`ModelTool`再次扫描碰撞代理，尝试重复添加
+  `Rigidbody`并触发NullReferenceException。`ModelTool`现跳过`_MjRoot`层级，并对普通模型
+  的`MeshCollider`、`Rigidbody`和`ModelCollisionHighlighter`改为存在则复用，避免重复组件。
+- Unity 2022.3.62f2c1批处理重新导入编译退出码0，没有C#错误；`git diff --check`通过。
+  当前仍需在Unity界面手动确认按钮位置、隐藏/显示效果，并确认隐藏后Ctrl拖动机械臂仍
+  会发生碰撞，以及重新进入模型管理页不再出现重复Rigidbody异常。
