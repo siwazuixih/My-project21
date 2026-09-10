@@ -448,3 +448,28 @@
 - 本功能位于本地`feature/collider-persistence`分支，基线为SoftWare1.8提交`2c9ab48`。
   Unity 2022.3.62f2c1批处理导入编译已通过。已有旧XML必须在模型管理页重新切割一次；
   每个含替换接头的项目还需在项目页切割一次生成项目级缓存，再验证重进和真实碰撞。
+
+## 全流程离线验证（2026-09-03）
+
+- 真实运行右侧面板的“实时同步”下方由`Simulation` 动态创建
+  “全流程验证（模拟）”勾选框；不要为此直接修改`RunScene.unity` YAML。
+- 勾选后`Simulation.StartRun()`只调用
+  `ConnectCommander.DispatchFullProcessValidation()`，不进入原真机`DispatchTask`/
+  `DispatchNextTargetSequence`。开关默认false、不持久化，开启时禁用单步和实时同步。
+- `TrajectoryTask.targetIndex`是零基目标编号，`TrajectoryStage`分为
+  `Navigation/Lift/CoarseArm/ReturnArm`。`MissionController.DeepPrecomputeAll()`创建任务时
+  必须同时写这两项；新调度不应再靠`StartsWith("目标 1")`这种会误匹配目标10的方式分组。
+- 视觉轨迹通过`IVisionFineTuneTrajectoryProvider`进入编排层，统一输出
+  `FineTuneTrajectoryPlan`。当前`MockVisionFineTuneTrajectoryProvider`使用7维数组：前6轴
+  是CR10关节弧度，第7轴是升降米数。Inspector中模拟偏移为前6轴度数+第7轴米数，
+  provider负责转换到内部单位。
+- 未来视觉可返回连续笛卡尔点或七执行器轨迹，但都应在新provider中转换，
+  不要把视觉协议细节写进编排协程。不设50mm最大距离和姿态不变硬限制；真机接入前
+  必须补齐坐标系/单位、关节范围、连续性、碰撞和超时/中止校验。
+- 离线时序为每个目标的原粗定位任务 -> 模拟视觉轨迹 -> 启动/复用本机V26
+  bridge -> 等待模拟拧紧并输出`Result=SIMULATED_OK` -> 机械臂复位 -> 下一目标。
+  真实电批安全开关始终不解锁，离线流程不调用任何真机`Send*Routine`。
+- 离线流程不污染真机任务进度：退出时所有`isDispatched`恢复false。按R、界面重置、
+  取消勾选或退出场景都必须取消离线流程；由本次流程启动的V26进程在结束时关闭。
+- 当前工作分支为`feature/full-process-validation`。用户未提交的
+  `ProjectSettings/ProjectSettings.asset` 1.9.0修改属于工作区变更，不要在本功能的提交中意外遗漏。

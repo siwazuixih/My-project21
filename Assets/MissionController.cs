@@ -438,7 +438,12 @@ public class MissionController : MonoBehaviour
             //     connect.Commander.AddChassisTask($"目标 {i+1}: 导航", tempPath.corners, simFwd);
             // }
             if (hasNavigationPath && connect.Commander != null) {
-                connect.Commander.AddChassisTask($"目标 {i+1}: 导航", chassisPathForExecution, simFwd);
+                connect.Commander.AddChassisTask(
+                    $"目标 {i+1}: 导航",
+                    chassisPathForExecution,
+                    simFwd,
+                    i,
+                    TrajectoryStage.Navigation);
             }
             
             Vector3 moveDelta = finalStopPoint - simPos;
@@ -476,14 +481,24 @@ public class MissionController : MonoBehaviour
                     float simulatedLiftHeight = (float)finalPose[liftActuatorIndex];
                     
                     // 自动向真机任务清单中插入一个独立的“升降缸动作”
-                    connect.Commander.AddLiftTask($"目标 {i+1}: 升降缸调节", simulatedLiftHeight);
+                    connect.Commander.AddLiftTask(
+                        $"目标 {i+1}: 升降缸调节",
+                        simulatedLiftHeight,
+                        i,
+                        TrajectoryStage.Lift);
                 }
                 else
                 {
                     Debug.LogError($"liftActuatorIndex 设置错误！索引 {liftActuatorIndex} 超过了执行器总数。");
                 }
 
-                connect.Commander.AddArmTask($"目标 {i+1}: 抓取", armSolution, virtualArmQ, arm.motionCurve);
+                connect.Commander.AddArmTask(
+                    $"目标 {i+1}: 抓取",
+                    armSolution,
+                    virtualArmQ,
+                    arm.motionCurve,
+                    i,
+                    TrajectoryStage.CoarseArm);
                 virtualArmQ = armSolution[armSolution.Count - 1]; // 更新末端状态
 
                 if (mission.resetArmBeforeMoving && i < mission.targets.Count - 1) {
@@ -493,7 +508,13 @@ public class MissionController : MonoBehaviour
                         if (refs.ikSolver.actuators[j].Joint is MjHingeJoint) target *= Mathf.Deg2Rad;
                         resetPose[j] = target;
                     }
-                    connect.Commander.AddArmTask($"目标 {i+1}: 复位", new List<double[]> { resetPose }, virtualArmQ, arm.motionCurve);
+                    connect.Commander.AddArmTask(
+                        $"目标 {i+1}: 复位",
+                        new List<double[]> { resetPose },
+                        virtualArmQ,
+                        arm.motionCurve,
+                        i,
+                        TrajectoryStage.ReturnArm);
                     virtualArmQ = resetPose;
                 }
             }
@@ -533,7 +554,11 @@ public class MissionController : MonoBehaviour
         StopAllCoroutines();
         chassisCtrl.StopMovement(); 
         armCtrl.StopAndResetControls(); 
-        if (connect.Commander != null) connect.Commander.ClearAllTasks(); // 重置清空列表
+        if (connect.Commander != null)
+        {
+            connect.Commander.CancelFullProcessValidation();
+            connect.Commander.ClearAllTasks(); // 重置清空列表
+        }
 
         if (initialQpos != null) {
             for(int i = 0; i < initialQpos.Length; i++) MjScene.Instance.Data->qpos[i] = initialQpos[i];

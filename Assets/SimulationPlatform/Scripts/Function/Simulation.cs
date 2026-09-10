@@ -56,6 +56,10 @@ public class Simulation : ModelImport
     public RealRobotFollower RealRobotFollower;
 
     private bool StepRun = true;
+    private bool fullProcessValidationEnabled;
+    private bool stepRunBeforeFullProcess;
+    private Toggle fullProcessValidationToggle;
+    private GameObject fullProcessValidationRow;
 
     // 当前运行模式状态
     private bool m_isSimulationMode = true;
@@ -73,8 +77,29 @@ public class Simulation : ModelImport
 
     public void StartRun()
     {
+        if (fullProcessValidationEnabled)
+        {
+            Debug.Log("开始全流程离线验证（模拟视觉精调与模拟拧紧）");
+            if (Notice != null)
+            {
+                Notice.SetActive(true);
+            }
+            if (ConnectCommander != null)
+            {
+                ConnectCommander.DispatchFullProcessValidation(MissionController);
+            }
+            else
+            {
+                Debug.LogError("[全流程验证] ConnectCommander 未绑定。");
+            }
+            return;
+        }
+
         Debug.Log($"开始运行，{(StepRun ? "单步运行" : "连续运行")}");
-        Notice.SetActive(true);
+        if (Notice != null)
+        {
+            Notice.SetActive(true);
+        }
         if (StepRun)
         {
             if (ConnectCommander != null)
@@ -146,6 +171,7 @@ public class Simulation : ModelImport
         }
         // 初始化 Simulation/Realtime 模式切换按钮
         InitializeModeButtons();
+        InitializeFullProcessValidationToggle();
         // 加载模型
         if (RunManager.Project != null && RunManager.Project.Scene != null && RunManager.Project.Scene.Id != null)
         {
@@ -307,6 +333,120 @@ public class Simulation : ModelImport
         }
         UnsubscribeFromDobotEvents();
         UnsubscribeFromRobokitEvents();
+        if (fullProcessValidationToggle != null)
+        {
+            fullProcessValidationToggle.onValueChanged.RemoveListener(
+                OnFullProcessValidationChanged);
+        }
+        if (ConnectCommander != null)
+        {
+            ConnectCommander.CancelFullProcessValidation();
+        }
+    }
+
+    private void InitializeFullProcessValidationToggle()
+    {
+        if (SyncToggle == null || SyncToggle.transform.parent == null)
+        {
+            Debug.LogWarning(
+                "[全流程验证] 未找到“实时同步”控件，无法创建勾选框。");
+            return;
+        }
+
+        GameObject sourceRow = SyncToggle.transform.parent.gameObject;
+        fullProcessValidationRow = Instantiate(
+            sourceRow,
+            sourceRow.transform.parent,
+            false);
+        fullProcessValidationRow.name = "FullProcessValidationMock";
+
+        RectTransform rowRect =
+            fullProcessValidationRow.GetComponent<RectTransform>();
+        if (rowRect != null)
+        {
+            rowRect.anchoredPosition = new Vector2(130f, -159.6f);
+            rowRect.sizeDelta = new Vector2(230f, rowRect.sizeDelta.y);
+        }
+
+        Text label = fullProcessValidationRow.GetComponent<Text>();
+        if (label != null)
+        {
+            label.text = "全流程验证（模拟）";
+        }
+
+        fullProcessValidationToggle =
+            fullProcessValidationRow.GetComponentInChildren<Toggle>(true);
+        if (fullProcessValidationToggle == null)
+        {
+            Debug.LogError("[全流程验证] 勾选框动态创建失败。");
+            Destroy(fullProcessValidationRow);
+            fullProcessValidationRow = null;
+            return;
+        }
+
+        RectTransform toggleRect =
+            fullProcessValidationToggle.GetComponent<RectTransform>();
+        if (toggleRect != null)
+        {
+            toggleRect.anchoredPosition = new Vector2(92f, 0f);
+        }
+
+        // 克隆会同时克隆原 Toggle 指向实时同步的持久化回调，必须完全替换。
+        fullProcessValidationToggle.onValueChanged =
+            new Toggle.ToggleEvent();
+        fullProcessValidationToggle.SetIsOnWithoutNotify(false);
+        fullProcessValidationToggle.onValueChanged.AddListener(
+            OnFullProcessValidationChanged);
+        fullProcessValidationEnabled = false;
+    }
+
+    private void OnFullProcessValidationChanged(bool enabled)
+    {
+        fullProcessValidationEnabled = enabled;
+
+        if (enabled)
+        {
+            stepRunBeforeFullProcess = StepRunToggle != null
+                ? StepRunToggle.isOn
+                : StepRun;
+            StepRun = false;
+            if (StepRunToggle != null)
+            {
+                StepRunToggle.SetIsOnWithoutNotify(false);
+                StepRunToggle.interactable = false;
+            }
+
+            // 离线验证期间禁用真机跟随，避免本地动画被误解为下发意图。
+            if (SyncToggle != null)
+            {
+                SyncToggle.SetIsOnWithoutNotify(false);
+                SyncToggle.interactable = false;
+            }
+            if (RealRobotFollower != null)
+            {
+                RealRobotFollower.followEnabled = false;
+            }
+
+            Debug.LogWarning(
+                "[全流程验证] 已启用离线模式：单步运行和真机实时同步已临时禁用。");
+        }
+        else
+        {
+            if (StepRunToggle != null)
+            {
+                StepRunToggle.interactable = true;
+                StepRunToggle.SetIsOnWithoutNotify(stepRunBeforeFullProcess);
+            }
+            StepRun = stepRunBeforeFullProcess;
+            if (SyncToggle != null)
+            {
+                SyncToggle.interactable = true;
+            }
+            if (ConnectCommander != null)
+            {
+                ConnectCommander.CancelFullProcessValidation();
+            }
+        }
     }
 
     /// <summary>
@@ -1217,6 +1357,10 @@ public class Simulation : ModelImport
 
     private void OnResetClicked()
     {
+        if (ConnectCommander != null)
+        {
+            ConnectCommander.CancelFullProcessValidation();
+        }
         if (MissionController != null)
         {
             MissionController.ResetMission();

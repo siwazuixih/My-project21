@@ -3768,3 +3768,49 @@
 - Unity 2022.3.62f2c1批处理重新导入编译退出码0，没有C#错误；`git diff --check`通过。
   当前仍需在Unity界面手动确认按钮位置、隐藏/显示效果，并确认隐藏后Ctrl拖动机械臂仍
   会发生碰撞，以及重新进入模型管理页不再出现重复Rigidbody异常。
+
+## 2026-09-03 - 全流程离线验证原型
+
+### 目标与边界
+
+- 老师要求验证“路径粗定位 -> 视觉精调 -> 末端拧紧 -> 机械臂复位 ->
+  下一目标”的整体时序，但当前没有实物机器人，视觉同学的最终数据协议也未定。
+- 本轮实现的是默认关闭的“全流程验证（模拟）”：只回放MuJoCo执行器控制量，
+  不调用`SendArmRoutine`/`SendLiftRoutine`/`SendChassisSegmentedRoutine`，不解锁真实
+  电批运动，因此不会向真机下发运动指令。
+- 不再对视觉精调施加“最大50mm”或“末端方向不变”硬限制，因为真实对接可能需要
+  较大幅度并包含姿态变化的连续轨迹。当前入口只做7维、有限数值、时间数量一致等
+  数据有效性检查；真视觉接入后还需在提供器层增加坐标系/单位校验和真机安全仲裁。
+
+### 实现内容
+
+- `TrajectoryTask`新增`targetIndex`和`TrajectoryStage`，任务不再只依赖中文名称前缀分组。
+  原真机调度也优先按目标编号精确分组，避免“目标1”误匹配“目标10”；旧任务仍保留
+  名称前缀兼容。
+- `MissionController.DeepPrecomputeAll()`在创建导航、升降、粗定位和复位任务时，
+  同步写入目标编号和阶段。
+- `ConnectCommander`新增`IVisionFineTuneTrajectoryProvider`适配层。当前
+  `MockVisionFineTuneTrajectoryProvider`返回`List<double[]>`形式的三点轨迹：前6项
+  是CR10关节角（内部统一为弧度），第7项是升降轴（米）。偏移以每个目标粗定位
+  结束状态为基准；未来笛卡尔视觉轨迹只需新增适配器转换到这一统一格式。
+- 离线编排会按目标自动执行底盘、升降和粗定位动画，接收模拟视觉轨迹，
+  启动/复用本机V26 bridge，在真实电批锁定状态下输出`Result=SIMULATED_OK`，
+  再复位并继续下一目标。最后一个目标也会补一个离线复位任务。
+- 离线回放完成后会将原任务的`isDispatched`恢复为false，避免模拟验证被误认为
+  真机已下发。重置、取消勾选、退出场景都会请求中止流程，并关闭由本次验证
+  启动的V26进程。
+- `Simulation` 不修改RunScene YAML，而是克隆“实时同步”行的样式，在其下方动态创建
+  “全流程验证（模拟）”勾选框。开启时会临时禁用单步运行和真机实时同步，
+  关闭时恢复原先的单步设置；该安全开关不保存到项目参数，每次进入都默认关闭。
+
+### 验证与待手动回归
+
+- `dotnet build "My project21.5.sln" --no-restore`最终通过：0错误、16个项目既有警告。
+- `git diff --check`通过。Unity批处理编译因当前项目正被另一个Unity Editor实例打开而
+  被项目锁拒绝，不是代码错误；需在当前Editor退出Play Mode后等待脚本自动编译。
+- 手动回归步骤：在仿真页选好多个目标并点“开始仿真”生成任务；切到真实运行页，
+  勾选“全流程验证（模拟）”再点“开始运行”；确认日志按目标连续出现
+  `Navigation/Lift/CoarseArm -> 视觉精调 -> Result=SIMULATED_OK -> ReturnArm`，
+  且整个过程真机实时同步不可勾选。
+- 当前分支为`feature/full-process-validation`。代码、文档和用户尚未提交的
+  `ProjectSettings/ProjectSettings.asset` 1.9.0版本号仍在工作区，本轮未提交、未推送。
