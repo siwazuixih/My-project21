@@ -59,6 +59,8 @@ public sealed class ServoTighteningController : MonoBehaviour
     public string LastSavedPng { get; private set; } = "";
 
     private Process programProcess;
+    private readonly System.Collections.Concurrent.ConcurrentQueue<string> pythonTraceLines =
+        new System.Collections.Concurrent.ConcurrentQueue<string>();
     private bool ownsProgramProcess;
     private bool lifecycleRunning;
     private bool statusRequestRunning;
@@ -104,6 +106,11 @@ public sealed class ServoTighteningController : MonoBehaviour
         public string state;
         public string csv;
         public string png;
+        public bool cycle_active;
+        public int cycle_id;
+        public string cycle_phase;
+        public string cycle_result;
+        public string cycle_error;
     }
 
     public sealed class CommandResult
@@ -145,6 +152,8 @@ public sealed class ServoTighteningController : MonoBehaviour
 
     private void Update()
     {
+        for (int i = 0; i < 20 && pythonTraceLines.TryDequeue(out string traceLine); i++)
+            UnityEngine.Debug.Log(traceLine);
         UpdateButtonVisibility();
         if (
             !string.IsNullOrEmpty(pendingMotionCommand)
@@ -951,7 +960,7 @@ public sealed class ServoTighteningController : MonoBehaviour
                 WorkingDirectory = projectRoot,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-                RedirectStandardOutput = false,
+                RedirectStandardOutput = true,
                 RedirectStandardError = false,
             };
             startInfo.EnvironmentVariables["SERVO_TOOL_IP"] = toolHost;
@@ -961,6 +970,10 @@ public sealed class ServoTighteningController : MonoBehaviour
             startInfo.EnvironmentVariables["SERVO_BRIDGE_PORT"] =
                 bridgePort.ToString();
             startInfo.EnvironmentVariables["SERVO_UNITY_EMBEDDED_MODE"] = "1";
+            startInfo.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+            startInfo.EnvironmentVariables["UNITY_ROBOT_HOST"] = "127.0.0.1";
+            var robotGateway = FindObjectOfType<DobotController>();
+            startInfo.EnvironmentVariables["UNITY_ROBOT_PORT"] = (robotGateway != null ? robotGateway.RobotGatewayPort : 19120).ToString();
             startInfo.EnvironmentVariables["SERVO_CURVE_HOST"] = curveHost;
             startInfo.EnvironmentVariables["SERVO_CURVE_PORT"] =
                 curvePort.ToString();
@@ -984,6 +997,18 @@ public sealed class ServoTighteningController : MonoBehaviour
             {
                 return ReportFailure("Python 进程启动失败");
             }
+            programProcess.OutputDataReceived += (sender, e) =>
+            {
+                if (string.IsNullOrEmpty(e.Data)) return;
+                // 后台只入队；主线程输出才能被RuntimeConsole接收。
+                if (e.Data.StartsWith("[RobotTrace]") || e.Data.StartsWith("[ContactCycle]"))
+                {
+                    pythonTraceLines.Enqueue(e.Data);
+                    while (pythonTraceLines.Count > 500) pythonTraceLines.TryDequeue(out _);
+                }
+                else Console.WriteLine(e.Data); // 保留原有其他stdout，不在界面刷屏。
+            };
+            programProcess.BeginOutputReadLine();
 
             for (int attempt = 0; attempt < 50; attempt++)
             {
@@ -1045,6 +1070,47 @@ public sealed class ServoTighteningController : MonoBehaviour
     public Task<CommandResult> StartTighteningAsync()
     {
         return SendPublicCommandAsync("forward", true);
+    }
+
+    // 返回整个卡入—拧紧—退出的终态，不把命令入队或电批OK当作整个流程完成。
+    public async Task<CommandResult> RunContactCycleAsync(bool simulated, CancellationToken cancellation)
+    {
+        if (cancellation.IsCancellationRequested) return Failure("流程已取消");
+        CommandResult start = await SendPublicCommandAsync(simulated ? "auto_cycle_sim" : "auto_cycle", !simulated);
+        if (!start.Success) return start;
+        BridgeStatus initial = JsonUtility.FromJson<BridgeStatus>(start.RawResponse);
+        if (initial == null || initial.cycle_id <= 0) return Failure("拧紧服务不支持新版auto_cycle接口，请关闭旧进程后重启");
+        string phase = "";
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            while (elapsed.Elapsed.TotalSeconds < 150)
+            {
+                cancellation.ThrowIfCancellationRequested();
+                CommandResult result = await QueryStatusAsync();
+                if (!result.Success) throw new IOException(result.Error);
+                var status = JsonUtility.FromJson<BridgeStatus>(result.RawResponse);
+                if (status == null || status.cycle_id != initial.cycle_id) throw new IOException("自动流程编号改变，拒绝采用其他任务结果");
+                if (phase != status.cycle_phase)
+                {
+                    phase = status.cycle_phase;
+                    UnityEngine.Debug.Log("[ContactCycle] " + phase);
+                }
+                if (!status.cycle_active)
+                {
+                    string expected = simulated ? "SIMULATED_OK" : "OK";
+                    return status.cycle_phase == "DONE" && status.cycle_result == expected
+                        ? result : Failure("接触装配失败: " + status.cycle_result + " " + status.cycle_error);
+                }
+                await Task.Delay(200, cancellation);
+            }
+            throw new TimeoutException("卡入—拧紧—退出等待超时");
+        }
+        catch (Exception e)
+        {
+            await StopToolAsync();
+            return Failure(e.Message);
+        }
     }
 
     public Task<CommandResult> ReverseHomeAsync()
@@ -1168,6 +1234,19 @@ public sealed class ServoTighteningController : MonoBehaviour
             bool safeToClose = !ProgramReady;
             CommandResult stopResult =
                 await SendCommandInternalAsync("stop");
+            // Python自动流程仍可能持有机械臂权限，必须等其清理完成再结束进程。
+            if (stopResult.Success)
+            {
+                var cycleStatus = JsonUtility.FromJson<BridgeStatus>(stopResult.RawResponse);
+                for (int i = 0; cycleStatus != null && cycleStatus.cycle_active && i < 100; i++)
+                {
+                    await Task.Delay(100);
+                    var poll = await SendCommandInternalAsync("status");
+                    if (!poll.Success) return Failure("无法确认接触装配已停止，保留程序");
+                    cycleStatus = JsonUtility.FromJson<BridgeStatus>(poll.RawResponse);
+                }
+                if (cycleStatus != null && cycleStatus.cycle_active) return Failure("接触装配尚未停止，保留程序");
+            }
             if (stopResult.Success)
             {
                 ApplyBridgeStatus(stopResult.RawResponse);

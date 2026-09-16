@@ -5,7 +5,7 @@ using UnityEngine;
 using TMPro; // 如果你在 UI 中使用了 TextMeshPro 的 InputField
 using System.Threading.Tasks; // 用于异步任务   
 
-public class DobotController : MonoBehaviour
+public partial class DobotController : MonoBehaviour
 {
     #region 事件定义
     // 统一的事件委托和事件
@@ -88,6 +88,8 @@ public class DobotController : MonoBehaviour
 
     public void Connect()
     {
+        if (ExternalControlActive) { Debug.LogWarning("外部算法正在执行，不能重新连接机械臂。"); return; }
+        if (tcpClient != null && tcpClient.Connected) return;
         try
         {
             tcpClient = new TcpClient(robotIP, dashboardPort);
@@ -100,7 +102,7 @@ public class DobotController : MonoBehaviour
 
 
             // 🌟 新增：连接成功后，启动独立的异步监听任务！
-            _ = ReceiveLoopAsync();
+            // 所有请求共用一个串行请求/应答通道，不能另起读取循环抢走应答。
 
             SendCommand("RequestControl()");
             ConnectFeedback();
@@ -123,8 +125,18 @@ public class DobotController : MonoBehaviour
     }
 
 
-    public void Disconnect()
+    public async void Disconnect()
     {
+        if (ExternalControlActive)
+        {
+            RevokeExternalControl();
+            await AbortOwnerAsync();
+            if (ExternalControlActive)
+            {
+                Debug.LogError("未确认算法阶段停止，暂不主动断开机器人连接。请检查设备状态。");
+                return;
+            }
+        }
         try
         {
             // 1. 先关闭数据流
@@ -218,91 +230,32 @@ public class DobotController : MonoBehaviour
         MoveJoints(fakeJoints);
     }
 
-    private void SendCommand(string cmd)
+    private async void SendCommand(string cmd)
     {
-        if (networkStream == null || !tcpClient.Connected)
-        {
-            Debug.LogWarning("未连接到 TCP 服务端，请先按 1 建立连接！");
-
-            // 触发命令发送失败事件
-            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateCommandEvent(
-                cmd, false, "未连接到 TCP 服务端"));
-            return;
-        }
-        
         try
         {
-            byte[] data = Encoding.UTF8.GetBytes(cmd + "\n"); // 越疆指令通常需要带换行符作为结束
-            networkStream.Write(data, 0, data.Length);
-            Debug.Log($"<color=#00FFFF>Unity 发送指令:</color> {cmd}");
-
-            // 触发命令发送成功事件
+            if (ExternalControlActive && cmd != "Stop()")
+                throw new InvalidOperationException("力控/视觉阶段正在占用运动权限");
+            string response = await ExchangeDashboardAsync(cmd, false);
             OnDobotEvent?.Invoke(this, DobotEventArgs.CreateCommandEvent(cmd, true));
-
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateResponseEvent(response, "Dashboard"));
         }
         catch (Exception e)
         {
-            Debug.LogError("发送指令失败: " + e.Message);
-
-            // 触发命令发送失败事件
+            Debug.LogWarning("机械臂命令失败: " + e.Message);
             OnDobotEvent?.Invoke(this, DobotEventArgs.CreateCommandEvent(cmd, false, e.Message));
-
-            // 触发错误事件
-            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateErrorEvent(e.Message, "SendCommand"));
         }
     }
 
     private void OnApplicationQuit()
     {
+        ShutdownRobotGateway();
         // 确保退出 Unity 时释放端口
         if (networkStream != null) networkStream.Close();
         if (tcpClient != null) tcpClient.Close();
         CloseFeedbackConnection();
     }
 
-    // 需要在脚本顶部确保引入了 System.Threading.Tasks;
-
-    private async System.Threading.Tasks.Task ReceiveLoopAsync()
-    {
-        byte[] buffer = new byte[1024];
-        try
-        {
-            // 只要连接还在，就一直死循环监听
-            while (tcpClient != null && tcpClient.Connected && networkStream != null)
-            {
-                // 异步等待，这里不会卡死主线程。如果没有数据，它就在这里安静等待
-                int bytesRead = await networkStream.ReadAsync(buffer, 0, buffer.Length);
-                
-                if (bytesRead > 0)
-                {
-                    string response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    // 去掉末尾多余的换行符，保持日志干净
-                    response = response.TrimEnd('\r', '\n'); 
-                    Debug.Log($"<color=yellow>服务端返回:</color> {response}");
-
-                    // 触发响应接收事件
-                    OnDobotEvent?.Invoke(this, DobotEventArgs.CreateResponseEvent(response, "Dashboard"));
-                }
-                else
-                {
-                    // 如果读到 0 字节，说明服务端主动断开了连接
-                    Debug.LogWarning("服务端主动断开了连接。");
-
-                    // 触发连接断开事件
-                    OnDobotEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(
-                        false, "服务端主动断开了连接", "Dashboard"));
-                    break;
-                }
-            }
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogWarning("接收任务结束或连接异常: " + e.Message);
-
-            // 触发错误事件
-            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateErrorEvent(e.Message, "ReceiveLoopAsync"));
-        }
-    }
 
     private void ConnectFeedback()
     {
@@ -378,7 +331,7 @@ public class DobotController : MonoBehaviour
     private void ParseFeedbackPacket(byte[] packet)
     {
         ushort messageSize = BitConverter.ToUInt16(packet, 0);
-        if (messageSize != 1440) return;
+        if (messageSize != 1440 || BitConverter.ToUInt64(packet, 48) != 0x123456789ABCDEFUL) return;
 
         lock (feedbackLock)
         {
@@ -387,6 +340,13 @@ public class DobotController : MonoBehaviour
             currentRobotModeText = RobotModeToText(currentRobotMode);
             speedScaling = BitConverter.ToDouble(packet, 64);
             velocityRatio = packet[1016];
+            robotError = packet[1029];
+            robotCollision = packet[1038];
+            for (int i = 0; i < 6; i++)
+            {
+                actualForce[i] = BitConverter.ToDouble(packet, 576 + i * 8);
+                actualToolPose[i] = BitConverter.ToDouble(packet, 624 + i * 8);
+            }
 
             for (int i = 0; i < 6; i++)
             {

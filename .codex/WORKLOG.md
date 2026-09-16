@@ -3814,3 +3814,47 @@
   且整个过程真机实时同步不可勾选。
 - 当前分支为`feature/full-process-validation`。代码、文档和用户尚未提交的
   `ProjectSettings/ProjectSettings.asset` 1.9.0版本号仍在工作区，本轮未提交、未推送。
+
+## 2026-09-10：机械臂统一通信与同学 0910 接触装配流程适配
+
+- 目标：按用户要求，Python 力控/后续视觉通过 Unity 获取机器人数据及申请运动，
+  不切断 Unity 连接、不让 Python 另连机器人；提供具体改造说明。
+- 读取：各级 AGENTS、本日志/PROJECT_CONTEXT、DobotController、ConnectCommander、
+  ServoTighteningController、正式 V26 与 0910 原始脚本、用户补齐的 cr10af_hybrid_x.py。
+- 开始时本地为 release/software-v1.0，v1.10/57f96bc；仅 cr10af_hybrid_x.py 未跟踪。
+  本轮在该分支工作，未提交、推送、打标签或改版本号；早期记录的 feature 分支不是当前分支。
+- 新增 DobotController.Gateway.cs（partial）及 meta：回环网关19120、阶段占用、
+  串行 Dashboard 应答、模拟模式、默认关闭真实运动、反馈/位移/速度/停止检查。
+  DobotController.cs 取消原独立应答循环，避免共享连接抢读，并补充反馈缓存。
+- 新增 unity_robot_client.py、servo_contact_cycle.py；改造 cr10af_hybrid_x.py，
+  移除机器人直连，保留 X 轴进退与 Y/Z 搜索主体。将0910时序移入正式V26服务，
+  保留已有曲线和桥接；原始0910资料不作为正式启动入口、不修改。
+- ServoTighteningController 等待完整流程终态、传递端口；ConnectCommander 离线流程
+  改为调用 auto_cycle_sim，而非仅等待两秒。失败/NG不进入下一目标。
+- 修补检查发现的细节：停止锁存、待发命令代际检查、释放令牌检查、正转发送失败
+  不报启动成功、自动阶段拦截手动启动、运动中取消不更新模拟终点。
+- 新增 tests 的 .NET 网关宿主与 Python 集成测试；6项通过，真实机器人连接未建立。
+  四个 Python 文件 AST 检查通过。Assembly-CSharp.csproj 使用临时targets纳入新文件，
+  编译0错误、28警告；git diff --check通过。Unity批处理因项目被打开而无法运行。
+- 详细改造、接口、坐标/单位、测试和使用步骤见
+  `.codex/ROBOT_COMMUNICATION_ADAPTATION_2026-09-10.md`。
+- 当前代码与离线通信测试完成，实机验收未完成：模拟接触只更新内存位姿/零力，
+  不做MuJoCo接触动画；真实协议、反馈布局、方向/工具配置、每步停止的力控效果待现场确认。
+- 下次从当前Editor退出Play后自动编译、全流程模拟多目标与取消回归开始；同时检查
+  普通运动命令和实时曲线。真实运动许可保持关闭，不能据离线PASS直接进行插接。
+
+## 2026-09-10：增加汇报用双端通信参数日志
+
+- 用户要求直接显示Python与Unity通信参数对照，暂不增加开关。
+- 读取各级AGENTS、WORKLOG/PROJECT_CONTEXT、unity_robot_client、Gateway、
+  ServoTighteningController、RuntimeConsole及网关测试；保留全部此前未提交改动。
+- 修改Python适配器输出TX/RX/FAIL（白名单字段、不含token、不刷status心跳）；
+  Gateway输出同id接收/返回参数和处理耗时。运动、位姿、六维力都可对照。
+- 修改启动器重定向stdout，将RobotTrace/ContactCycle通过有界队列在主线程输出，
+  供现有RuntimeConsole显示；其他stdout保留Console输出，stderr不改变。
+- tests新增编号一致、参数/结果、token隐藏与心跳不输出断言，并持续排空测试宿主stdout。
+  7项离线测试通过；Assembly-CSharp编译0错误27警告；git diff --check通过。
+- 补充改造说明第8节与长期上下文。未修改场景、运动逻辑、版本号、超时、开关。
+- 当前完成日志实现；仍需Editor重启Python后打开“展开日志”验证四类记录。
+  已知完整模拟8mm/30秒超时尚未修复，不能据日志功能宣称全流程已通过。
+  下次按相同id对照handling_ms和roundtrip_ms定位耗时；未提交或推送。

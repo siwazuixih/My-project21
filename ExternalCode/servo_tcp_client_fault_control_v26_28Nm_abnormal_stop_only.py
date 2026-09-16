@@ -38,6 +38,7 @@ import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from servo_contact_cycle import ContactCycle
 
 import numpy as np
 UNITY_EMBEDDED_MODE = os.environ.get(
@@ -605,6 +606,9 @@ def clear_pending_commands():
 
 def enqueue_command(cmd_name: str):
     """按钮/快捷键只入队，不直接执行耗时TCP操作，避免Matplotlib界面假死。"""
+    if 'contact_cycle' in globals() and contact_cycle.snapshot()['cycle_active']:
+        print("自动接触流程执行中，拒绝额外的手动启动指令")
+        return
     try:
         command_queue.put_nowait(cmd_name)
         print(f"按钮指令已接收: {cmd_name}")
@@ -622,6 +626,13 @@ def start_reverse(event=None):
 
 
 def stop_driver(event=None):
+    if 'contact_cycle' in globals() and contact_cycle.snapshot()['cycle_active']:
+        threading.Thread(target=contact_cycle.stop, daemon=True).start()
+        return
+    stop_cycle_tool()
+
+
+def stop_cycle_tool():
     # V19：停止按钮立即置位，并在后台连续发送两种停止帧。
     stop_requested.set()
     clear_pending_commands()
@@ -637,7 +648,7 @@ def _do_start_forward():
         hard_stop_driver("正转启动被中断", repeat=4, delay=0.035, close_socket_after=True, try_new_connection=True)
         return
     clear_run("RUN_FORWARD")
-    send_cmd(CMD_FORWARD, "正转")
+    return send_cmd(CMD_FORWARD, "正转")
 
 
 def _reverse_to_home(reason: str = "RETURN_HOME", save_after: bool = False):
@@ -1267,6 +1278,17 @@ def unity_status(ok: bool = True, message: str = "status"):
 def run_unity_command(cmd: str):
     normalized = (cmd or "").strip().lower()
 
+    if normalized in ("auto_cycle", "auto_cycle_sim"):
+        contact_cycle.start(simulated=normalized == "auto_cycle_sim")
+        return {**unity_status(True, "cycle_started"), **contact_cycle.snapshot()}
+
+    if normalized in ("stop", "reset") and contact_cycle.snapshot()['cycle_active']:
+        threading.Thread(target=contact_cycle.stop, daemon=True).start()
+        return {**unity_status(True, "cycle_stop_requested"), **contact_cycle.snapshot()}
+
+    if normalized in ("connect", "forward", "reverse") and contact_cycle.snapshot()['cycle_active']:
+        return unity_status(False, "contact_cycle_busy")
+
     if normalized == "connect":
         ok = reset_driver()
         if ENABLE_PHYSICAL_SWITCH_CAPTURE and ok:
@@ -1286,9 +1308,19 @@ def run_unity_command(cmd: str):
         return unity_status(True, "stop_requested")
 
     if normalized in ("status", ""):
-        return unity_status(True, "status")
+        return {**unity_status(True, "status"), **contact_cycle.snapshot()}
 
     return unity_status(False, f"unknown_cmd:{cmd}")
+
+
+def start_cycle_tool():
+    # Synchronous transition clears any previous result before polling begins.
+    sent = _do_start_forward()
+    if not sent or state != "RUN_FORWARD":
+        raise RuntimeError("Tool failed to start")
+
+
+contact_cycle = ContactCycle(start_cycle_tool, unity_status, stop_cycle_tool)
 
 
 def handle_unity_client(conn: socket.socket, addr):

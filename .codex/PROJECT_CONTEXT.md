@@ -473,3 +473,23 @@
   取消勾选或退出场景都必须取消离线流程；由本次流程启动的V26进程在结束时关闭。
 - 当前工作分支为`feature/full-process-validation`。用户未提交的
   `ProjectSettings/ProjectSettings.asset` 1.9.0修改属于工作区变更，不要在本功能的提交中意外遗漏。
+
+### 2026-09-10 更新：统一机械臂入口（覆盖上文旧分支/模拟拧紧状态）
+
+- 当前工作分支 release/software-v1.0，基于v1.10/57f96bc；本次适配尚未提交。
+- DobotController 为partial类，Gateway文件在同一组件启动回环TCP19120；机器人
+  Dashboard/Feedback只由Unity持有，普通指令与算法共用串行请求应答入口。
+- Python UnityRobotClient 申请阶段占用，读取status/pose/wrench，发送相对XYZ毫米运动；
+  阶段互斥，不是移交机器人TCP连接。真实模式默认关闭，仅允许回环请求。
+- 正式启动仍是V26非0910文件，保留9100控制与9101曲线、电批Python通信。
+  ContactCycle负责卡入→5秒→拧紧→5秒→退出；HybridExit经Unity入口执行算法。
+- 全流程模拟现在调用auto_cycle_sim；模拟接触为内存位姿和零力，不是物理接触仿真。
+  整体成功并释放后才复位/下一目标；NG退出完成仍为失败。
+- 不支持任意七轴视觉轨迹网关；后续必须明确轴/单位/坐标及执行校验后扩展。
+- 实机协议/反馈布局与现场力控尚未验证。详细文件映射、限制、验收步骤见
+  `.codex/ROBOT_COMMUNICATION_ADAPTATION_2026-09-10.md`；测试位于tests/。
+- 通信展示：RobotTrace日志始终启用，Python/Unity用相同请求id记录收发、参数、
+  结果和耗时，不打印token/status心跳。软件启动的Python stdout由主线程队列转发至
+  RuntimeConsole；外部已启动进程仍需在其终端查看Python侧。日志不是完整审计存储。
+- 当前Editor完整模拟曾在卡入8mm触发30秒预算超时，尚未修复；缩短时长的测试通过
+  不代表完整Editor流程通过。新增日志用于对照和进一步定位。

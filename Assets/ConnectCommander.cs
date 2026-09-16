@@ -692,20 +692,23 @@ public class ConnectCommander : MonoBehaviour
                 validationStartedServoProgram = true;
             }
 
-            Debug.Log(
-                $"[全流程验证][{targetLabel}][拧紧] " +
-                "开始模拟末端拧紧。真实电批运动保持锁定。");
-            yield return StartCoroutine(
-                WaitForOfflineSeconds(Mathf.Max(offlineTighteningDuration, 0.05f)));
-
-            if (fullProcessCancelRequested)
+            using (var cancel = new System.Threading.CancellationTokenSource())
             {
-                break;
+                var cycle = validationServoController.RunContactCycleAsync(true, cancel.Token);
+                while (!cycle.IsCompleted)
+                {
+                    if (fullProcessCancelRequested) cancel.Cancel();
+                    yield return null;
+                }
+                if (fullProcessCancelRequested) break;
+                if (cycle.IsFaulted || cycle.IsCanceled || !cycle.Result.Success)
+                {
+                    failureReason = cycle.IsFaulted ? cycle.Exception.GetBaseException().Message
+                        : cycle.IsCanceled ? "接触装配已取消" : cycle.Result.Error;
+                    break;
+                }
+                Debug.Log($"[全流程验证][{targetLabel}] 卡入—拧紧—退出 Result=SIMULATED_OK");
             }
-
-            Debug.Log(
-                $"<color=lime>[全流程验证][{targetLabel}][拧紧] " +
-                "Result=SIMULATED_OK。</color>");
 
             TrajectoryTask returnTask = group.Find(
                 task => task.stage == TrajectoryStage.ReturnArm);

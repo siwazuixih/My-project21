@@ -82,7 +82,7 @@ public class Simulation : ModelImport
             Debug.Log("开始全流程离线验证（模拟视觉精调与模拟拧紧）");
             if (Notice != null)
             {
-                Notice.SetActive(true);
+                Notice.SetActive(false);
             }
             if (ConnectCommander != null)
             {
