@@ -1,0 +1,66 @@
+# 底盘动作完成确认（2026-09-16）
+
+## 协议依据
+
+依据用户提供的《查询机器人导航状态.pdf》第2页、《平动.pdf》、《API报文结构.pdf》、
+《API简介.pdf》，并核对同目录《转动.pdf》。文件位于用户下载目录，未复制进仓库。
+
+- 3055平动、3056旋转的应答13055/13056只表示指令处理结果，不表示运动到位。
+- 1020查询完整状态（simple=false），响应11020，task_type=7明确表示平动/转动。
+- task_status为数字：0 NONE、1 WAITING、2 RUNNING、3 SUSPENDED、4 COMPLETED、
+  5 FAILED、6 CANCELED。原代码将其解析为string，已纠正。
+- ret_code为0或缺省表示无API错误，非0表示失败；无错误时允许空数据区。
+- 流水号为16位，响应原样回传；响应API通常是请求API+10000。
+- 每端口建议100~200ms以上请求间隔；本实现保守地统一串行请求，应答后至少200ms。
+- 1021是重定位状态，不用来判断平动完成。没有改为3051路径导航，也没有引入TCP client模式。
+
+## 改造内容
+
+RobokitController.ConfirmedMotion.cs新增ExecuteRelativeConfirmedAsync：
+
+1. 查询底盘当前状态，已有运行/等待/暂停任务时拒绝覆盖。
+2. 下发一次3055或3056，等待相同流水号及对应API的应答；不自动重发运动。
+3. 持续请求1020完整状态，检查错误码及task_type=7。
+4. 先观察RUNNING，再观察COMPLETED，才返回true；读取到旧COMPLETED不会立即成功。
+5. 暂停、失败、取消、未知/缺失状态、断线和超时返回false，尝试调用原有3003停止接口。
+   3003应答不是物理停止保证；发送失败会明确记录，需要现场处理/硬件急停。
+
+默认参数在RobokitController Inspector：responseTimeoutSeconds=3、
+motionStartTimeoutSeconds=10、motionTimeoutSeconds=120、statusPollSeconds=0.2。
+由于请求本身有200ms间隔，实际轮询周期还包括应答与该间隔；不宣称严格200ms。
+
+ConnectCommander每次旋转/平移等待上述结果，所有段成功才设置isDispatched。
+底盘失败时上层退出，不再无限等待isDispatched，也不进入升降/机械臂后续阶段。
+原来的估算等待参数不再作为底盘完成依据，其他运动参数/方向换算保持原有逻辑。
+状态失败信息存在task.dispatchError中；停止版本号阻止段间取消后继续下发。
+
+RobokitController所有请求共用应答匹配入口，底盘闭环动作中拒绝额外运动/重定位。
+接收端循环读取完整16字节头及数据体，支持TCP分包/粘包、空应答，限制最大1MiB；
+不支持的版本、路由或压缩头明确报错。当前包版本仍为0x01，若现场是RBK3.5/0x02，
+需要确认适配，不能忽略版本检查。流水号不复用，用尽时拒绝请求并提示重启软件。
+
+## 保守边界
+
+- 这些相对运动协议没有可回查的唯一运动task_id。流水号只能关联API问答，
+  不能证明没有其他控制器在期间接管。测试期间应确保单一控制源。
+- 很短的动作可能在首次轮询前已经完成，导致没看到RUNNING：当前明确失败并停止，
+  不能通过“连续收到几次COMPLETED”绕过，因为可能是旧任务结果。
+- COMPLETED是底盘控制器确认的任务完成，不是独立位置精度测量；里程模式仍可能漂移。
+- 升降缸按用户要求没有修改；其原有超时后标记完成的问题仍在，不应说整套全流程
+  都已具有可靠完成判据。机械臂真实流程/配置面板等后续工作仍未完成。
+
+## 验证
+
+tests/ChassisHarness链接实际RobokitController、ConfirmedMotion和RobokitProtocol源文件，
+以单线程同步上下文模拟Unity回调，本机随机端口假服务返回拆开的包头和包体。
+13项测试通过：平动/旋转成功、旧完成状态、失败、暂停、取消、字段缺失、指令拒绝、
+持续运行超时、断线、错误流水号、错误task_type、未知状态。无真实底盘连接。
+Assembly-CSharp编译通过；仍需Unity导入新partial文件以及现场验证控制器真实状态时序。
+
+```bash
+dotnet run --project tests/ChassisHarness/ChassisHarness.csproj
+```
+
+现场查看 `[底盘闭环]` 日志：指令应答→RUNNING(type=7)→COMPLETED(type=7)。
+检查暂停/停止后不进入下一段；若出现“未观察到本段RUNNING”或“type不是7”，保留日志，
+先分析协议/实际时序，不能直接跳过判据。本轮未连接/移动实物，未修改升降缸，未提交推送。

@@ -18,6 +18,7 @@ class UnityRobotClient:
         self.sock = None
         self.reader = None
         self.lock = threading.Lock()
+        self.last_status = {}
 
     def open(self):
         self.sock = socket.create_connection((self.host, self.port), timeout=3)
@@ -34,14 +35,14 @@ class UnityRobotClient:
         with self.lock:
             request_id = uuid.uuid4().hex
             payload = dict(id=request_id, op=op, token=self.token, **kwargs)
-            traced = op in ('acquire', 'release', 'stop', 'move_relative', 'pose', 'wrench')
+            traced = op in ('acquire', 'release', 'stop', 'finish_stage', 'begin_stage', 'end_stage', 'move_relative', 'pose', 'wrench')
             started = time.monotonic()
             mode = 'SIM' if self.simulate else 'REAL_REQUEST'
             if op == 'stop':
                 mode = 'CURRENT_OWNER'
             if traced:
                 safe = {k: v for k, v in kwargs.items()
-                        if k in ('simulate', 'delta', 'duration', 'tool', 'enforce_lateral')}
+                        if k in ('simulate', 'delta', 'duration', 'tool', 'enforce_lateral', 'original_timing', 'stop_at_end', 'stage', 'planned_distance_mm')}
                 print('[RobotTrace][Python][TX] id=%s op=%s mode=%s params=%s units=mm,s,N,Nm,deg'
                       % (request_id, op, mode, json.dumps(safe, ensure_ascii=False)), flush=True)
             try:
@@ -72,10 +73,14 @@ class UnityRobotClient:
 
     def status(self):
         result = self.request('status')
+        self.last_status = dict(result)
         if result.get('simulated', False) != self.simulate:
             raise RuntimeError('Feedback source does not match requested execution mode')
+        if not self.simulate and result.get('six_force_online') != 1:
+            raise RuntimeError('Six-axis force sensor offline or abnormal')
         result['time'] = time.monotonic() - result.get('age_s', 1e9)
         result['error'] = result.get('robot_error', 0)
+        self.last_status = dict(result)
         return result
 
     def pose(self):
@@ -93,6 +98,26 @@ class UnityRobotClient:
 
     def stop(self):
         return self.request('stop')
+
+    def move_original_interval(self, dx, dy, dz, duration, stop_at_end, enforce_lateral):
+        result = self.request('move_relative', delta=[dx, dy, dz], duration=duration,
+                              original_timing=True, stop_at_end=stop_at_end,
+                              enforce_lateral=enforce_lateral)
+        if result.get('result') != 'interval_elapsed':
+            raise RuntimeError('Gateway does not support original interval semantics')
+        return result
+
+    def finish_stage(self):
+        result = self.request('finish_stage')
+        if result.get('result') != 'stage_stopped':
+            raise RuntimeError('Stage stop not confirmed')
+        return result
+
+    def begin_stage(self, stage, distance):
+        return self.request('begin_stage', stage=stage, planned_distance_mm=distance)
+
+    def end_stage(self):
+        return self.request('end_stage')
 
     def close(self):
         try:

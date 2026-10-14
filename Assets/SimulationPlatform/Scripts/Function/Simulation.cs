@@ -77,6 +77,8 @@ public class Simulation : ModelImport
 
     public void StartRun()
     {
+        if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked)
+        { Debug.LogWarning("现场联调占用中，请在现场面板停止/确认后操作"); return; }
         if (fullProcessValidationEnabled)
         {
             Debug.Log("开始全流程离线验证（模拟视觉精调与模拟拧紧）");
@@ -120,7 +122,16 @@ public class Simulation : ModelImport
 
     private void Awake()
     {
-        
+        if (GetComponent<FieldCommissioningPanel>() == null) gameObject.AddComponent<FieldCommissioningPanel>();
+    }
+
+    public void PrepareFieldMode()
+    {
+        if (fullProcessValidationEnabled)
+        {
+            fullProcessValidationToggle?.SetIsOnWithoutNotify(false);
+            OnFullProcessValidationChanged(false);
+        }
     }
     // Start is called before the first frame update
     void Start()
@@ -402,6 +413,8 @@ public class Simulation : ModelImport
 
     private void OnFullProcessValidationChanged(bool enabled)
     {
+        if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked)
+        { fullProcessValidationToggle?.SetIsOnWithoutNotify(fullProcessValidationEnabled); return; }
         fullProcessValidationEnabled = enabled;
 
         if (enabled)
@@ -771,6 +784,8 @@ public class Simulation : ModelImport
 
     private void OnBackClick()
     {
+        if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked)
+        { FieldCommissioningPanel.Active.RequestStop(); Debug.LogWarning("停止确认前请勿离开实物联调页面"); return; }
         if (RunManager.RunStatus == RunStatus.IDLE || RunManager.RunStatus == RunStatus.INTERRUPT)
         {
             SaveProjectParams();
@@ -1357,6 +1372,8 @@ public class Simulation : ModelImport
 
     private void OnResetClicked()
     {
+        if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked)
+        { FieldCommissioningPanel.Active.RequestStop(); return; }
         if (ConnectCommander != null)
         {
             ConnectCommander.CancelFullProcessValidation();

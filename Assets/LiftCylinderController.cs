@@ -34,6 +34,8 @@ public class LiftCylinderController : MonoBehaviour
     private TcpClient tcpClient;
     private ModbusIpMaster modbusMaster; 
     private Coroutine monitorCoroutine;
+    private int motionEpoch;
+    public int StopVersion { get; private set; }
 
     private void Awake()
     {
@@ -42,6 +44,7 @@ public class LiftCylinderController : MonoBehaviour
 
     public void Connect()
     {
+        if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked) return;
         try {
             tcpClient = new TcpClient();
             tcpClient.Connect(ipAddress, port); 
@@ -57,6 +60,9 @@ public class LiftCylinderController : MonoBehaviour
 
     public void Disconnect()
     {
+        if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked)
+        { FieldCommissioningPanel.Active.RequestStop(); return; }
+        motionEpoch++;
         StopMonitor();
         tcpClient?.Close();
         modbusMaster?.Dispose();
@@ -65,6 +71,15 @@ public class LiftCylinderController : MonoBehaviour
     }
 
     public bool IsConnected() => tcpClient != null && tcpClient.Connected && modbusMaster != null;
+    public bool FieldConnectedTo(string ip, int targetPort)
+    {
+        try
+        {
+            var endpoint = tcpClient?.Client.RemoteEndPoint as System.Net.IPEndPoint;
+            return IsConnected() && endpoint != null && endpoint.Address.Equals(System.Net.IPAddress.Parse(ip)) && endpoint.Port == targetPort;
+        }
+        catch { return false; }
+    }
 
     /// <summary>
     /// 使能电缸 (寄存器地址 100，对应表格 40101)
@@ -82,6 +97,8 @@ public class LiftCylinderController : MonoBehaviour
     /// </summary>
     public void StopCylinder()
     {
+        StopVersion++;
+        motionEpoch++;
         if (!IsConnected()) return;
         // 使用 WriteSingleRegister 发送标准功能码 0x06
         modbusMaster.WriteSingleRegister(slaveId, 105, 1);
@@ -93,9 +110,18 @@ public class LiftCylinderController : MonoBehaviour
     /// </summary>
     /// <param name="simHeightMeters">Unity仿真的高度(米)</param>
     /// <param name="velocity">速度(mm/s)</param>
-    public async void MoveToPosition(float simHeightMeters, float velocity = 50.0f)
+    public void MoveToPosition(float simHeightMeters, float velocity = 50.0f)
     {
+        MoveToPosition(simHeightMeters, velocity, false);
+    }
+
+    public async void MoveToPosition(float simHeightMeters, float velocity, bool fieldWorkflow)
+    {
+        if (!fieldWorkflow && FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked) return;
         if (!IsConnected()) return;
+        int epoch = ++motionEpoch;
+        try
+        {
         commandedVelocityMmPerSec = velocity;
 
         // 第一步：确保电缸处于使能状态 (向 101 写入 1)
@@ -104,6 +130,7 @@ public class LiftCylinderController : MonoBehaviour
             
         // 等待 200 毫秒，给物理电机上电锁死的时间
         await System.Threading.Tasks.Task.Delay(200); 
+        if (epoch != motionEpoch || !IsConnected()) return;
 
 
         // 1. 位置计算 -> 转换为毫米并保持为 float (对应表格 402025: SINGLE)
@@ -120,20 +147,25 @@ public class LiftCylinderController : MonoBehaviour
 
         // 4. 触发绝对运动指令 (寄存器地址 103，对应表格 40104)
         await System.Threading.Tasks.Task.Delay(100);
+        if (epoch != motionEpoch || !IsConnected()) return;
 
         modbusMaster.WriteSingleRegister(slaveId, 103, 0); // 先写入 0，确保每次都是从非触发状态开始
 
         await System.Threading.Tasks.Task.Delay(100);
+        if (epoch != motionEpoch || !IsConnected()) return;
 
 
         modbusMaster.WriteSingleRegister(slaveId, 103, 1); 
 
         await System.Threading.Tasks.Task.Delay(100);
+        if (epoch != motionEpoch || !IsConnected()) return;
 
 
         modbusMaster.WriteSingleRegister(slaveId, 103, 0); // 写回 0，完成触发
         
         Debug.Log($"<color=cyan>[升降缸] 移动 -> 目标位置(Float): {targetRealPos} mm, 速度(Float): {velocity:F1}</color>");
+        }
+        catch (Exception e) { motionEpoch++; Debug.LogError("[升降缸] 移动序列失败：" + e.Message); }
     }
 
     /// <summary>
@@ -218,13 +250,19 @@ public class LiftCylinderController : MonoBehaviour
 
     public async void startmove()
     {
+            if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked) return;
+            int epoch = ++motionEpoch;
+            if (!IsConnected()) return;
+            try {
             // 第四步：制造一个完美的“上升沿”触发
             // 先复位为 0，确保等下能产生上升沿
             // modbusMaster.WriteSingleRegister(slaveId, 104, 0); 
             // await System.Threading.Tasks.Task.Delay(50);
             modbusMaster.WriteMultipleRegisters(slaveId, 103, new ushort[] { 0 }); 
             await System.Threading.Tasks.Task.Delay(50);
+            if (epoch != motionEpoch || !IsConnected()) return;
             modbusMaster.WriteMultipleRegisters(slaveId, 103, new ushort[] { 1 });
+            } catch (Exception e) { Debug.LogError("[升降缸] 启动失败：" + e.Message); }
     }
 
     private void StartMonitor()
@@ -282,6 +320,7 @@ public class LiftCylinderController : MonoBehaviour
 
     void OnDestroy()
     {
+        motionEpoch++;
         StopMonitor();
     }
 }

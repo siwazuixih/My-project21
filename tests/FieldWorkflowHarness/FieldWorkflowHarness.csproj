@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../Assets/FieldCommissioningSettings.cs" Link="Settings.cs" />
+    <Compile Include="../../Assets/ConnectCommander.FieldWorkflow.cs" Link="Plan.cs" />
+    <Compile Include="../../Assets/FieldWorkflowSequence.cs" Link="Sequence.cs" />
+  </ItemGroup>
+</Project>

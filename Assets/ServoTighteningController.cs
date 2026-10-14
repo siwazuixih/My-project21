@@ -59,6 +59,7 @@ public sealed class ServoTighteningController : MonoBehaviour
     public string LastSavedPng { get; private set; } = "";
 
     private Process programProcess;
+    public bool FieldWorkflowOwned { get; set; }
     private readonly System.Collections.Concurrent.ConcurrentQueue<string> pythonTraceLines =
         new System.Collections.Concurrent.ConcurrentQueue<string>();
     private bool ownsProgramProcess;
@@ -111,6 +112,13 @@ public sealed class ServoTighteningController : MonoBehaviour
         public string cycle_phase;
         public string cycle_result;
         public string cycle_error;
+        public string cycle_first_error, cycle_failure_json, cycle_cleanup_errors, cycle_workflow;
+        public int contact_api_version;
+        public bool original_timing_supported, original_contact_timing;
+        public bool motion_diagnostics_supported, robot_only_supported;
+        public string configuration_id;
+        public string tool_ip;
+        public int tool_port;
     }
 
     public sealed class CommandResult
@@ -897,6 +905,7 @@ public sealed class ServoTighteningController : MonoBehaviour
 
     public async void ToggleProgram()
     {
+        if (FieldWorkflowOwned) { UnityEngine.Debug.LogWarning("实物流程占用服务，请先停止流程"); return; }
         if (lifecycleRunning)
         {
             return;
@@ -1072,25 +1081,110 @@ public sealed class ServoTighteningController : MonoBehaviour
         return SendPublicCommandAsync("forward", true);
     }
 
-    // 返回整个卡入—拧紧—退出的终态，不把命令入队或电批OK当作整个流程完成。
-    public async Task<CommandResult> RunContactCycleAsync(bool simulated, CancellationToken cancellation)
+    public async Task PrepareFieldServiceAsync(FieldCommissioningSettings settings)
     {
+        settings.Validate(false);
+        if (!ProgramReady)
+        {
+            pythonExecutable = settings.pythonExecutable; toolHost = settings.toolIp; toolPort = settings.toolPort;
+            var start = await StartProgramAsync();
+            if (!start.Success) throw new IOException(start.Error);
+        }
+        var query = await QueryStatusAsync();
+        if (!query.Success) throw new IOException(query.Error);
+        var service = JsonUtility.FromJson<BridgeStatus>(query.RawResponse);
+        if (service.contact_api_version != 2 || service.tool_ip != settings.toolIp || service.tool_port != settings.toolPort)
+            throw new IOException("现有Python服务版本或电批地址不匹配，请先停止旧服务后重试");
+        if (!service.motion_diagnostics_supported || !service.robot_only_supported)
+            throw new IOException("Python服务缺少末端测量/机械臂单测功能，请关闭旧服务并部署完整新版");
+        if (settings.originalContactTiming && !service.original_timing_supported)
+            throw new IOException("旧Python服务不支持原算法节奏，请停止旧服务并更新完整构建目录");
+        string id = Guid.NewGuid().ToString("N");
+        string json = JsonUtility.ToJson(settings);
+        json = json.Substring(0, json.Length - 1) + ",\"configuration_id\":\"" + id + "\"}";
+        var configured = await SendPublicCommandAsync("configure_contact:" + json, false);
+        if (!configured.Success || JsonUtility.FromJson<BridgeStatus>(configured.RawResponse).configuration_id != id)
+            throw new IOException("Python未确认本次接触配置: " + configured.Error);
+        if (JsonUtility.FromJson<BridgeStatus>(configured.RawResponse).original_contact_timing != settings.originalContactTiming)
+            throw new IOException("Python接触节奏配置回执不一致");
+        UnityEngine.Debug.Log("[实物联调] Python接触参数已确认，configuration_id=" + id);
+    }
+
+    public async Task RequireFieldToolReadyAsync(bool requireTool = true)
+    {
+        var result = await QueryStatusAsync();
+        if (!result.Success) throw new IOException(result.Error);
+        var status = JsonUtility.FromJson<BridgeStatus>(result.RawResponse);
+        if (status == null || (requireTool && !status.tool_connected) || status.cycle_active || status.state == "RUN_FORWARD" || status.state == "RUN_REVERSE")
+            throw new IOException("接触服务未就绪: tool_connected=" + status?.tool_connected + " cycle_active=" + status?.cycle_active + " tool_state=" + status?.state);
+    }
+
+    public async Task WaitFieldCycleIdleAsync()
+    {
+        for (int i = 0; i < 30; i++)
+        {
+            var result = await QueryStatusAsync();
+            if (!result.Success) throw new IOException(result.Error);
+            var status = JsonUtility.FromJson<BridgeStatus>(result.RawResponse);
+            CaptureCycleFailure(status, lastMeasuredCycleId);
+            if (status != null && !status.cycle_active) return;
+            await Task.Delay(200);
+        }
+        throw new TimeoutException("Python接触流程未结束");
+    }
+
+    // 返回整个卡入—拧紧—退出的终态，不把命令入队或电批OK当作整个流程完成。
+    public async Task<CommandResult> RunContactCycleAsync(bool simulated, CancellationToken cancellation, double timeoutSeconds = 150)
+    {
+        return await RunMeasuredCycleAsync(simulated ? "auto_cycle_sim" : "auto_cycle", simulated ? "SIMULATED_OK" : "OK", !simulated, cancellation, timeoutSeconds);
+    }
+    public async Task<CommandResult> RunRobotOnlyCycleAsync(bool insert, CancellationToken cancellation, double timeoutSeconds)
+    {
+        if (!FieldWorkflowOwned) return Failure("机械臂单测必须从现场联调入口启动");
+        return await RunMeasuredCycleAsync(insert ? "robot_insert" : "robot_withdraw", "ROBOT_ONLY_DONE", false, cancellation, timeoutSeconds);
+    }
+    public string LastCycleFirstError { get; private set; }
+    public string LastCycleFailureJson { get; private set; }
+    public string LastCycleCleanupErrors { get; private set; }
+    private int lastMeasuredCycleId;
+    private void CaptureCycleFailure(BridgeStatus status, int cycleId)
+    {
+        if (status == null || status.cycle_id != cycleId) return;
+        LastCycleCleanupErrors = status.cycle_cleanup_errors;
+        if (string.IsNullOrEmpty(LastCycleFirstError) && !string.IsNullOrEmpty(status.cycle_first_error))
+        {
+            LastCycleFirstError = status.cycle_first_error;
+            LastCycleFailureJson = status.cycle_failure_json;
+            UnityEngine.Debug.LogError("[ContactCycle][FIRST_FAILURE] " + (LastCycleFailureJson ?? LastCycleFirstError));
+        }
+    }
+    public void ClearCycleFailure()
+    {
+        LastCycleFirstError = LastCycleFailureJson = LastCycleCleanupErrors = null;
+        lastMeasuredCycleId = 0;
+    }
+    private async Task<CommandResult> RunMeasuredCycleAsync(string command, string expected, bool unlockTool, CancellationToken cancellation, double timeoutSeconds)
+    {
+        ClearCycleFailure();
         if (cancellation.IsCancellationRequested) return Failure("流程已取消");
-        CommandResult start = await SendPublicCommandAsync(simulated ? "auto_cycle_sim" : "auto_cycle", !simulated);
+        CommandResult start = await SendPublicCommandAsync(command, unlockTool);
         if (!start.Success) return start;
         BridgeStatus initial = JsonUtility.FromJson<BridgeStatus>(start.RawResponse);
         if (initial == null || initial.cycle_id <= 0) return Failure("拧紧服务不支持新版auto_cycle接口，请关闭旧进程后重启");
+        lastMeasuredCycleId = initial.cycle_id;
         string phase = "";
         var elapsed = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            while (elapsed.Elapsed.TotalSeconds < 150)
+            while (elapsed.Elapsed.TotalSeconds < timeoutSeconds)
             {
                 cancellation.ThrowIfCancellationRequested();
                 CommandResult result = await QueryStatusAsync();
                 if (!result.Success) throw new IOException(result.Error);
                 var status = JsonUtility.FromJson<BridgeStatus>(result.RawResponse);
                 if (status == null || status.cycle_id != initial.cycle_id) throw new IOException("自动流程编号改变，拒绝采用其他任务结果");
+                CaptureCycleFailure(status, initial.cycle_id);
+                if (!string.IsNullOrEmpty(LastCycleFirstError)) throw new IOException(LastCycleFirstError);
                 if (phase != status.cycle_phase)
                 {
                     phase = status.cycle_phase;
@@ -1098,7 +1192,6 @@ public sealed class ServoTighteningController : MonoBehaviour
                 }
                 if (!status.cycle_active)
                 {
-                    string expected = simulated ? "SIMULATED_OK" : "OK";
                     return status.cycle_phase == "DONE" && status.cycle_result == expected
                         ? result : Failure("接触装配失败: " + status.cycle_result + " " + status.cycle_error);
                 }
@@ -1108,8 +1201,16 @@ public sealed class ServoTighteningController : MonoBehaviour
         }
         catch (Exception e)
         {
-            await StopToolAsync();
-            return Failure(e.Message);
+            // Request stop promptly; retrieve the frozen Python cause even if Unity was cancelled meanwhile.
+            Task<CommandResult> stopping = StopToolAsync();
+            try
+            {
+                var status = await QueryStatusAsync();
+                if (status.Success) CaptureCycleFailure(JsonUtility.FromJson<BridgeStatus>(status.RawResponse), initial.cycle_id);
+            }
+            catch (Exception detailError) { UnityEngine.Debug.LogWarning("[ContactCycle] 取原始错误失败: " + detailError.Message); }
+            try { await stopping; } catch (Exception stopError) { UnityEngine.Debug.LogWarning("[ContactCycle] 停止回执失败: " + stopError.Message); }
+            return Failure(LastCycleFirstError ?? e.Message);
         }
     }
 
@@ -1130,6 +1231,7 @@ public sealed class ServoTighteningController : MonoBehaviour
 
     private async void HandleStopButton()
     {
+        if (FieldWorkflowOwned) { FieldCommissioningPanel.Active?.RequestStop(); return; }
         if (!ProgramReady || stopCommandRunning)
         {
             return;
@@ -1152,6 +1254,7 @@ public sealed class ServoTighteningController : MonoBehaviour
 
     private async Task ConfirmAndSendMotionAsync(string command)
     {
+        if (FieldWorkflowOwned) { UnityEngine.Debug.LogWarning("实物流程占用电批，禁止额外手动启动"); return; }
         if (!ProgramReady || motionCommandRunning)
         {
             return;
@@ -1402,6 +1505,8 @@ public sealed class ServoTighteningController : MonoBehaviour
                             return Failure("拧紧程序没有返回数据");
                         }
 
+                        var status = JsonUtility.FromJson<BridgeStatus>(response);
+                        if (status == null || !status.ok) return Failure("拧紧服务拒绝请求: " + response);
                         return new CommandResult(true, response, "");
                     }
                 }

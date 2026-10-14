@@ -16,12 +16,19 @@ public partial class DobotController : MonoBehaviour
     public string robotIP = "127.0.0.1"; // 默认指向本机，配合虚拟服务端测试
     public int dashboardPort = 29999;
     public int feedbackPort = 30005;
+    [Header("开发调试（实物部署保持关闭）")]
+    [SerializeField] private bool enableDebugKeyboardShortcuts = false;
+    [SerializeField] private bool enableLoopbackSimulatorCommands = false;
+    private bool controlModeConfirmed, connecting;
+    private long displayedFeedbackSequence;
+    private string feedbackFailure;
+    private double feedbackClockOffset = double.PositiveInfinity;
 
     private TcpClient tcpClient;
     private NetworkStream networkStream;
     private TcpClient feedbackClient;
     private NetworkStream feedbackStream;
-    private bool feedbackLoopRunning;
+    private volatile bool feedbackLoopRunning;
     private readonly object feedbackLock = new object();
 
     [Header("6轴角度输入框")]
@@ -49,7 +56,9 @@ public partial class DobotController : MonoBehaviour
 
     void Update()
     {
+        RefreshFeedbackUI(); // 后台反馈事件必须每帧在主线程派发，不能被鼠标悬停UI阻断。
         if (UIUtil.IsPointerOverUI()) return;
+        if (!enableDebugKeyboardShortcuts) return;
         // 测试按键 1：连接机械臂并请求控制权
         if (Input.GetKeyDown(KeyCode.Alpha1))
         {
@@ -70,7 +79,6 @@ public partial class DobotController : MonoBehaviour
             MoveJoints(fakeJoints);
         }
 
-        RefreshFeedbackUI();
     }
 
     // 专门给 InputField (TMP) 调用的动态传值方法
@@ -86,25 +94,26 @@ public partial class DobotController : MonoBehaviour
     }
 
 
-    public void Connect()
+    public async void Connect()
     {
-        if (ExternalControlActive) { Debug.LogWarning("外部算法正在执行，不能重新连接机械臂。"); return; }
-        if (tcpClient != null && tcpClient.Connected) return;
+        if (ExternalControlActive || FieldWorkflowActive) { Debug.LogWarning("流程正在执行，不能重新连接机械臂。"); return; }
+        if (connecting || (tcpClient != null && tcpClient.Connected && controlModeConfirmed)) return;
+        connecting = true;
+        controlModeConfirmed = false;
         try
         {
+            tcpClient?.Close();
             tcpClient = new TcpClient(robotIP, dashboardPort);
             networkStream = tcpClient.GetStream();
             Debug.Log("<color=green>TCP 连接成功！</color>");
 
-            // 触发连接成功事件
-            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(
-                true, $"成功连接到 {robotIP}:{dashboardPort}", "Dashboard"));
-
-
             // 🌟 新增：连接成功后，启动独立的异步监听任务！
             // 所有请求共用一个串行请求/应答通道，不能另起读取循环抢走应答。
 
-            SendCommand("RequestControl()");
+            await ExchangeDashboardAsync("RequestControl()", false);
+            controlModeConfirmed = true;
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(
+                true, $"TCP控制模式已确认 {robotIP}:{dashboardPort}", "Dashboard"));
             ConnectFeedback();
         }
         catch (Exception e)
@@ -117,7 +126,11 @@ public partial class DobotController : MonoBehaviour
 
             // 触发错误事件
             OnDobotEvent?.Invoke(this, DobotEventArgs.CreateErrorEvent(e.Message, "Connect"));
+            tcpClient?.Close();
+            controlModeConfirmed = false;
+            CloseFeedbackConnection();
         }
+        finally { connecting = false; }
     }
     public void PowerOn()
     {
@@ -127,6 +140,7 @@ public partial class DobotController : MonoBehaviour
 
     public async void Disconnect()
     {
+        if (FieldWorkflowActive) { FieldCommissioningPanel.Active?.RequestStop(); Debug.LogWarning("先停止实物流程并确认，再断开连接"); return; }
         if (ExternalControlActive)
         {
             RevokeExternalControl();
@@ -154,7 +168,7 @@ public partial class DobotController : MonoBehaviour
             }
 
             CloseFeedbackConnection();
-
+            controlModeConfirmed = false;
             bool isConnected = false;
             Debug.Log("<color=yellow>TCP 连接已安全断开。</color>");
 
@@ -172,17 +186,22 @@ public partial class DobotController : MonoBehaviour
     }
 
 
-    public void EnableRobot()
+    public async void EnableRobot()
     {
-        SendCommand("ClearError()"); 
-        SendCommand("EnableRobot()"); 
-        SetRobotSpeed(3); // 默认10速度
-
+        try
+        {
+            if (!controlModeConfirmed) throw new InvalidOperationException("TCP控制模式尚未确认，请在未使能状态重新连接");
+            await ExchangeDashboardAsync("ClearError()", false);
+            await ExchangeDashboardAsync("EnableRobot()", false);
+            SetRobotSpeed(3);
+        }
+        catch (Exception e) { Debug.LogWarning("使能失败: " + e.Message); }
     }
 
     // 设置全局运行速度 (1 ~ 100)
     public void SetRobotSpeed(float speedRatio)
     {
+        if (!Finite(speedRatio)) { Debug.LogWarning("速度必须为有限数值"); return; }
         // 安全保护：防止输入的数字超过 1-100 的范围
         int speed = Mathf.RoundToInt(Mathf.Clamp(speedRatio, 1, 100));     
         this.speed = speed;
@@ -195,9 +214,10 @@ public partial class DobotController : MonoBehaviour
     }
     public void MoveJoints(double[] joints)
     {
-        if (joints.Length < 6) return;
+        if (joints == null || joints.Length != 6 || Array.Exists(joints, j => !Finite(j)))
+        { Debug.LogWarning("关节目标必须为6个有限角度，未发送运动"); return; }
 
-        string jointStr = string.Join(",", Array.ConvertAll(joints, j => j.ToString("F2")));
+        string jointStr = Numbers(joints);
 
         string cmd = $"MovJ(joint={{{jointStr}}}, cp=50)";
         SendCommand(cmd);
@@ -205,27 +225,26 @@ public partial class DobotController : MonoBehaviour
 
     public void StartSimulatorFollowDemo()
     {
+        if (!CanUseSimulatorCommands()) { Debug.LogWarning("此按钮仅供本机模拟器演示；实物请使用开始运行/现场联调。"); return; }
         SendCommand("StartFollowDemo()");
     }
 
     public void StopSimulatorFollowDemo()
     {
-        SendCommand("StopFollowDemo()");
+        SendCommand(CanUseSimulatorCommands() ? "StopFollowDemo()" : "Stop()");
     }
+    private bool CanUseSimulatorCommands() => enableLoopbackSimulatorCommands &&
+        tcpClient?.Client.RemoteEndPoint is System.Net.IPEndPoint endpoint && System.Net.IPAddress.IsLoopback(endpoint.Address);
 
     // 专门给 Unity UI 按钮调用的测试方法（无参数，按钮能识别它）
     public void TestMoveBtnClick()
     {
         double[] fakeJoints = new double[6];
-        // 使用 TryParse 进行安全转换：
-        // 如果框里有正常数字，它就会把数字塞进对应的数组位置里；
-        // 如果框是空的，或者填了乱码，它也不会报错，那个位置就保持默认的 0.0
-        double.TryParse(jointInputs[0].text, out fakeJoints[0]);
-        double.TryParse(jointInputs[1].text, out fakeJoints[1]);
-        double.TryParse(jointInputs[2].text, out fakeJoints[2]);
-        double.TryParse(jointInputs[3].text, out fakeJoints[3]);
-        double.TryParse(jointInputs[4].text, out fakeJoints[4]);
-        double.TryParse(jointInputs[5].text, out fakeJoints[5]);
+        if (jointInputs == null || jointInputs.Length != 6) { Debug.LogWarning("缺少6轴输入框"); return; }
+        for (int i = 0; i < 6; i++)
+            if (jointInputs[i] == null || !double.TryParse(jointInputs[i].text, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out fakeJoints[i]) || !Finite(fakeJoints[i]))
+            { Debug.LogWarning($"J{i+1}输入无效，未发送运动"); return; }
         // 调用咱们真正发指令的方法
         MoveJoints(fakeJoints);
     }
@@ -234,7 +253,12 @@ public partial class DobotController : MonoBehaviour
     {
         try
         {
-            if (ExternalControlActive && cmd != "Stop()")
+            if (!controlModeConfirmed && cmd != "Stop()") throw new InvalidOperationException("TCP控制模式未确认");
+            if (FieldWorkflowActive && cmd == "Stop()")
+            { FieldCommissioningPanel.Active?.RequestStop(); return; }
+            if (ExternalControlActive && cmd == "Stop()")
+            { RevokeExternalControl(); await AbortOwnerAsync(); return; }
+            if ((ExternalControlActive || FieldWorkflowActive) && cmd != "Stop()")
                 throw new InvalidOperationException("力控/视觉阶段正在占用运动权限");
             string response = await ExchangeDashboardAsync(cmd, false);
             OnDobotEvent?.Invoke(this, DobotEventArgs.CreateCommandEvent(cmd, true));
@@ -264,6 +288,8 @@ public partial class DobotController : MonoBehaviour
             CloseFeedbackConnection();
             feedbackClient = new TcpClient(robotIP, feedbackPort);
             feedbackStream = feedbackClient.GetStream();
+            lock (feedbackLock)
+            { feedbackGeneration++; feedbackEndpoint = feedbackClient.Client.RemoteEndPoint.ToString(); feedbackReadError = "none"; }
             feedbackLoopRunning = true;
             _ = FeedbackLoopAsync();
             Debug.Log($"<color=green>机械臂反馈端口 {feedbackPort} 连接成功。</color>");
@@ -287,80 +313,36 @@ public partial class DobotController : MonoBehaviour
 
     private async Task FeedbackLoopAsync()
     {
+        // 固定本次连接，后台只做IO和锁内数值更新；Unity事件在RefreshFeedbackUI派发。
+        var client = feedbackClient;
+        var stream = feedbackStream;
         byte[] packet = new byte[1440];
-
         try
         {
-            while (feedbackLoopRunning && feedbackClient != null && feedbackClient.Connected && feedbackStream != null)
+            await Task.Run(async () =>
             {
-                int bytesRead = await ReadExactAsync(feedbackStream, packet, packet.Length);
-                if (bytesRead != packet.Length)
+                while (feedbackLoopRunning && ReferenceEquals(stream, feedbackStream) && client.Connected)
                 {
-                    Debug.LogWarning("机械臂反馈数据长度异常，反馈循环结束。");
-
-                    // 触发错误事件
-                    OnDobotEvent?.Invoke(this, DobotEventArgs.CreateErrorEvent(
-                        "机械臂反馈数据长度异常", "FeedbackLoopAsync"));
-                    break;
+                    if (await ReadExactAsync(stream, packet, packet.Length) != packet.Length)
+                        throw new System.IO.IOException("机械臂反馈断开/包不完整");
+                    lock (feedbackLock) if (ReferenceEquals(stream, feedbackStream)) RecordFeedbackPacket(false);
+                    // 丢弃已积压的完整旧包，只发布最后一包；不触碰Unity对象。
+                    while (client.Available >= packet.Length)
+                    {
+                        if (await ReadExactAsync(stream, packet, packet.Length) != packet.Length)
+                            throw new System.IO.IOException("机械臂反馈断开");
+                        lock (feedbackLock) if (ReferenceEquals(stream, feedbackStream)) RecordFeedbackPacket(true);
+                    }
+                    lock (feedbackLock)
+                        if (ReferenceEquals(stream, feedbackStream)) ParseFeedbackPacket(packet);
                 }
-
-                ParseFeedbackPacket(packet);
-            }
+            });
         }
         catch (Exception e)
         {
-            Debug.LogWarning("机械臂反馈监听结束或连接异常: " + e.Message);
-
-            // 触发错误事件
-            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateErrorEvent(e.Message, "FeedbackLoopAsync"));
-        }
-    }
-
-    private async Task<int> ReadExactAsync(NetworkStream stream, byte[] buffer, int length)
-    {
-        int total = 0;
-        while (total < length)
-        {
-            int read = await stream.ReadAsync(buffer, total, length - total);
-            if (read <= 0) break;
-            total += read;
-        }
-        return total;
-    }
-
-    private void ParseFeedbackPacket(byte[] packet)
-    {
-        ushort messageSize = BitConverter.ToUInt16(packet, 0);
-        if (messageSize != 1440 || BitConverter.ToUInt64(packet, 48) != 0x123456789ABCDEFUL) return;
-
-        lock (feedbackLock)
-        {
-            EnsureFeedbackArrays();
-            currentRobotMode = (int)BitConverter.ToUInt64(packet, 24);
-            currentRobotModeText = RobotModeToText(currentRobotMode);
-            speedScaling = BitConverter.ToDouble(packet, 64);
-            velocityRatio = packet[1016];
-            robotError = packet[1029];
-            robotCollision = packet[1038];
-            for (int i = 0; i < 6; i++)
-            {
-                actualForce[i] = BitConverter.ToDouble(packet, 576 + i * 8);
-                actualToolPose[i] = BitConverter.ToDouble(packet, 624 + i * 8);
-            }
-
-            for (int i = 0; i < 6; i++)
-            {
-                actualJoints[i] = BitConverter.ToDouble(packet, 432 + i * 8);
-                actualJointSpeeds[i] = BitConverter.ToDouble(packet, 480 + i * 8);
-            }
-
-            feedbackSequence++;
-            lastFeedbackUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
-
-            // 触发反馈数据更新事件
-            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateFeedbackEvent(
-                currentRobotMode, currentRobotModeText, speedScaling, velocityRatio,
-                (double[])actualJoints.Clone(), (double[])actualJointSpeeds.Clone()));
+            lock (feedbackLock)
+                if (ReferenceEquals(stream, feedbackStream))
+                { lastFeedbackUnixSeconds = 0; feedbackFailure = e.Message; feedbackReadError = e.Message; }
         }
     }
 
@@ -392,6 +374,20 @@ public partial class DobotController : MonoBehaviour
 
     private void RefreshFeedbackUI()
     {
+        DobotEventArgs feedbackEvent = null;
+        string failure;
+        lock (feedbackLock)
+        {
+            failure = feedbackFailure; feedbackFailure = null;
+            if (displayedFeedbackSequence != feedbackSequence)
+            {
+                displayedFeedbackSequence = feedbackSequence;
+                feedbackEvent = DobotEventArgs.CreateFeedbackEvent(currentRobotMode, currentRobotModeText,
+                    speedScaling, velocityRatio, (double[])actualJoints.Clone(), (double[])actualJointSpeeds.Clone());
+            }
+        }
+        if (feedbackEvent != null) OnDobotEvent?.Invoke(this, feedbackEvent);
+        if (failure != null) Debug.LogWarning("机械臂反馈失败: " + failure);
         int mode;
         string modeText;
         double scaling;
@@ -461,5 +457,7 @@ public partial class DobotController : MonoBehaviour
         feedbackClient?.Close();
         feedbackStream = null;
         feedbackClient = null;
+        lock (feedbackLock)
+        { lastFeedbackUnixSeconds = 0; robotTimestamp = 0; protocolFeedbackSequence = 0; feedbackClockOffset = double.PositiveInfinity; }
     }
 }

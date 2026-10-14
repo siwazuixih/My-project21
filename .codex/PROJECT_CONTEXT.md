@@ -1,5 +1,25 @@
 # Project Context
 
+### 2026-10-08 通信延迟独立小测试
+
+- ExternalCode/communication_latency_test.py有camera/robot子命令；当前相机Python直接采集/推理，Unity只显示预览，故camera模式不测试Unity图像转发。帧等待/对齐/拷贝和SDK主机可对应时间戳年龄估算分开，硬件时钟/负值/时钟跳变不伪称有效延迟。
+- Gateway新增latency_echo/latency_query，不获取运动会话，白名单GetPose/GetAngle/GetForce，任务占用时拒绝；复用生产主线程/串行Dashboard路径但关闭每请求trace日志。返回实际设备端点及本地持续时间，测试端校验设备一致。
+- robot模式在同一Python计完整RTT，直连/Unity/Unity/直连分时采样，各路径500次并预热，报告统计量及差值；不是运动完成或整算法耗时。SDK若拒绝第二个只读连接，结果无效，脚本不发RequestControl。
+- Build后处理自动复制独立操作说明COMMUNICATION_LATENCY.md和顶层Python脚本；报告写到终端当前目录LatencyReports，当前未运行真实设备或打包。操作见COMMUNICATION_LATENCY_2026-10-08.md。
+
+### 2026-10-08 实际末端测量测试版
+
+- 新增DobotController.MotionDiagnostics.cs partial：以显式GetPose和RelPointTool计算段起终点及初始工具-X参考方向，记录请求/实际位移、横偏、目标误差及平均/窗口速度。约10Hz采已有反馈，时间戳/User/Tool/新鲜度校验；起点GetPose与原始反馈不相符时反馈推导标无效。
+- Panel新增InsertOnly/WithdrawOnly，Python ContactCycle共享同一HybridExit但不调用电批运动回调；机械臂单测不要求电批连接，仍要求机械臂/力传感器和现场许可。服务自身启动可能连接/复位电批。
+- 新协议begin_stage/end_stage与robot_insert/robot_withdraw；Python能力标志motion_diagnostics_supported、robot_only_supported，contact_api_version仍2并要求新标志，旧服务拒绝混用。原算法/旧节奏/原停止保护与参数默认值保持。
+- 报告新增motion.csv（100000普通采样上限，约每秒/边界刷新）、cycle-failure.json（有首因时）、result测量/IO/清理信息；构建标识motion-measurement-v1-2026-10-08。原始异常在停止前冻结，C#取消后仍按同一cycle_id取回，清理不覆盖。
+- 已通过100项本机无硬件测试（网关测试另跳过1项长时测试），普通解决方案0错误44警告；Unity已自动把新partial纳入生成csproj。没有构建Linux可执行包、部署、改版本号或提交；GUI与实际速度仍待现场验收。操作见FIELD_COMMISSIONING_2026-09-16.md最新段。
+
+### 2026-09-23 现场应答兼容补充
+
+- User/Tool现场可返回空ResultID。Gateway仅对坐标系选择兼容该情况，以应答后连续3个新鲜空闲且实际编号正确的反馈确认；非空ID仍匹配，运动命令仍要求ID。
+- ContactAcquisitionError在现场流程开始清空，acquire失败时先保存并记录，再停止清理；Panel最终报告优先保留该根因，避免取消异常覆盖。未实机验收。
+
 ## 项目概况
 
 - Unity + C# 项目，主要包含仿真平台、路径点选择、NavMesh 底盘导航、机械臂 IK/BIT* 规划、MuJoCo 仿真，以及 Dobot/底盘/升降缸等真实设备联动代码。
@@ -493,3 +513,92 @@
   RuntimeConsole；外部已启动进程仍需在其终端查看Python侧。日志不是完整审计存储。
 - 当前Editor完整模拟曾在卡入8mm触发30秒预算超时，尚未修复；缩短时长的测试通过
   不代表完整Editor流程通过。新增日志用于对照和进一步定位。
+
+### 2026-09-16 联调版开发中
+
+- 基线已是v1.11/4b8f839。网关纯字节IO取消Unity上下文捕获、JSON按块缓存读取，
+  避免逐字节帧等待；完整时长模拟宿主10项测试通过，Editor仍待复测。
+- 机械臂和底盘键盘调试快捷键默认关闭；正式UI接口保留。
+- ExternalCode/commissioning_preflight.py仅做无设备环境检查（Python/numpy/Matplotlib/
+  脚本/字体/Agg），不会连接实物。当前还没有完整现场配置/实物编排面板。
+- 完整真机流程接入前必须解决底盘相对运动完成反馈协议、升降异步停止/超时判据、
+  机械臂路径实际到位判据；已询问用户现场范围和底盘型号/协议，不猜测底盘状态语义。
+- 用户随后提供PDF，已确认1020完整状态task_type=7为平动/旋转；新增
+  RobokitController.ConfirmedMotion.cs串行请求及完成轮询，task_status改int。
+  每段先运动应答，再观察RUNNING→COMPLETED；失败/超时不下发后续段。
+  假底盘13项测试通过，现场仍待验收。短动作未观察RUNNING保守失败，不采信旧完成。
+  升降缸超时逻辑按用户明确要求暂不改。细节见CHASSIS_COMPLETION_2026-09-16.md。
+
+### 2026-09-16 续：现场面板与实物编排已实现（覆盖上文“尚无面板”状态）
+
+- Simulation.Awake动态挂FieldCommissioningPanel，左上“现场联调 / 参数”，不改场景YAML。
+  JSON配置保存在Application.persistentDataPath/field-commissioning.json，现场确认不持久化。
+  默认六轴/升降范围为0，必须填写真实设备范围；参数校验后冻结本次快照。
+- 新增FieldCommissioningSettings、DobotController.Commissioning、ConnectCommander.FieldWorkflow、
+  FieldWorkflowSequence。真实路径使用MovJ cp=0 +新鲜反馈/空闲且稳定0.3秒判到位，不按估时完成。
+  模拟视觉从实测六轴的J1/J2加配置度数偏移；不是离线7维动画，也不是视觉真正识别结果。
+- 精调单测/接触单测/单目标/多目标入口分离，原离线入口保留。目标计划深复制/提前校验，
+  缺少ReturnArm时逆序粗定位路径回其起点；跨目标起点不一致拒绝运行。
+- 现场流程独占普通下发；接触阶段临时授权Python真机运动。Python API v2接收
+  configure_contact:<JSON>，回configuration_id；Unity校验版本/电批地址/回执。真实cycle必须先配置。
+- 反馈跟随允许在真实执行中切换，只写仿真执行器；不产生反向运动指令。面板允许单轴源独立跟随。
+- Stop/故障/反馈异常中止，停止未确认保持锁。升降超时继续按用户要求保留，但Stop会使旧异步
+  写寄存器代际失效；不能宣称无人值守安全到位。详情FIELD_COMMISSIONING_2026-09-16.md。
+- 每次测试自动导出CommissioningReports下配置、2MB内会话日志和结果。Linux后处理附带操作说明，
+  顶层Python和字体复制沿用原逻辑。未打包、未实物验收、未提交推送。
+- tests新增FieldWorkflowHarness(15项)、FieldRobotHarness(12项)、Python配置(6项)；既有网关10项
+  完整时长模拟、假底盘13项通过。实际GUI/硬件/协议运动结果仍需人工验证。
+
+### TCP文档审查补充（2026-09-16，尚未修复）
+
+- 用户V4.6.0/2024.12.26 PDF审查见DOBOT_TCP_AUDIT_2026-09-16.md。现场SpeedFactor浮点文本
+  为确定错误；原测试Number替身与生产F6不同，56项无硬件测试不等于协议兼容。
+- Tool为队列指令，接触前需要ID/实际Tool反馈确认；不能只ACK后立即默认GetPose。
+  SixForceOnline=1037未接入，CurrentCommandId=1112未使用；Stop/到位应关联本次命令后的新反馈。
+- 现有已读取反馈偏移正确。30005反馈200ms，250ms保护余量小；ServoP不受全局速率控制。
+  0.2mm容差大于0.1mm搜索步长；自动接触应先修复并验收。RunScene尚有模拟专用演示命令绑定。
+- 本轮仅检查/报告，没有修改运行代码；这些不是“已修复”状态。
+
+### TCP审查后修复（2026-09-16，覆盖上面的“尚未修复”状态）
+
+- 现场SpeedFactor独立整数构造，配置拒绝小数；普通MovJ使用InvariantCulture且拒绝无效输入。
+- 接触新增userNumber(默认0)，User/Tool等待ResultID+新反馈+实际编号；GetPose显式指定双方。
+- 读取SixForceOnline、CurrentCommandId、User/Tool、机器人时间戳；接触要求传感器在线，
+  Python同步检查。方向负载改用GetForce(tool)，不再假定反馈力的YZ等同于工具YZ。
+- MovJ/ServoP要求命令ID与应答后的新反馈；微步容差≤步长25%，姿态0.1°；Stop须3次新静止帧。
+- 反馈后台只更新锁内数据、主线程发布事件；丢弃积压完整包/重复时间戳，检查相对到达延迟。
+- 新现场配置默认30004；旧配置不覆盖，真实接触拒绝30005。RequestControl失败不开放实物流程。
+- 详见FIELD_COMMISSIONING_2026-09-16.md新增部署说明。未修改场景、UI位置、版本号或现有打包目录。
+- ServoP仍为分段验证而非33Hz连续伺服；实物运动、反馈字节流和Linux构建仍需现场验收。
+
+### Stop诊断补充（2026-09-17）
+
+- Gateway停止检查新增StopTrace独立编号、请求/应答/限频采样/通过/失败日志；状态和六轴速度
+  在同一锁内快照读取。TIMEOUT异常包含最后快照与新样本/不合格/连续合格计数。
+- Commissioning区分PRE_MOTION_STOP(_FAILED)、END_STOP和MOVJ_REQUEST，避免把
+  开始前被拦截误判为“运动后没有停止”。现场运行日志沿用面板run.log/result.json收集。
+- 不放宽阈值、不解锁、不改变端口/运动参数；具体根因仍待现场实际QDActual等数据，非已修复。
+
+### 停止诊断v2（2026-09-23）
+
+- DobotController.Feedback.cs承载原1440字节解析/完整读取，主接收循环统计累计完整块、
+  接受、坏头、旧时间戳、相对延迟与积压；StopTrace开始/结束包含连接代次和计数快照。
+- StopTrace汇总新采样失败原因与无新帧轮询，TRANSPORT区分排队、流写入、应答收齐和派发。
+  既有0.01/250ms/3次/50次条件不变；本轮非实机根因修复。
+- FieldCommissioningPanel从开始建立报告，build-info含stop-v2-2026-09-23和程序集MVID；
+  result.completed=false表示尚未结束。CommissioningJournal增量刷新关键诊断，保留两份
+  各约100万字符文件；普通run.log结束存最近200万字符。非无限/断电可靠日志。
+- 独立Recovery报告关联parentReport，不覆盖原运行；操作步骤见FIELD_COMMISSIONING。
+- 无设备测试78项通过，生产解析现由合成字节包覆盖，仍需Unity界面/现场固件反馈验收。
+
+### original分步节奏试验模式（2026-09-23）
+
+- 原件保留ExternalCode/original，不作为运行入口。真实原逻辑是每步一次ServoP+t监控，
+  轴向不步末Stop、横向搜索Stop、整段结束Stop；不是高频轨迹流。
+- originalContactTiming默认false；启用后Python传递original_timing/stop_at_end，网关返回
+  interval_elapsed（不是到位），finish_stage在段末确认停止，失败不进入电批。
+  新Python支持标志和配置模式回执均校验，防旧服务混用。
+- 此模式交接停止用新鲜空闲无报警+位置跨度≤0.001°持续0.5秒且至少3新样本，
+  QDActual只诊断；未做实机验收，不是安全认证。旧模式停止策略不变。
+- 新模式只开放现场①②，③④明确禁用；粗定位连续执行未改。操作与差异见FIELD_COMMISSIONING。
+- 验证累计92项无设备回归，编译0错误；未打包/部署。构建标识original-timing-test-2026-09-23。

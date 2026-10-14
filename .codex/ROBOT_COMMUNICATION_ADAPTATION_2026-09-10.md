@@ -1,5 +1,17 @@
 # 机械臂统一通信与 0910 拧紧流程改造说明
 
+## 2026-09-23 补充：original分步节奏测试模式
+
+以新提供的`ExternalCode/original/cr10af_hybrid_x.py`核对，原算法每步一次ServoP再按t等待，
+并非此前推测的高频持续发点。原件不修改。`originalContactTiming`默认false，现场显式true
+才授权真实节奏测试。Python传递original_timing/stop_at_end，Unity按时长监控并只在原算法
+要求时发步末Stop，返回interval_elapsed而非completed。HybridExit整段结束调用finish_stage，
+失败不能进入拧紧；横向搜索主体通过AST对照测试保持一致。
+
+网关仍有坐标系/传感器/力阈值和异常停止检查，段末使用新位置稳定窗口确认（仅此测试模式）；
+这不是透明TCP转发或硬实时等价适配。详细差异、部署与撤回步骤见FIELD_COMMISSIONING最新节。
+原文件后续更新必须重新对照并测试；当前不自动加载original代码，避免直接连接设备。
+
 日期：2026-09-10。基于本地 `release/software-v1.0` 的 v1.10 开发。
 本次没有提交、推送、打标签，也没有修改软件版本号或场景 YAML。
 
@@ -170,3 +182,34 @@ Unity处理耗时从完整JSON解析后开始，Python往返耗时包含发送�
 
 本次7项离线测试通过，C#编译0错误、27警告；Editor面板展示待用户实测。
 此前完整模拟卡入在8mm触发30秒time_budget_reached的问题仍然存在，本次不改超时或算法。
+
+## 9. 2026-09-16 联调改造（代码已接入，工控机/实物待验收）
+
+网关已改为分块读取JSON、纯字节IO不捕获Unity帧上下文，仍保留30秒运行预算。
+10项测试（含原始20mm卡入/退出、完整等待时长，不缩短参数）在无设备测试宿主通过；
+仍需在Unity中对照roundtrip_ms复测。开发键盘运动快捷键默认关闭。
+
+Linux环境检查可以在软件目录运行：
+
+```bash
+python3 ExternalCode/commissioning_preflight.py
+```
+
+输出JSON检查报告并以0代表环境检查通过；不连接设备，不代表机器人运动已通过验收。
+若实际使用其他Python，应用其完整路径替换python3。
+
+随后依据用户PDF加入底盘3055/3056应答+1020运行/完成确认，机械臂新增实际关节到位接口。
+现场配置页面、参数持久化、报告导出、精调/接触分测和单/多目标编排已接入。
+Python新增configure_contact配置回执，Unity核对API版本/电批端点/配置编号后才开放接触阶段。
+实物过程中可启用只读反馈同步；默认运动锁定，失败/停止不复位或推进下一目标。
+升降超时继续的旧规则按用户要求保留（不是到位保证），只修补停止后的延迟触发问题。
+完整操作、参数单位、文件对应关系、未验收边界见
+[FIELD_COMMISSIONING_2026-09-16.md](FIELD_COMMISSIONING_2026-09-16.md)。
+本次无硬件测试通过不代表现场通过；未构建Linux包、未进行真实设备运动。
+
+## 2026-10-08：末端实测与失败取证补充
+
+- Unity新增MotionDiagnostics partial，仍统一持有机器人TCP；Python在同一网关会话发送begin_stage/end_stage标记，无新的机器人直连。GetPose和RelPointTool均由Unity发送，采样从已有反馈取得，不使用仿真Transform推算实物位移。
+- Python服务新增robot_insert/robot_withdraw及模拟对应命令，共享ContactCycle/HybridExit，跳过电批拧紧和缓冲阶段；成功状态ROBOT_ONLY_DONE仅表示算法单测结束。原始脚本保持不动，原ServoP分步节奏保持，测量开销与真实位移需现场检查。
+- 状态新增motion_diagnostics_supported/robot_only_supported及cycle_first_error/cycle_failure_json/cycle_cleanup_errors/cycle_workflow。Unity要求新能力标志，避免旧服务混用；首因在Python清理前保存，C#即使收到取消仍按本次cycle_id读取，停止/释放错误追加不覆盖。
+- 报告motion.csv记录原始请求、目标、实际姿态/关节角/时间/坐标系及测量有效性，cycle-failure.json保存周期首因。原来的moved_mm与interval_elapsed依旧是请求累计/时间结束，不能当实测行程。具体字段、单测步骤和部署方法见现场操作说明2026-10-08段。

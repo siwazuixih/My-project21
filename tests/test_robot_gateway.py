@@ -5,6 +5,8 @@ import subprocess
 import sys
 import time
 import threading
+import socket
+import json
 import io
 from contextlib import redirect_stdout
 import unittest
@@ -14,9 +16,57 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'ExternalCode'))
 from unity_robot_client import UnityRobotClient
 from servo_contact_cycle import ContactCycle
+from communication_latency_test import Probe
 
 
 class GatewayTests(unittest.TestCase):
+    def test_latency_echo_without_hardware_or_motion_lease(self):
+        with Probe('127.0.0.1', 19129, 2, True) as probe:
+            result = probe.query('pose', 0, 1, echo=True)
+            self.assertEqual(result['robot_endpoint'], 'not_connected')
+            self.assertEqual(result['result'], 'latency_echo')
+            with self.assertRaisesRegex(IOError, '机械臂未连接'):
+                probe.query('pose', 0, 1)
+
+    def test_latency_probe_cannot_disturb_current_owner(self):
+        client = UnityRobotClient(simulate=True).open()
+        try:
+            with Probe('127.0.0.1', 19129, 2, True) as probe:
+                with self.assertRaisesRegex(IOError, '先结束'):
+                    probe.query('pose', 0, 1, echo=True)
+            self.assertTrue(client.status()['simulated'])
+            client.move_relative(.1, 0, 0, .05)
+        finally:
+            client.close()
+
+    def test_robot_only_runs_real_algorithm_without_tool_callbacks(self):
+        for workflow in ('insert', 'withdraw'):
+            def forbidden():
+                self.fail('Robot-only test must not invoke a tool callback')
+            cycle = ContactCycle(forbidden, forbidden, forbidden)
+            cycle.configure(dict(cycle.settings, configuration_id='robot-only-' + workflow,
+                originalContactTiming=True, insertionMm=.1, withdrawalMm=.1, contactStepMm=.1))
+            cycle.start(True, workflow=workflow)
+            deadline = time.monotonic()+5
+            while cycle.active and time.monotonic()<deadline:
+                time.sleep(.02)
+            self.assertFalse(cycle.active)
+            self.assertEqual(cycle.result, 'ROBOT_ONLY_DONE', cycle.snapshot())
+            self.assertEqual(cycle.phase, 'DONE')
+
+    def test_original_timing_cycle(self):
+        cycle = ContactCycle(lambda: None, lambda: {'state': 'OK'}, lambda: None)
+        settings = dict(cycle.settings, configuration_id='timing-sim', originalContactTiming=True,
+                        insertionMm=.1, withdrawalMm=.1, contactStepMm=.1,
+                        beforeTightenSeconds=0, beforeExitSeconds=0)
+        cycle.configure(settings)
+        cycle.start(True)
+        deadline = time.monotonic()+10
+        while cycle.active and time.monotonic()<deadline:
+            time.sleep(.05)
+        self.assertFalse(cycle.active)
+        self.assertEqual(cycle.snapshot()['cycle_result'], 'SIMULATED_OK', cycle.snapshot())
+
     @classmethod
     def setUpClass(cls):
         os.environ['UNITY_ROBOT_PORT'] = '19129'
@@ -143,6 +193,35 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(client.status()['pose'], list(before))
         finally:
             client.close()
+
+    def test_fragmented_and_coalesced_json_lines(self):
+        with socket.create_connection(('127.0.0.1', 19129), timeout=3) as sock:
+            sock.settimeout(3)
+            with sock.makefile('rb') as reader:
+                sock.sendall(b'{"id":"split",')
+                time.sleep(0.05)
+                sock.sendall(b'"op":"status"}\n{"id":"next","op":"status"}\n')
+                self.assertEqual(json.loads(reader.readline())['id'], 'split')
+                self.assertEqual(json.loads(reader.readline())['id'], 'next')
+
+    def test_oversized_line_is_rejected(self):
+        with socket.create_connection(('127.0.0.1', 19129), timeout=3) as sock:
+            sock.settimeout(3)
+            sock.sendall(b'x' * 8193 + b'\n')
+            self.assertEqual(sock.recv(1), b'')
+
+    @unittest.skipUnless(os.environ.get('RUN_FULL_CYCLE') == '1', '45秒完整时长测试需RUN_FULL_CYCLE=1')
+    def test_full_duration_cycle_without_shortcuts(self):
+        def forbidden():
+            raise AssertionError('模拟不得调用真实电批')
+        cycle = ContactCycle(forbidden, forbidden, forbidden)
+        cycle.start(True)
+        deadline = time.monotonic() + 75
+        while cycle.snapshot()['cycle_active'] and time.monotonic() < deadline:
+            time.sleep(0.1)
+        status = cycle.snapshot()
+        self.assertFalse(status['cycle_active'], status)
+        self.assertEqual(status['cycle_result'], 'SIMULATED_OK', status)
 
 
 if __name__ == '__main__':

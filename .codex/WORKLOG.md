@@ -3858,3 +3858,321 @@
 - 当前完成日志实现；仍需Editor重启Python后打开“展开日志”验证四类记录。
   已知完整模拟8mm/30秒超时尚未修复，不能据日志功能宣称全流程已通过。
   下次按相同id对照handling_ms和roundtrip_ms定位耗时；未提交或推送。
+
+## 2026-09-16：工控机完整联调改造第一阶段（未完成交付）
+
+- 用户已提交并上传v1.11/4b8f839；本轮起始工作区干净，仍在release/software-v1.0。
+- 读取规则/记录、DobotController/Gateway、ConnectCommander、RealRobotFollower、
+  ServoTighteningController、RobokitController、LiftCylinderController、打包后处理及测试。
+- Editor-prev.log证据：wrench往返约2010ms，而Unity处理仅约18ms；运动往返约5003ms，
+  Unity处理约1712ms。旧网关逐字节ReadAsync捕获Unity上下文，存在逐字节帧等待开销。
+- Gateway改为每连接有缓冲的分块JSON行读取，保留粘包余量/8192字节上限/半包断线检测。
+  纯字节IO使用ConfigureAwait(false)，完整请求仍回Unity线程进行状态处理。
+  Dashboard纯IO同样取消逐字节上下文捕获。未扩大30秒预算。
+- 新增拆包/粘包、超长行、完整20mm进退与5+2+5秒等待测试；RUN_FULL_CYCLE=1运行
+  10项测试全部通过，总46.586秒，无真实设备连接。Unity实际帧环境仍需复测，不能以
+  .NET宿主通过断言现场超时已经彻底解决。
+- Dobot与Robokit开发键盘快捷键默认关闭，避免数字3/导航快捷键在实机联调误触。
+- 新增ExternalCode/commissioning_preflight.py：检查Python、numpy、matplotlib、脚本语法、
+  字体和Agg绘图；不导入实际驱动服务、不连设备，开发机检查通过。现有打包后处理
+  会复制此顶层py脚本，现场可用选定Python运行。尚未接入软件内配置面板。
+- Assembly-CSharp编译0错误36警告；git diff --check通过。没有启动或控制设备、未提交推送。
+- 发现阻碍完整真机自动流程的既有问题：底盘SendChassisSegmentedRoutine仅估时到位；
+  1020导航状态与3055/3056相对运动完成/停止的关系未核实。升降缸MoveToPosition为
+  async void且延迟后触发，旧流程超时仍标完成；真实机械臂旧路径也只按估时完成。
+- 已向用户询问本次是否含自动底盘/升降，若包含需底盘型号及3055/3056完成状态协议。
+  不猜测枚举或将估时包装成成功。下一步依回复接真实执行器完成/取消接口，再做
+  实物流程编排、配置面板、日志导出及单/多目标入口。上述完整功能当前尚未实现。
+
+## 2026-09-16：依据底盘PDF接入真实完成确认
+
+- 用户提供状态/平动/报文等API资料，授权加入底盘完成确认，明确升降缸超时暂不改。
+- 读取用户PDF及同目录转动协议、RobokitController/Protocol、ConnectCommander，保留
+  上轮未提交的网关读取/环境检查等修改。协议确认1020的task_type=7用于平动转动，
+  task_status是数字枚举，原string字段已纠正。
+- 新增RobokitController.ConfirmedMotion.cs及meta：相同流水号/应答API匹配、串行请求、
+  3055/3056应答后轮询完整1020；观察RUNNING后COMPLETED才完成。未知/缺失/暂停/
+  失败/取消/断线/超时中止并尝试既有3003停止，不把停止应答当作实物停止保证。
+- 修复TCP一次Read当完整包问题，按长度循环读头和体，空应答合法、超大包拒绝。
+- ConnectCommander分段协程等完成结果，失败退出上层，不再无限等待isDispatched；
+  防重复下发、段间取消后不继续；JSON数字统一小数点。升降缸实现未修改。
+- 新增tests/ChassisHarness真实源码+本机假底盘测试，13项通过；C#编译0错误，
+  git diff --check通过。tests/.gitignore允许手写csproj，避免测试工程遗漏。
+- 协议与实现、参数、短动作可能错过RUNNING、单控制源假设和验收边界见
+  `.codex/CHASSIS_COMPLETION_2026-09-16.md`。完成的是底盘完成确认子任务，
+  不代表完整实物联调版已交付；仍需Editor/现场验证，无真实运动、未提交推送。
+
+## 2026-09-16：继续完成现场联调配置、实物编排与验收工具
+
+- 用户要求“剩下的功能都做出来/继续刚刚的修改”。保留前面所有未提交工作；仍为
+  release/software-v1.0，v1.11基线，没有提交、推送、打标签或改软件版本号。
+- 读取各级AGENTS、WORKLOG/PROJECT_CONTEXT、通信改造说明、Dobot/Gateway、Robokit、
+  LiftCylinder、ConnectCommander/MissionController、Simulation、Servo、Python接触与正式V26、
+  RealRobotFollower、Linux构建后处理和现有测试。没有连接或驱动任何实物。
+- 新增FieldCommissioningPanel/Settings：运行时JSON参数面板、原子保存、会话确认、环境检查、
+  连接/反馈入口、精调与接触单测、单目标与多目标、每次运行配置/日志/结果报告。
+  不需要场景YAML改动；Simulation动态挂载。六轴/升降限位未配置时拒绝对应真实运动。
+- 新增DobotController.Commissioning：真实J1/J2偏移读当前实测角，控制走统一串行通道；
+  cp=0、实际到位且空闲稳定0.3秒、反馈/力/限位/步长/超时检查。校验真实socket端点，
+  不只信任可编辑IP文本。停止未确认/接触未释放保留锁。监控故障取消后续阶段。
+- ConnectCommander.FieldWorkflow深复制/校验计划，FieldWorkflowSequence独立编排每目标
+  粗定位→精调→接触→复位。已有ReturnArm沿用；缺失则逆序粗定位路径回起点。
+  跨目标复位与下个起点不匹配提前拒绝；普通单步补任务占用跟踪，防止并行入口混发。
+- Python接触配置API v2（configure_contact、configuration_id），真实启动必须先配置；
+  Unity核对版本/端点/回执，收到ok=false确实判失败。参数传递卡入/退出/等待/超时/阈值。
+  正式服务入口不变，没有把原始0910资料作为启动入口。曲线接口未改。
+- 实物运行中允许只读反馈同步；原离线验证仍独立。普通手动下发/服务启停/离开页面互斥。
+  停止先取消流程并尝试停止各设备，不自动复位或推进；未确认时只允许重试停止解除锁。
+- 按用户要求未改变升降超时后继续的规则；只加入Stop/Disconnect代际，防止旧async延迟
+  在停止后再触发启动。这条超时规则仍是现场风险，文档和确认界面明确披露。
+- 新增操作说明FIELD_COMMISSIONING_2026-09-16.md，并由Linux后处理拷贝到构建目录。
+  更新原通信改造说明和PROJECT_CONTEXT；无关场景/模型/版本号未修改。
+- 验证：Python配置6项；FieldWorkflowHarness配置/计划/顺序/NG/取消15项；
+  FieldRobotHarness实际接口+假反馈12项（ACK不等于到位、过期拒绝、停止失败保持锁）；
+  网关含完整20mm进退10项(46.512s)；假底盘13项。合计56项，无真实网络设备。
+  Python环境检查通过。全解决方案首次no-restore因缺少7个assets文件失败，正常restore后
+  build通过0错误42警告。新源文件通过临时/tmp/field-check.targets纳入检查，未手改生成csproj。
+  后续增量复查为0错误33警告；启动占用后增加串行Stop/空闲确认，避免交接前残留指令。
+  git diff --check通过；没有做新的Unity GUI回归、Linux打包或实机测试。
+- 当前：实现/无设备测试完成，现场验收未完成。下一步Editor退出Play等待导入，检查新面板
+  字体位置、参数保存重进、离线流程和曲线；打包后工控机先环境/反馈，再小偏移、单独接触、
+  单目标、多目标，逐阶段停止/断线/NG。实际关节/工具/底盘坐标方向与反馈协议仍须现场核实。
+
+## 2026-09-16：按用户TCP V4.6.0 PDF审查（未修代码）
+
+- 用户现场SpeedFactor(1.000000)返回-30001后提供2024.12.26中文版PDF，要求核对其他协议。
+- 读取各级规则/记录、用户PDF相关原型/参数/错误码/1440字节反馈表、Dobot三文件、
+  现场配置、Python接触与HybridExit、RunScene按钮绑定、FieldRobotHarness。
+- 新增DOBOT_TCP_AUDIT_2026-09-16.md，逐项列证据/页码/优先级；仅写报告与记录，
+  保留所有未提交代码、用户UI/字体改动；没有连接设备、修改运行代码、打包或提交。
+- 确认SpeedFactor应为int而现场接口F6输出错误；发现Tool队列ACK被当生效、未关联
+  命令ID/命令后新反馈、Stop可采信旧空闲反馈、缺少SixForceOnline检查、0.2mm到位容差
+  大于0.1mm搜索步长。30005周期200ms与250ms阈值余量偏小，解析时刻不能证明无积压。
+- ServoP文档明确不受全局速率影响；当前分段调用不是33Hz跟踪，尚待实机设计验证。
+  aheadtime/gain的整数文本建议规范为float，但没有宣称已确认会被拒绝。
+- 已用反馈字段偏移与文档逐项核对，现有偏移正确；旧MovJ缺InvariantCulture；
+  RunScene仍绑定StartFollowDemo/StopFollowDemo非标准命令；连接成功不等于TCP控制模式成功。
+- 测试替身Number与生产格式不同、假Dashboard不校验协议类型，是此次漏测原因之一。
+  下一步需用户授权修复，并补真实构造器/严格协议替身测试。当前实物自动接触不应继续放行；
+  需先处理报告阻断项，再现场小角度、无接触、接触分级验收。
+
+## 2026-09-16：用户授权后的TCP审查修复
+
+- 目标：修复SpeedFactor现场-30001及TCP审查发现的协议/执行完成判据，不连接实物。
+  阅读各级AGENTS、历史上下文/记录、审查报告与PDF提取文本、Dobot三文件、现场配置、
+  Python网关/接触算法及测试。保留现有未提交功能、用户面板位置和字体修改。
+- 修改DobotController.cs/Gateway/Commissioning、FieldCommissioningSettings、
+  unity_robot_client.py、cr10af_hybrid_x.py；重建FieldRobotHarness以链接真实Gateway和
+  Commissioning，不再用格式不一致的Number替身遮蔽SpeedFactor错误。
+- SpeedFactor独立整数构造、配置拒绝小数；旧MovJ统一InvariantCulture并拒绝无效六轴输入。
+  应答以分号结束，校验完整结构/回显；队列ID按ulong解析，拒绝缺失ID；回显错关闭连接。
+- RequestControl成功后才报告连接成功/开放现场运动；使能串行等待应答。模拟专用命令须
+  显式开启且实际连接回环地址，实物停止走Stop。不修改现有场景OnClick绑定或UI位置。
+- 接触新增User编号，等待User/Tool本次ID+新反馈+实际编号；GetPose显式双方；持续检查
+  坐标系及SixForceOnline=1。Python状态也检查传感器；横向负载改用明确工具系GetForce。
+- MovJ、ServoP关联ID和应答后的新帧；0.1mm搜索容差≤0.025mm，姿态≤0.1°；停止须3次
+  新鲜空闲且关节速度≤0.01°/s的反馈，旧缓存不能解锁；工具切换失败也停止，失败保留占用。
+- 后台接收只IO/锁内数据，Unity事件主线程每帧派发（不受鼠标悬停UI阻断）；丢弃积压完整包，
+  拒绝重复/倒退时间戳，检查相对最快到达基线延迟。首包绝对网络延迟仍无法证明。
+- 新配置默认30004；旧JSON保留，现场接触明确拒绝30005，需人工改配置后重新连接。
+  关节单测不额外强制六维力传感器在线；实物接触无传感器反馈不放行。
+- 验证：生产Gateway+Commissioning的严格回环假控制器21项通过（整数格式/区域性/uint64/
+  无到位/错误ID/错误回显/过期/取消/旧停止帧/传感器/端口/UserTool/未移动微步）；
+  FieldWorkflowHarness15项、Python配置6项、含完整时长离线网关10项(46.530s)通过，共52项。
+  回环测试获准越过沙箱socket限制，仅127.0.0.1，无真实机械臂/电批网络访问。
+- 解决方案临时targets纳入新增现场文件编译：0错误38警告；本轮文件diff --check通过。
+  既有字体资源尾部空格未处理。未做Unity界面回归、实际1440字节设备流验收、Linux打包、
+  实物运动或Git提交/推送。FieldRobotHarness反馈是数值替身，不能证明实际设备字节流兼容。
+- 同步PROJECT_CONTEXT、审查状态和现场操作说明。当前协议修复与无设备回归完成；
+  ServoP仍分段到位，不是33Hz连续伺服/硬实时力控，平均请求速度不代表瞬时速度/加速度。
+  下一步退出Play等待Editor导入，核对反馈/曲线/UI、重新打包并更新ExternalCode，改feedbackPort，
+  核实User/Tool标定及关节限位，先无接触J1/J2与工具小步，再监护下单目标与停止/掉线验收。
+
+## 2026-09-17：开始前Stop失败诊断（不放宽保护）
+
+- 用户授权补Stop诊断；已读各级AGENTS、上下文/记录、Gateway/Commissioning、面板日志收集和
+  FieldRobotHarness。现场截图显示反馈持续但开始前停止确认失败，不能据此断言断线或角度错误。
+- 修改DobotController.Gateway.cs：每次停止编号；记录请求、UTC/经过时间、成功应答、命令失败；
+  同锁快照记录seq/机器人时间戳/年龄/mode/error/collision/command_id/六轴角度及QDActual原值。
+  输出逐项失败原因、观察新样本/不合格/连续合格计数；采样日志约250ms限频；超时异常含快照。
+- 修改DobotController.Commissioning.cs：区分PRE_MOTION_STOP、PRE_MOTION_STOP_FAILED、
+  END_STOP、MOVJ_REQUEST，明确请求与接受/到位不同；本次开始前失败尚未发送MovJ。
+- 未放宽0.01/250ms/3次/50次轮询阈值，未改运动/端口配置。状态与速度统一快照以免跨帧混合。
+  原有未提交现场功能、用户UI位置、字体、场景均保留；无连接实物、打包、提交或推送。
+- FieldRobotHarness新增7类诊断原因、开始前拒绝无MovJ、ACK/超时内容/阶段日志断言；
+  实际Gateway+Commissioning回环假控制器33项通过，仅127.0.0.1网络。全解决方案临时targets
+  编译0错误38警告；本次文件diff --check通过。未做Unity GUI和真实设备字节流/运动验证。
+- 更新PROJECT_CONTEXT及FIELD_COMMISSIONING说明，说明原阈值为软件策略而非API完成标准；
+  observed是轮询新样本数而非全部包数；运行后重试日志不会追加到已归档的run.log。
+- 状态：诊断实现完成，现场根因未确认。下一步Editor等待导入/检查日志，重新构建替换Linux包，
+  保留现场安全措施下复测并提供新run.log、result.json、configuration.json；按实际失败字段修正，
+  不通过增大角度/放宽限位或强制解锁排错。
+
+## 2026-09-23：继续完成停止诊断v2与操作说明
+
+- 读取各级AGENTS、WORKLOG/PROJECT_CONTEXT、Dobot主文件/Gateway/Commissioning、
+  FieldCommissioningPanel、现场说明和现有测试；保留已有未提交功能、UI位置、字体资源。
+- 新增DobotController.Feedback.cs及meta：原1440字节解析与完整读取逻辑独立为partial，
+  生产接收新增完整块/接受/坏头/旧时间戳/相对延迟/积压过滤累计计数、连接代次、端点、接收异常。
+  没有改变既有反馈过滤、停止阈值或运动报文。
+- Gateway补停止新样本失败原因汇总、无新帧轮询数、最大连续合格数、速度峰值/非有限计数；
+  为Stop关联串行锁等待与真正流写入/完整应答时刻，后台只取.NET时间、不调用Unity API。
+- 新增CommissioningJournal及meta；面板启动即保存配置/构建指纹/未完成结果，关键日志
+  增量刷新、按100万字符轮转保留两份，普通日志保留最近200万字符；IO异常不打断停止。
+  Recovery重试独立报告并关联上一目录；结束原子更新result，销毁时关闭日志。
+- FieldRobotHarness链接生产解析，假控制器反馈改为合成1440字节数据；新增分段流/截断EOF、
+  符号/速度偏移/uint64、重复倒退时间戳、坏头、延迟、NaN、增量日志/轮转/IO失败测试。
+  RobotGatewayHarness同步链接生产反馈partial，新增共用纯存储/显示替身。
+- 验证：FieldRobotHarness47项、FieldWorkflowHarness15项、Python配置6项、完整时长模拟网关
+  10项(46.580s)通过，共78项。网络测试仅本机回环、获准越过沙箱socket限制。
+  解决方案临时targets纳入新增文件编译0错误；首轮42警告，最终单进程增量33警告。
+  中间一次默认并行构建退出1且0诊断，使用-m:1重跑成功。未修改生成的csproj。
+- 更新FIELD_COMMISSIONING操作说明（构建标识、部署、日志判读、Recovery取证、限额），
+  同步PROJECT_CONTEXT。没有连接实物、部署工控机、提交/推送或打标签。
+- 当前：诊断增强和无设备验证完成，现场根因仍未知。合成字节包不等于固件实测；
+  未验证Unity GUI、崩溃/断电持久化、实机停止。下一步Editor确认无错误，重新打包，
+  现场监护下复测并收集整份报告；同时检查Recovery生成独立目录、面板布局保持不变。
+
+## 2026-09-23：检查用户提供的两份新现场日志（仅诊断）
+
+- 读取下载/log下074944 Recovery和075407 Contact报告、构建指纹/配置/两类日志，
+  对照Gateway停止判据、Commissioning接触端口校验和Panel执行顺序；未修改运行代码。
+- 两份均stop-v2，同一程序集。三次Stop均reply=0,{},Stop();，检查各观察12个新样本，
+  bad分别12/11/12，max_stable分别0/1/0。速度峰值0.067851/0.067851/0.135701。
+  mode=5,error=0,collision=0；最大反馈年龄0.162/0.195/0.160秒，过滤计数全0。
+- 确定直接阻断项为软件abs(QDActual)<=0.01且连续3样本判据，不是本次收不到反馈或Stop拒绝。
+  实测关节位置在日志快照中近乎不变，速度正负离散小值疑似静止抖动/估计量化，物理来源尚未证实。
+  Contact在PRE_MOTION_STOP失败，尚未进入Python接触执行；Recovery的原父报告未提供。
+- 当前仍连接30005；即使修复停止判据，真实接触还会被既有30004要求阻断。
+  底盘端口未连接错误发生在中止后的停止清理，不是前面的机械臂停止判据失败原因。
+- 下一步建议核实静止速度基线/单位，设计速度与位置稳定窗口联合判断并回归，不凭单次峰值
+  随意放宽/删除保护。现场核实端口及真实限位；当前不建议直接继续接触测试。
+  本轮仅更新此记录，保留已有未提交改动，无设备操作、编译、打包或Git提交。
+
+## 2026-09-23：原算法适配测试版准备——缺少未改造的接触算法
+
+- 用户要求依照同学原算法制作测试版。读取规则/上下文/日志，检查0910主脚本、适配说明、
+  Git全部分支的cr10af文件历史、现有四份测试目录、项目21.5压缩包目录及下载目录。
+- 找到原始0910主脚本，其run_robot_stage调用外部cr10af_hybrid_x.py；但找到的该算法
+  当前文件、首次Git提交4b8f839和测试目录副本均已是Unity网关适配版，压缩包未找到原文件。
+- 因此无法从现有原件核实原始Servo发送周期、结束语义和stop_at_end实现，不能把
+  推测恢复的运动逻辑当作“只改通信的同学原算法”交给用户实测。
+- 本次未修改运行代码、未打包、未连接设备；仅记录检查结果。下一步请用户提供同学未经
+  改造且测试过的cr10af_hybrid_x.py及其本地依赖，再制作独立测试入口、通信适配与回归。
+
+## 2026-09-23：original原算法分步节奏测试版完成
+
+- 用户补齐ExternalCode/original两个文件；读取原HybridExit全文、原主程序调用链、
+  网关/现场配置/面板/Python桥接及已有测试。原件SHA256未改变，已有场景/字体等改动保留。
+- 核实原算法每步一次ServoP并等待t，5ms目标周期检查反馈，非33Hz持续发送；轴向不步末Stop，
+  横向搜索Stop后等20ms，整段finally停止。纠正此前泛称“连续发送”的不精确描述。
+- FieldCommissioningSettings新增originalContactTiming默认false；Commissioning提供显式许可。
+  Gateway新增original_timing/stop_at_end及finish_stage，按原分步语义返回interval_elapsed，
+  不虚称实测到位。Unity继续统一通信和异常监控；旧模式不变，真实模式未经授权拒绝。
+- Python client/HybridExit/ContactCycle传递节奏与步末标志、段末确认停止、配置回执；
+  ServoTighteningController校验新能力与模式回执，旧服务不能假装支持新模式。
+  finish_stage失败传播，禁止进入电批；新增相关失败路径测试。
+- 本试验模式的交接停止改为新鲜mode5无错误/碰撞+六轴位置跨度≤0.001°，持续≥0.5s、
+  至少3个新样本；QDActual仅诊断，不用0.01阈值拒绝。旧模式策略保留。
+  此策略非厂家安全标准、未经实机验收；不能替代硬件急停，也不能证明采样间完全静止。
+- 面板新模式仅开放①②，明确拒绝③④，粗定位/返回逐点等待本轮未改；构建报告标识
+  original-timing-test-2026-09-23。说明列明网络/Unity调度、工具系力检查和段末保护差异，
+  不宣称透明通信或硬实时等价。后续同学算法更新仍需对照，不自动执行original直连代码。
+- 验证：FieldRobotHarness54项，FieldWorkflow15项，Python配置6项，原算法适配6项，
+  模拟网关11项(49.012s，含旧完整20mm周期与新模式短行程周期)通过，共92项。
+  最终普通解决方案编译0错误36警告；不再需临时targets，新增源已被Unity生成项目纳入。
+  初次缺project.assets经常规restore解决，未手改生成项目。相关已跟踪文件diff --check通过。
+- 更新现场操作说明及通信适配说明，保留original原件；没有连接实物、修改现有构建目录、
+  修改版本号、提交或推送。当前完成的是源码测试模式，非新的Linux可执行包。
+- 下一步：Unity检查导入/面板，重新完整构建至新目录；现场保存originalContactTiming=true、
+  feedbackPort=30004并重新连接，核对实际限位/User/Tool，先无接触①再监护下②，提供整份报告。
+
+## 2026-09-23：接好末端网线后的092545 Contact日志诊断
+
+### 094306-770acf04后续日志（只诊断）
+
+- User/Tool均FRAME_CONFIRMED，进入INSERTING，10次-2mm原节奏请求均interval_elapsed，随后段末停止通过、等待5秒并进入TIGHTENING。反馈J1从55.039314到56.701607、J6从14.413927到15.892478度，证实存在机械臂运动，但没有完整TCP起终点证据证明实际走满20mm。
+- 拧紧约4.33秒后Python先发stop，随后Unity监控检测锁存并取消。未进入BEFORE_EXIT/EXITING。当前报告未包含Python最初异常或电批终态，不能断言力超限/电批NG/超时；配置拧紧超时60秒，与此次时长不符。
+- 上次根因保留只针对acquire异常，本次属于后续周期异常，仍被任务取消遮盖。下一步取Python终端/电批记录，或在周期异常清理前持久化异常和状态；补段起终点位置诊断。未修改运行代码、未操作设备，不建议为肉眼可见而增大行程/速度。
+
+### 后续修复（用户授权修改）
+
+- 修改Gateway坐标系选择：仅User/Tool允许空ID应答，错误码/回显仍由ExchangeDashboard校验；应答后连续3个新鲜空闲且实际编号正确的样本确认，有ID仍要求匹配。不放宽MovJ/ServoP。
+- acquire异常在停止前存入ContactAcquisitionError并输出ACQUIRE_FAILED；Commissioning开始清空，Panel最终结果优先使用此根因，防止监控取消覆盖。
+- FieldRobotHarness新增空ID成功、Tool未应用拒绝、拒绝不发ServoP、根因保留检查；58项通过。首次沙箱禁止socket，获准仅本机模拟服务后通过；未连接设备。解决方案编译0错误36警告。
+- 更新现场操作说明及PROJECT_CONTEXT。全局diff检查发现已有字体asset尾随空格，未动该无关资源。运行代码检查通过与否见本轮最终结果。
+- 未修改Python算法、场景、版本号或现有构建；未提交/推送。需重新完整构建，人工检查①②及FRAME_ACK/FRAME_CONFIRMED，实物未验收。
+
+- 阅读092545-9d2b3302报告及Gateway的acquire、SelectContactFrameAsync、ParseCommandId链路；保留已有未提交修改，本轮不改运行代码。
+- 开始前Stop通过、Python配置成功，已越过电批就绪检查并进入acquire。实际返回User(0)为0,{},User(0);，ParseCommandId强制要求大括号内数字，因而异常；随后AbortOwner锁存停止，监控取消现场任务，最终只显示A task was canceled。
+- 本次停止确认均PASS；没有进入ServoP接触运动。不能归因为缺反馈、力超限或同学算法失败。实际空ResultID与适配假设不兼容是本次直接原因，不能简单删除所有完成检查。
+- 下一步核对User/Tool应答兼容策略：保留错误码检查，并依据命令后的新反馈确认实际坐标系及空闲状态；日志保留首个异常，避免后续取消覆盖。需补充空ID真实应答回归后再修改/打包。本轮未连接设备、未编译或部署，现场暂不重复触发同一测试。
+
+## 2026-10-08：核对同学原程序机械臂速度（只读代码检查）
+
+- 读取规则、近期WORKLOG/PROJECT_CONTEXT和Git状态，核对ExternalCode/original的V26主程序、HybridExit以及当前现场配置/周期调用；保留全部已有未提交修改，仅更新本记录。
+- 原主程序ROBOT_SPEED_MM_S默认1.2，支持CR10AF_SPEED_MM_S环境变量覆盖；run_robot_stage通过--speed-mm-s显式传给HybridExit。因此原自动插入/退出默认是1.2mm/s。
+- 独立运行原cr10af_hybrid_x.py且未传速度时，命令行默认2.0mm/s；主程序显式参数会覆盖它。原每步默认2mm，duration=max(0.20,step/speed)，默认自动流程每步约1.667秒。横向搜索默认0.1mm/0.25秒，名义比值0.4mm/s。
+- 当前接触配置1.2mm/s与原主程序默认一致，不能据此推断实测速度相同；原算法也按时间和请求步长累计moved，并未证明实际到位。无需本轮编译/设备操作，实际位移和速度仍待末端位置取证；没有修改运行代码或部署。
+
+## 2026-10-08：下一轮末端测试修改方案（尚未实施）
+
+- 对照Gateway的ReadPose/MoveRelative、Feedback的实际TCP位置、Python ContactCycle异常清理、ServoTightening状态轮询/输出接收、Panel报告及用户提供的V4.6.0 TCP PDF。仅提出方案并更新本记录，运行代码不变。
+- 原算法每步从实际GetPose生成相对目标，再按请求步长累计moved；如果未实测走足，计划累计20mm不等于净位移20mm。建议记录每步原始ServoP/应答、GetPose起点/目标、30004实际轨迹及整段GetPose终点，分别统计目标误差、位移、时长。以序列/时间戳和User/Tool标记过滤跨坐标系或旧样本，先交叉核对反馈位置与显式GetPose，避免猜旋转角约定。
+- 运动中优先读已有反馈作限频记录，段起终点显式GetPose复核；计算沿生成目标方向投影与横向偏离，区分每步平均速度、整段平均速度和采样窗口速度，后者不标成精确瞬时速度。不新增逐点Stop或自动补偿。
+- 补充机械臂单独插入/退出诊断入口，电批保持不启动，以定位运动本身；机械臂测量确认后再执行现有②完整接触。维持原节奏/速度/限位与异常停止保护。
+- ContactCycle在清理前保存首个异常、阶段、工具状态/力及反馈年龄，输出结构化失败记录；Unity汇入当前报告并保留首因，后续stop/release错误独立追加，不覆盖。报告加入motion.csv及新构建标识，现场查看数值与固定机位录像交叉验证。
+- 厂家文档建议ServoP循环33Hz且不受全局速率影响，当前同学实现为每步一次ServoP+t等待。该差异只作为后续解释依据，本轮方案不擅自改为高频流。下一步需在用户确定实施时补测未移动/少移动/旧反馈/首因被取消等回归，再完整构建部署；当前无需Editor检查。
+
+## 2026-10-08：实际末端测量、机械臂单测和周期首因保留已实现
+
+- 用户批准方案。读取项目规则、记录/上下文、Gateway/Feedback/Commissioning、Panel/Settings、ServoTightening、原算法和现有Python/回归测试、TCP PDF；保留所有已有改动，未触碰场景/字体/原件。
+- 新增Assets/DobotController.MotionDiagnostics.cs及meta；Gateway接入begin_stage/end_stage、请求/回执/每步端点与约10Hz已有反馈采样，提供原始时间戳和六轴状态。段端点用同一User/Tool显式GetPose，方向由RelPointTool纯计算获得，不猜欧拉角旋转、不增加逐点停止/补偿。
+- motion.csv区分请求距离、实际轴向/横向位移、每步/整段目标误差、步骤平均/整段平均/采样窗口速度。旧样本/过期/错误坐标系/未核对的反馈留空推导值；中止缺端点写stage_incomplete。CSV缓冲限频刷新、普通采样上限100000，IO失败不拦截停止并在结果中报告。结束时仍不能把interval_elapsed当到位证明。
+- Panel增加InsertOnly/WithdrawOnly按钮与实时测量读数，外层滚动及JSON按文本高度调整以访问底部；原节奏③④限制保留。纯机械臂入口复用同学算法，关闭电批运动许可，无电批正反转/拧紧回调。配置旧值不覆盖。
+- 修改ExternalCode/unity_robot_client.py、servo_contact_cycle.py及V26服务命令分发：共享阶段测量及机械臂单测，新增能力回执；Unity ServoTightening校验能力，按cycle_id取首因和清理信息。Python先冻结阶段/异常/最后机器人观察/工具状态再停止，清理错误独立追加；Gateway/Panel保留根因，最终cycle-failure.json与result不只显示取消。
+- 同步两套Harness链接新partial，新增tests/test_motion_diagnostics.py，更新配置/网关测试。验证FieldRobot70项（含完全未移动、半位移、旋转工具方向/原始报文/无效反馈），Python诊断7项、配置6项、原节奏6项、Python-C#集成11项通过，总100；集成另有1项默认长时测试跳过。本机socket测试经审批仅回环模拟，无设备连接。
+- 首次编译以临时targets纳入新文件；Unity随后自行生成csproj纳入新partial，临时targets导致重复源警告后改用普通构建。最终dotnet build解决方案-m:1 --no-restore为0错误44警告；相关diff --check通过。没有手改Unity生成csproj。
+- 更新FIELD_COMMISSIONING操作说明、通信改造说明和PROJECT_CONTEXT；original两原件SHA256未改变。未修改版本号、已有TEST构建目录或设备，未提交/推送/打包。
+- 下一步Unity确认Console及面板文本/滚动/按钮位置，完整构建新Linux目录并关闭旧Python服务。现场按操作说明先机械臂插入单测，核对端点实测与固定机位录像，再独立退出，最后②拧紧；提供包含motion.csv和cycle-failure的整份报告。实机位移、速度、GUI及崩溃持久化未验收。
+
+## 2026-10-08：相机/机械臂通信延迟小测试方案（未实施）
+
+- 用户要求先讨论。读取规则/近期上下文、Git状态、VisionImageReceiver、realsense_image_server、unity_robot_client及Gateway。未修改运行代码或进行设备测试，仅记录方案。
+- 当前相机由Python采集并在同一视觉服务推理，Unity本机HTTP拉JPEG显示；没有原图Unity再转回算法的现成链路。接收协程每次请求完至少再等50ms；不能用纯TCP回显替代实际图像/显示链路测量，也不能把50ms等待直接称为每帧固定延迟。
+- 推荐两层A/B：本机同负载直达与经Unity转发（小JSON及实际图像字节，保持原有线程/队列路径）；现场机械臂分时做同一只读查询，另记录收到反馈帧到算法可用的年龄。不要比较直连硬件查询与软件缓存读取，不使用ServoP/Stop确认或运动时间代替通信RTT。
+- 相机只有一个采集者，同一帧ID分支/回放比较直达测试接收器与经Unity转发；原始数据/压缩预览/推理结果区分，图像大小与编码相同，避免重复开相机。真实桥接尚未实现，第一轮桥接结果必须标测试链路，不能宣称正式视觉闭环性能。
+- 单进程单调时钟测完整往返；跨进程逐段计时各用本地持续时间，单向/跨设备时间须明确校准时钟或握手误差。30~60秒、预热、500~1000样本、轻载与正常软件负载，输出均值/中位/P95/P99/最大、超时及帧丢弃，基线差值与帧率一起汇报，不先假定微秒级或等价。
+- 下一步若实施，提供独立延迟测试入口和CSV/摘要，按一致端到端边界测试。当前完成方案检查，未编译/打包/联网/修改算法。
+
+## 2026-10-08：实现相机Python基线与机械臂通信A/B小测试
+
+- 用户提出直接测相机→Python、机械臂继续A/B，按此制作独立工具。读取规则/上下文/当前状态、相机采集及Unity预览代码、Gateway/打包脚本/原测试、用户TCP PDF只读查询定义，并查官方RealSense SDK的帧时间戳域说明。保留已有运动测量/通信改动。
+- 新增ExternalCode/communication_latency_test.py，无导入时设备访问；camera模式测SDK等帧、对齐、数组拷贝和主机时间戳帧年龄估算。hardware_clock不能直接相减，负值/明显异常/墙钟跳变标无效，不把帧率等待或不可用统计当通信延迟0。默认匹配现有1280x720@15的RGB-D设置，不自动降级；可传实际模式，global-time可选临时启用并尝试恢复。
+- Gateway新增latency_echo/query且拒绝任务占用；只允许GetPose/GetAngle/GetForce，不收任意命令、不acquire/Stop/切坐标系。生产Dashboard读写计时提供串行锁等待、传输及总处理持续时间；测试查询关闭逐条日志，原StopTrace逻辑保留。
+- robot子命令先核对Gateway能力和实际设备地址，在同一Python单调时钟测RTT，采用直连/转发/转发/直连分段，各500样本预热；CSV与JSON给mean/median/P95/P99/max/超时及统计差值。差值为分段统计对比，不假装每请求配对或单向延迟；设备多连接权限不支持时报告失败，不发送RequestControl。
+- 新增tests/test_communication_latency.py，FieldRobotHarness补只读端点/拒绝任意命令/不干扰任务，生产网关集成补echo/未连接查询/现有会话不被夺取。6项工具、74项FieldRobot、13项Python-C#集成通过，共93项；集成另跳过默认长时1项。socket只连接本机假服务，经审批；相机使用fake SDK数据，没有打开真实设备。
+- SDK及numpy本机可导入，但没有据此宣称硬件测试通过。解决方案编译0错误；最后增量构建0警告不代表原有警告已消失。相关diff --check通过。
+- 新增COMMUNICATION_LATENCY_2026-10-08.md并更新PROJECT_CONTEXT；Editor构建后处理复制COMMUNICATION_LATENCY.md，既有顶层Python复制逻辑自动包含新工具。未改场景/算法/版本号/已有构建目录，未打包或提交推送。
+- 下一步完整构建Linux并确认新端点；现场关闭视觉服务释放相机、用既有视觉环境执行camera，再打开软件连接静止机械臂执行robot，在轻载/通常负载下比较完整报告。若需要完整曝光/光学响应，应另做同步事件测试，当前帧年龄仅估算。
+
+## 2026-10-14：审查伍老师21.5.wlj新版（仅分析）
+
+- 定位新版于../My project21.5.wlj/My project21.5。读取双方AGENTS、上下文/记录、Git状态/历史；新包HEAD acd0380/wlj，起点5c2ae4f为用户21.5快照，后有10个提交（9月19日至23日）。没有切换分支、编译/打开Unity或修改双方业务代码。
+- 以新包开发起点隔离增量，检查操作日志、运行记录/详情新类、Simulation/Mission/ConnectCommander接入点、MainScene/prefab绑定、项目数据与外部程序。增量72个Assets文件/32个C#，新增10个C#。与21.4的全部差异不可全部归为伍老师新增。
+- 主要新增：模型/项目字段前后值和文件信息日志；仿真目标/替换/位置参数及真实设备按钮日志；RunRecorder在Data/Runs/RunRecords.db持久化项目运行历史；项目记录按钮/模式筛选/列表/步骤详情及资源配套。修正接头/项目新增被记成编辑的判断。
+- 边界：真机全部下发就记成功；步骤Torque/Angle无实测赋值且显示默认0；碰撞/原因接口未接调用；离线流程标为REALTIME；记录详情无运动重放；SelectedObjects仅数据结构。另指出成功ResultReason可能null导致入库后日志报错、pending参数日志不是真正拖动结束合并。
+- 关键算法/ExternalCode未有这次提交增量；与当前目录确认碰撞生成/恢复、IK、相机Python一致。新包缺当前统一网关、现场联调、末端实测、实际到位确认与延迟测试等，不能覆盖当前工程。
+- 新增详细报告WULAOSHI_21_5_WLJ_REVIEW_2026-10-14.md，仅在我们.codex记录结论，保留新包自带未提交材质/meta/包文件。没有Git提交/推送/代码集成。下一步若用户要移植，应选日志/历史UI并把结果接到当前执行确认，Unity检查列表/详情及旧数据兼容；当前只是静态分析。
+
+### 追问：新版历史是否保存设备实际下发指令
+
+- 复查RunStepRecord/DispatchTask、Dobot发送接收、底盘SendCommand/路径调度、电缸Modbus与LogToFile。新版历史只任务摘要；原有调试日志能保留机械臂发送文本/回复、部分底盘路径JSON，不能泛称“完全没存”。底盘无统一发送报文记录，电缸无逐寄存器/应答记录，不具备全设备完整追踪。
+- LogToFile记录路径为PathTool.GetExecutableDirPath()/Logs/Log_日期.log，独立于Data/Runs/RunRecords.db与Data/Operations/OperationLog.db。只补分析文档/本记录，未修改运行代码、未启动设备。
+
+## 2026-10-14：集成前测试版GitHub阶段备份
+
+- 用户授权先上传当前测试版并打标签，再集成伍老师新功能。检查发布分支、远端heads/tags、工作区及忽略规则，远端release/software-v1.0与本地同为4b8f839/v1.11，无远端新提交；当前代码/测试/文档及用户已有字体修改一起保留备份，大模型/运行数据/缓存沿用忽略规则。
+- 计划提交当前源码到release/software-v1.0，附注标签v1.12-test.20261014；包含统一通信、现场联调、底盘确认、末端实测和时延测试，不改既有bundleVersion，不虚称实机发布。发布说明见RELEASE_NOTES_v1.12-test.20261014.md。
+- 推送确认后新建integration/wulaoshi-21.5-wlj集成分支，测试标签固定在集成前提交。具体推送结果/提交ID将在后续集成记录中补充。
+- 上传前核验：恢复dotnet依赖后，CLI因已卸载的VS Code Unity分析器路径而未完成编译（CS0006），未手改生成csproj。改由Unity 2022.3.62f2c1批处理导入/编译，退出码0，无C#错误；motion诊断7项单测通过。GitHub连接在沙盒外重试fetch成功，后续推送按实际远端SHA核验。

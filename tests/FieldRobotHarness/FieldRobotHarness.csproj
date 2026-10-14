@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../FeedbackHarnessSupport.cs" />
+    <Compile Include="../../Assets/DobotController.Feedback.cs" />
+    <Compile Include="../../Assets/CommissioningJournal.cs" />
+    <Compile Include="../../Assets/FieldCommissioningSettings.cs" Link="Settings.cs" />
+    <Compile Include="../../Assets/DobotController.Commissioning.cs" Link="Commissioning.cs" />
+    <Compile Include="../../Assets/DobotController.Gateway.cs" Link="Gateway.cs" />
+    <Compile Include="../../Assets/DobotController.MotionDiagnostics.cs" />
+  </ItemGroup>
+</Project>

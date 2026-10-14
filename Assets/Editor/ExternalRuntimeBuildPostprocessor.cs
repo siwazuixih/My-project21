@@ -70,6 +70,11 @@ public sealed class ExternalRuntimeBuildPostprocessor :
             targetExternalDirectory
         );
 
+        string fieldGuide = Path.Combine(projectRoot, ".codex", "FIELD_COMMISSIONING_2026-09-16.md");
+        if (File.Exists(fieldGuide)) File.Copy(fieldGuide, Path.Combine(buildRoot, "FIELD_COMMISSIONING.md"), true);
+        string latencyGuide = Path.Combine(projectRoot, ".codex", "COMMUNICATION_LATENCY_2026-10-08.md");
+        if (File.Exists(latencyGuide)) File.Copy(latencyGuide, Path.Combine(buildRoot, "COMMUNICATION_LATENCY.md"), true);
+
         string sourceFont =
             Path.Combine(projectRoot, "Assets", "微软雅黑.ttf");
         if (!File.Exists(sourceFont))

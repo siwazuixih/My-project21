@@ -1261,6 +1261,8 @@ def unity_status(ok: bool = True, message: str = "status"):
         "ok": ok,
         "message": message,
         "tool_connected": connected,
+        "tool_ip": IP,
+        "tool_port": PORT,
         "state": current_state,
         "run_id": current_run_id,
         "samples": samples,
@@ -1276,11 +1278,23 @@ def unity_status(ok: bool = True, message: str = "status"):
 
 
 def run_unity_command(cmd: str):
+    if (cmd or '').startswith('configure_contact:'):
+        if state in ('RUN_FORWARD', 'RUN_REVERSE') or not command_queue.empty():
+            return unity_status(False, 'tool_busy')
+        contact_cycle.configure(json.loads(cmd.split(':', 1)[1]))
+        return {**unity_status(True, 'contact_configured'), **contact_cycle.snapshot()}
     normalized = (cmd or "").strip().lower()
 
     if normalized in ("auto_cycle", "auto_cycle_sim"):
         contact_cycle.start(simulated=normalized == "auto_cycle_sim")
         return {**unity_status(True, "cycle_started"), **contact_cycle.snapshot()}
+
+    if normalized in ("robot_insert", "robot_withdraw", "robot_insert_sim", "robot_withdraw_sim"):
+        if state in ('RUN_FORWARD', 'RUN_REVERSE') or not command_queue.empty():
+            return unity_status(False, 'tool_busy')
+        contact_cycle.start(simulated=normalized.endswith('_sim'),
+                            workflow='insert' if normalized.startswith('robot_insert') else 'withdraw')
+        return {**unity_status(True, 'robot_only_started'), **contact_cycle.snapshot()}
 
     if normalized in ("stop", "reset") and contact_cycle.snapshot()['cycle_active']:
         threading.Thread(target=contact_cycle.stop, daemon=True).start()

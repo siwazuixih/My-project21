@@ -22,7 +22,8 @@ public class RobotLocationData
 public class NavigationStatus
 {
     public int ret_code;
-    public string task_status; // 状态如: "RUNNING", "COMPLETED", "FAILED"
+    public int task_status; // 0 NONE / 2 RUNNING / 3 SUSPENDED / 4 COMPLETED / 5 FAILED / 6 CANCELED
+    public int task_type;
     public float distance;     // 剩余距离
     public string target_name; 
 }
@@ -30,7 +31,7 @@ public class NavigationStatus
 // ==========================================
 // 2. 主控制器类
 // ==========================================
-public class RobokitController : MonoBehaviour
+public partial class RobokitController : MonoBehaviour
 {
     #region 事件定义
     public event DobotEventHandler OnRobokitEvent;
@@ -38,6 +39,7 @@ public class RobokitController : MonoBehaviour
 
     [Header("底盘网络配置")]
     public string robotIP = "192.168.1.100";
+    [SerializeField] private bool enableDebugKeyboardShortcuts = false;
 
     [Header("底盘实时数据监测 (可在面板查看)")]
     public float currentX;
@@ -60,6 +62,7 @@ public class RobokitController : MonoBehaviour
 
     void Update()
     {
+        if (!enableDebugKeyboardShortcuts) return;
         // 快捷键测试区 (绝对没有 [Header] 标签)
         
         // C键: 连接
@@ -105,6 +108,7 @@ public class RobokitController : MonoBehaviour
 
     public void StopMovement()
     {
+        CancelConfirmedMotion();
         SendCommand(3003, ""); 
     }
 
@@ -153,6 +157,9 @@ public class RobokitController : MonoBehaviour
 
     public  void ConnectAll()
     {
+        if (FieldWorkflowOwned) { Debug.LogWarning("实物流程占用底盘，禁止重连"); return; }
+        if (ConfirmedMotionActive) { Debug.LogWarning("底盘动作确认中，拒绝重新连接"); return; }
+        DisConnect();
         ConnectPort(ref statusClient, ref statusStream, 19204, out isStatusOn);
         ConnectPort(ref controlClient, ref controlStream, 19205, out isControlOn);
         ConnectPort(ref navClient, ref navStream, 19206, out isNavOn);
@@ -184,20 +191,14 @@ public class RobokitController : MonoBehaviour
         }
     }
 
-    public void SendCommand(ushort apiNum, string jsonPayload)
+    public async void SendCommand(ushort apiNum, string jsonPayload)
     {
-        NetworkStream targetStream = null;
-
-        if (apiNum >= 1000 && apiNum < 2000) targetStream = statusStream;
-        else if (apiNum >= 2000 && apiNum < 3000) targetStream = controlStream;
-        else if (apiNum >= 3000 && apiNum < 4000) targetStream = navStream;
-
-        if (targetStream == null) return;
-
         try {
-            byte[] packet = RobokitProtocol.Pack(apiNum, jsonPayload);
-            targetStream.Write(packet, 0, packet.Length);
-        } catch (Exception e) { 
+            if (apiNum == 3003) CancelConfirmedMotion();
+            if ((ConfirmedMotionActive || FieldWorkflowOwned) && apiNum >= 2000 && apiNum != 3003)
+                throw new InvalidOperationException("底盘闭环任务中，禁止额外运动或重定位");
+            await RequestConfirmedAsync(apiNum, jsonPayload, System.Threading.CancellationToken.None);
+        } catch (Exception e) {
             Debug.LogError($"发送失败: {e.Message}"); 
         }
     }
@@ -207,14 +208,16 @@ public class RobokitController : MonoBehaviour
         try {
             while (stream != null) {
                 byte[] header = new byte[16];
-                int r = await stream.ReadAsync(header, 0, 16);
-                if (r < 16) break;
+                await ReadChassisExactAsync(stream, header);
+                if (header[0] != 0x5A || header[1] != 1 || header[12] != 0 || header[13] != 0 || header[14] != 0)
+                    throw new System.IO.IOException("不支持的底盘包头/路由/压缩，请核对固件协议");
                 
                 uint len = RobokitProtocol.ParsePayloadLength(header);
                 
-                if (len > 0) {
+                if (len > 1024 * 1024) throw new System.IO.IOException("底盘响应超过1MiB");
+                {
                     byte[] body = new byte[len];
-                    await stream.ReadAsync(body, 0, (int)len);
+                    await ReadChassisExactAsync(stream, body);
                     string jsonResponse = Encoding.UTF8.GetString(body);
                     
                     // 解析包头中的 API 编号 (第8-9字节，转小端读取)
@@ -222,10 +225,12 @@ public class RobokitController : MonoBehaviour
                     ushort resApiNum = BitConverter.ToUInt16(apiBytes, 0);
 
                     // 智能解析数据到 Unity 变量
-                    ParseRobotData(resApiNum, jsonResponse);
+                    ushort sequence = (ushort)((header[2] << 8) | header[3]);
+                    if (CompleteChassisReply(stream, sequence, resApiNum, jsonResponse))
+                        ParseRobotData(resApiNum, jsonResponse);
                 }
             }
-        } catch { }
+        } catch (Exception e) { FailChassisStream(stream, e); }
     }
 
     /// <summary>将收到的 JSON 翻译成 Unity 面板里的变量</summary>
@@ -247,7 +252,7 @@ public class RobokitController : MonoBehaviour
         else if (apiNum == 11020)
         {
             NavigationStatus nav = JsonUtility.FromJson<NavigationStatus>(json);
-            currentNavState = nav.task_status;
+            currentNavState = ChassisStateName(nav.task_status);
             remainDistance = nav.distance;
             Debug.Log($"导航状态更新: {currentNavState}, 剩余距离: {remainDistance}");
             
@@ -271,9 +276,14 @@ public class RobokitController : MonoBehaviour
 
     public void DisConnect()
     {
+        CancelConfirmedMotion();
+        FailChassisStream(statusStream, new System.IO.IOException("底盘断开"));
+        FailChassisStream(controlStream, new System.IO.IOException("底盘断开"));
+        FailChassisStream(navStream, new System.IO.IOException("底盘断开"));
         statusStream?.Close(); statusClient?.Close();
         controlStream?.Close(); controlClient?.Close();
         navStream?.Close(); navClient?.Close();
+        statusStream = controlStream = navStream = null;
         Debug.Log("<color=red>已断开底盘所有连接</color>");
         
         // 触发断开连接事件
@@ -282,6 +292,7 @@ public class RobokitController : MonoBehaviour
     }
     void OnDestroy()
     {
+        DisConnect();
         // 脚本销毁时，切断所有连接，安全退出协程
         statusStream?.Close(); statusClient?.Close();
         controlStream?.Close(); controlClient?.Close();

@@ -145,11 +145,12 @@ public class TrajectoryTask
     public Vector3 initialForward; 
     
     public bool isDispatched = false; 
+    [System.NonSerialized] public string dispatchError;
 
     public float targetLiftHeight;
 }
 
-public class ConnectCommander : MonoBehaviour
+public partial class ConnectCommander : MonoBehaviour
 {
     [Header("真机通讯组件绑定")]
     public DobotController dobotTCP;
@@ -225,11 +226,28 @@ public class ConnectCommander : MonoBehaviour
     private IVisionFineTuneTrajectoryProvider fineTuneTrajectoryProvider;
     private ServoTighteningController validationServoController;
     private bool validationStartedServoProgram;
+    private bool chassisRouteRunning;
+    private int singleTaskRunning;
+    public bool AnyTaskRunning => isSequenceRunning || chassisRouteRunning || singleTaskRunning > 0;
 
-    public void ClearAllTasks() => taskPlaylist.Clear();
+    private IEnumerator TrackSingleTask(IEnumerator task)
+    {
+        singleTaskRunning++;
+        try { yield return task; }
+        finally { singleTaskRunning--; }
+    }
+
+    public void ClearAllTasks()
+    {
+        if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked)
+        { FieldCommissioningPanel.Active.RequestStop(); return; }
+        if (chassisTCP != null && (chassisRouteRunning || chassisTCP.ConfirmedMotionActive)) chassisTCP.StopMovement();
+        taskPlaylist.Clear();
+    }
 
     private void OnDestroy()
     {
+        if (chassisTCP != null && (chassisRouteRunning || chassisTCP.ConfirmedMotionActive)) chassisTCP.StopMovement();
         fullProcessCancelRequested = true;
         if (validationStartedServoProgram &&
             validationServoController != null &&
@@ -369,23 +387,24 @@ public class ConnectCommander : MonoBehaviour
 
     public void DispatchTask(int index)
     {
+        if (AnyTaskRunning) { Debug.LogWarning("已有任务执行中，不接受重复下发"); return; }
         if (index < 0 || index >= taskPlaylist.Count) return;
         var task = taskPlaylist[index];
 
         if (task.type == TaskType.Chassis) 
         {
             if (chassisTCP == null) { Debug.LogError("⚠️ 未绑定 ChassisTCP！"); return; }
-            StartCoroutine(SendChassisSegmentedRoutine(task));
+            StartCoroutine(TrackSingleTask(SendChassisSegmentedRoutine(task)));
         } 
         else if (task.type == TaskType.Arm) 
         {
             if (dobotTCP == null) { Debug.LogError("⚠️ 未绑定 DobotTCP！"); return; }
-            StartCoroutine(SendArmRoutine(task));
+            StartCoroutine(TrackSingleTask(SendArmRoutine(task)));
         }
         else if (task.type == TaskType.Lift) // 🌟 新增分支
         {
         if (liftTCP == null) { Debug.LogError("⚠️ 未绑定 LiftTCP！"); return; }
-        StartCoroutine(SendLiftRoutine(task));
+        StartCoroutine(TrackSingleTask(SendLiftRoutine(task)));
         }
     }
 
@@ -398,7 +417,7 @@ public class ConnectCommander : MonoBehaviour
     /// </summary>
     public void DispatchNextTargetSequence()
     {
-        if (isSequenceRunning)
+        if (AnyTaskRunning)
         {
             Debug.LogWarning("⚠️ 上一个目标点的完整自动化流程正在执行中，请勿重复触发！");
             return;
@@ -476,9 +495,11 @@ public class ConnectCommander : MonoBehaviour
             }
 
             // 安全防御验证：确保底层状态刷新
-            while (!task.isDispatched)
+            if (!task.isDispatched)
             {
-                yield return null;
+                Debug.LogError($"[自动流水线] 子任务未完成，停止后续下发: {task.taskName} {task.dispatchError}");
+                isSequenceRunning = false;
+                yield break;
             }
 
             Debug.Log($"⏸️ <color=white>[自动流水线] 子任务 {task.taskName} 已闭环确认完成。</color>");
@@ -502,7 +523,7 @@ public class ConnectCommander : MonoBehaviour
 
     public void DispatchFullProcessValidation(MissionController missionController)
     {
-        if (isSequenceRunning)
+        if (AnyTaskRunning)
         {
             Debug.LogWarning("[全流程验证] 已有流程正在执行，请勿重复启动。");
             return;
@@ -1115,7 +1136,26 @@ public class ConnectCommander : MonoBehaviour
     /// </summary>
     private IEnumerator SendChassisSegmentedRoutine(TrajectoryTask task)
     {
-        Debug.Log($"🚧 [真机调度] 开始分段执行底盘路径，共 {task.chassisPoints.Count} 个节点...");
+        if (chassisRouteRunning) yield break;
+        chassisRouteRunning = true;
+        try { yield return SendChassisConfirmedCore(task); }
+        finally { chassisRouteRunning = false; }
+    }
+
+    private IEnumerator SendChassisConfirmedCore(TrajectoryTask task)
+    {
+        task.isDispatched = false;
+        task.dispatchError = null;
+        if (chassisTCP == null || task.chassisPoints == null || task.chassisPoints.Count < 2 ||
+            float.IsNaN(chassisMoveSpeedX) || float.IsInfinity(chassisMoveSpeedX) || chassisMoveSpeedX <= 0 ||
+            float.IsNaN(chassisTurnSpeedW) || float.IsInfinity(chassisTurnSpeedW) || chassisTurnSpeedW <= 0)
+        {
+            task.dispatchError = "底盘绑定/路径/速度无效";
+            Debug.LogError(task.dispatchError);
+            yield break;
+        }
+        Debug.Log($"[底盘闭环] 开始分段执行，共 {task.chassisPoints.Count} 个节点");
+        int cancellationVersion = chassisTCP.CancellationVersion;
 
         if (task.chassisPoints == null || task.chassisPoints.Count < 2) yield break;
 
@@ -1124,6 +1164,7 @@ public class ConnectCommander : MonoBehaviour
 
         for (int i = 0; i < task.chassisPoints.Count - 1; i++)
         {
+            if (cancellationVersion != chassisTCP.CancellationVersion) { task.dispatchError = "底盘路径已取消"; yield break; }
             Vector3 currentPoint = task.chassisPoints[i];
             Vector3 nextPoint = task.chassisPoints[i + 1];
 
@@ -1148,18 +1189,21 @@ public class ConnectCommander : MonoBehaviour
 
                 // [修改 3]：构建 3056 专属的 JSON，使用 vw 字段
                 // string rotJson = $"{{\"angle\":{absAngleRad:F3}, \"vw\":{signedVw:F2}}}";
-                string rotJson = $"{{\"angle\":{absAngleRad.ToString("F3")}, \"vw\":{signedVw.ToString("F2")}}}";
+                string rotJson = System.FormattableString.Invariant($"{{\"angle\":{absAngleRad:F3}, \"vw\":{signedVw:F2}}}");
                 Debug.Log($"🔄 [第{i}段] 原地旋转: 差值 {deltaAngleDeg:F1}° -> <color=yellow>{rotJson}</color>");
                 
                 // [修改 4]：发送专属转动 API 3056
-                chassisTCP.SendCommand(3056, rotJson);
-
-                // 估算旋转所需时间并等待 (时间 = 绝对角度/角速度 + 缓冲)
-                float rotTime = ClampEstimatedWait(absAngleRad / chassisTurnSpeedW + commandBufferTime + rotTimeBuffer, chassisMinWaitTime, chassisMaxWaitTime);
-                yield return new WaitForSeconds(rotTime);
+                var rotation = chassisTCP.ExecuteRelativeConfirmedAsync(3056, rotJson);
+                while (!rotation.IsCompleted) yield return null;
+                if (rotation.IsFaulted || rotation.IsCanceled || !rotation.Result)
+                {
+                    task.dispatchError = rotation.IsFaulted ? rotation.Exception.GetBaseException().Message : chassisTCP.LastConfirmedMotionError;
+                    yield break;
+                }
             }
 
             // 🌟 核心状态更新：旋转做完后，车头已经指向当前线段方向了，更新游标！
+            if (cancellationVersion != chassisTCP.CancellationVersion) { task.dispatchError = "底盘路径已取消"; yield break; }
             currentFacing = dir;
 
             // 4. 直线平动
@@ -1168,17 +1212,21 @@ public class ConnectCommander : MonoBehaviour
 
             if (dist > 0.01f)
             {
-                string moveJson = $"{{\"dist\":{dist:F3}, \"vx\":{-chassisMoveSpeedX:F2}, \"vy\":0.00}}";
+                string moveJson = System.FormattableString.Invariant($"{{\"dist\":{dist:F3}, \"vx\":{-chassisMoveSpeedX:F2}, \"vy\":0.00}}");
                 Debug.Log($"⬆️ [第{i}段] 直线平动: <color=cyan>{moveJson}</color>");
-                chassisTCP.SendCommand(3055, moveJson);
-
-                float moveTime = ClampEstimatedWait(dist / chassisMoveSpeedX + commandBufferTime + moveTimeBuffer, chassisMinWaitTime, chassisMaxWaitTime);
-                yield return new WaitForSeconds(moveTime);
+                var translation = chassisTCP.ExecuteRelativeConfirmedAsync(3055, moveJson);
+                while (!translation.IsCompleted) yield return null;
+                if (translation.IsFaulted || translation.IsCanceled || !translation.Result)
+                {
+                    task.dispatchError = translation.IsFaulted ? translation.Exception.GetBaseException().Message : chassisTCP.LastConfirmedMotionError;
+                    yield break;
+                }
             }
         }
 
+        if (cancellationVersion != chassisTCP.CancellationVersion) { task.dispatchError = "底盘路径已取消"; yield break; }
         task.isDispatched = true;
-        Debug.Log($"✅ 底盘路径 <color=orange>{task.taskName}</color> 严格沿线执行完毕！");
+        Debug.Log($"[底盘闭环] {task.taskName} 全部动作已收到完成状态（非独立定位精度验收）");
     }
 
     private IEnumerator SendArmRoutine(TrajectoryTask task)
@@ -1221,12 +1269,12 @@ public class ConnectCommander : MonoBehaviour
         Debug.Log($"✅ 机械臂动作 <color=cyan>{task.taskName}</color> 执行完毕！");
     }
 
-    private IEnumerator SendLiftRoutine(TrajectoryTask task)
+    private IEnumerator SendLiftRoutine(TrajectoryTask task, bool fieldWorkflow = false)
     {
         Debug.Log($"🛗 [真机调度] 开始执行升降动作: <color=cyan>{task.taskName}</color> -> 目标高度: {task.targetLiftHeight}m");
         
         // 1. 发送运动指令
-        liftTCP.MoveToPosition(task.targetLiftHeight, liftVelocity);
+        liftTCP.MoveToPosition(task.targetLiftHeight, liftVelocity, fieldWorkflow);
 
         // 2. 闭环等待：不断读取当前位置，直到满足容差
         float targetRealPos = task.targetLiftHeight * liftTCP.simToRealScale;

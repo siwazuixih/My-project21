@@ -44,10 +44,17 @@ class HybridExit:
             raise RuntimeError("Hard force limit reached: %.2f N" % norm3(f["force"][:3]))
         if norm3(f["force"][3:]) >= self.args.hard_moment_nm:
             raise RuntimeError("Hard moment limit reached: %.2f Nm" % norm3(f["force"][3:]))
-        if enforce_lateral and lateral_cost(f["force"]) >= self.args.lateral_trigger_n:
-            raise RuntimeError("Lateral force limit reached: %.2f" % lateral_cost(f["force"]))
+        if enforce_lateral:
+            # Explicit tool frame; feedback ActualTCPForce does not document equivalent axes.
+            lateral = lateral_cost(self.dashboard.wrench(self.args.tool))
+            if lateral >= self.args.lateral_trigger_n:
+                raise RuntimeError("Lateral force limit reached: %.2f" % lateral)
     def servo_relative(self, dx, dy, dz, duration, stop_at_end=True,
                        enforce_lateral=False):
+        if getattr(self.args, 'original_contact_timing', False):
+            self.dashboard.move_original_interval(dx, dy, dz, duration, stop_at_end, enforce_lateral)
+            self.safety_ok(allow_running=not stop_at_end, enforce_lateral=enforce_lateral)
+            return
         self.dashboard.move_relative(dx, dy, dz, duration, enforce_lateral=enforce_lateral)
         self.safety_ok(allow_running=False, enforce_lateral=enforce_lateral)
 
@@ -105,8 +112,12 @@ class HybridExit:
             return {"plan": plan, "result": "safety_stop", "reason": str(exc),
                     "moved_mm": moved, "history": self.history}
         finally:
-            if owns_client and self.dashboard:
-                self.dashboard.close()
+            try:
+                if getattr(self.args, 'original_contact_timing', False) and self.dashboard:
+                    self.dashboard.finish_stage()
+            finally:
+                if owns_client and self.dashboard:
+                    self.dashboard.close()
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
