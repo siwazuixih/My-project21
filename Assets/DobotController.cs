@@ -103,6 +103,7 @@ public partial class DobotController : MonoBehaviour
         try
         {
             tcpClient?.Close();
+            OperationLogTool.RecordLog(OperationType.真实运行, $"请求连接机器人（IP：{robotIP}，端口：{dashboardPort}）");
             tcpClient = new TcpClient(robotIP, dashboardPort);
             networkStream = tcpClient.GetStream();
             Debug.Log("<color=green>TCP 连接成功！</color>");
@@ -134,6 +135,7 @@ public partial class DobotController : MonoBehaviour
     }
     public void PowerOn()
     {
+        OperationLogTool.RecordLog(OperationType.真实运行, "请求启动机器人（PowerOn）");
         SendCommand("PowerOn()");
     }
 
@@ -154,6 +156,7 @@ public partial class DobotController : MonoBehaviour
         try
         {
             // 1. 先关闭数据流
+            OperationLogTool.RecordLog(OperationType.真实运行, "请求断开机器人");
             if (networkStream != null)
             {
                 networkStream.Close();
@@ -191,6 +194,7 @@ public partial class DobotController : MonoBehaviour
         try
         {
             if (!controlModeConfirmed) throw new InvalidOperationException("TCP控制模式尚未确认，请在未使能状态重新连接");
+            OperationLogTool.RecordLog(OperationType.真实运行, "请求激活机器人（EnableRobot）");
             await ExchangeDashboardAsync("ClearError()", false);
             await ExchangeDashboardAsync("EnableRobot()", false);
             SetRobotSpeed(3);

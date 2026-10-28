@@ -10,14 +10,24 @@ public partial class RobokitController
 {
     public bool FieldWorkflowOwned { get; set; }
     public bool FieldConnected => statusClient != null && statusClient.Connected && navClient != null && navClient.Connected;
-    public bool FieldConnectedTo(string ip)
+    public bool FieldConnectedTo(string ip, bool requireStatus = true)
     {
         try
         {
-            return FieldConnected && ((System.Net.IPEndPoint)statusClient.Client.RemoteEndPoint).Address.Equals(System.Net.IPAddress.Parse(ip)) &&
-                ((System.Net.IPEndPoint)navClient.Client.RemoteEndPoint).Address.Equals(System.Net.IPAddress.Parse(ip));
+            var address = System.Net.IPAddress.Parse(ip);
+            if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+            bool navigation = navClient != null && navClient.Connected && navStream != null && navStream.CanRead && navStream.CanWrite &&
+                ChassisEndpointMatches(navClient, address);
+            return navigation && (!requireStatus || (statusClient != null && statusClient.Connected &&
+                ChassisEndpointMatches(statusClient, address)));
         }
         catch { return false; }
+    }
+    private static bool ChassisEndpointMatches(TcpClient client, System.Net.IPAddress expected)
+    {
+        var actual = ((System.Net.IPEndPoint)client.Client.RemoteEndPoint).Address;
+        if (actual.IsIPv4MappedToIPv6) actual = actual.MapToIPv4();
+        return actual.Equals(expected);
     }
     [Header("底盘完成确认（1020，task_type=7）")]
     public float statusPollSeconds = 0.2f;
@@ -121,6 +131,45 @@ public partial class RobokitController
         CancellationVersion++;
         chassisEpoch++;
         chassisMotionCancellation?.Cancel();
+    }
+    // 兼容旧耗时等待，但仍核对发送应答/取消；不请求1020，也绝不声称已到位。
+    public async Task<bool> ExecuteRelativeLegacyTimedAsync(ushort api, string json, double estimatedSeconds)
+    {
+        if (ConfirmedMotionActive) { Debug.LogError("已有底盘动作执行中"); return false; }
+        if (api != 3055 && api != 3056) throw new ArgumentOutOfRangeException(nameof(api));
+        if (double.IsNaN(estimatedSeconds) || double.IsInfinity(estimatedSeconds) || estimatedSeconds < 0 || estimatedSeconds > 600)
+            throw new ArgumentOutOfRangeException(nameof(estimatedSeconds));
+        var cancel = new CancellationTokenSource();
+        chassisEpoch++; chassisMotionCancellation = cancel; LastConfirmedMotionError = "";
+        bool sent = false;
+        try
+        {
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            sent = true;
+            await RequestConfirmedAsync(api, json, cancel.Token);
+            Debug.Log($"[底盘旧模式] API={api} 已应答，预计总等待={estimatedSeconds:F2}s；不查询1020，未确认实际到位");
+            while (elapsed.Elapsed.TotalSeconds < estimatedSeconds)
+            {
+                cancel.Token.ThrowIfCancellationRequested();
+                if (navStream == null || !navStream.CanRead || !navStream.CanWrite) throw new IOException("底盘导航连接在旧模式等待期间断开");
+                await Task.Delay(TimeSpan.FromSeconds(Math.Max(0, Math.Min(.1, estimatedSeconds - elapsed.Elapsed.TotalSeconds))), cancel.Token);
+            }
+            cancel.Token.ThrowIfCancellationRequested();
+            Debug.Log($"[底盘旧模式] API={api} 估时等待结束（不是完成状态确认）");
+            return true;
+        }
+        catch (Exception e)
+        {
+            LastConfirmedMotionError = e.Message;
+            Debug.LogError("[底盘旧模式] 中止，不继续后续段：" + e.Message);
+            if (sent)
+            {
+                try { await RequestConfirmedAsync(3003, "", CancellationToken.None); }
+                catch (Exception stopError) { Debug.LogError("底盘停止请求未获确认，需要现场检查：" + stopError.Message); }
+            }
+            return false;
+        }
+        finally { chassisMotionCancellation = null; cancel.Dispose(); }
     }
     public async Task<bool> ExecuteRelativeConfirmedAsync(ushort api, string json)
     {

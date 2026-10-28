@@ -10,13 +10,11 @@ public static class OperationLogTool
 
     static OperationLogTool()
     {
-        string dataDir = Path.Combine(PathTool.GetExecutableDirPath(), "Data", "Operations");
-        if (!Directory.Exists(dataDir))
+        try
         {
-            Directory.CreateDirectory(dataDir);
+            _dbPath = Path.Combine(PathTool.GetExecutableDirPath(), "Data", "Operations", "OperationLog.db");
         }
-        _dbPath = Path.Combine(dataDir, "OperationLog.db");
-        Debug.Log($"操作日志数据库路径：{_dbPath}");
+        catch (Exception ex) { Debug.LogWarning("操作日志路径暂不可用：" + ex.Message); }
     }
 
     public static void RecordLog(OperationType operationType, string detail = "", string ipAddress = "")
@@ -25,6 +23,8 @@ public static class OperationLogTool
         {
             try
             {
+                if (string.IsNullOrEmpty(_dbPath)) _dbPath = Path.Combine(PathTool.GetExecutableDirPath(), "Data", "Operations", "OperationLog.db");
+                Directory.CreateDirectory(Path.GetDirectoryName(_dbPath));
                 using (var db = new LiteDB.LiteDatabase(_dbPath))
                 {
                     var collection = db.GetCollection<OperationLog>("OperationLogs");
@@ -54,6 +54,38 @@ public static class OperationLogTool
             {
                 Debug.LogError($"操作日志记录失败：{ex.Message}");
             }
+        }
+    }
+
+    /// <summary>
+    /// 将模型文件路径转成日志中使用的简短信息：文件名（大小）。
+    /// 路径不可解析或文件不存在时只返回文件名；路径为空时返回空字符串。
+    /// </summary>
+    public static string FormatModelFileInfo(string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            return "";
+        }
+
+        try
+        {
+            string name = Path.GetFileName(filePath.Replace('\\', '/'));
+            string physicalPath = PathTool.ResolvePhysicalPath(filePath);
+            if (System.IO.File.Exists(physicalPath))
+            {
+                long bytes = new System.IO.FileInfo(physicalPath).Length;
+                string size = bytes >= 1024 * 1024
+                    ? $"{(double)bytes / (1024 * 1024):0.#}MB"
+                    : $"{Math.Max(1, bytes / 1024)}KB";
+                return $"{name}({size})";
+            }
+            return name;
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"模型文件信息解析失败：{ex.Message}");
+            return "模型文件路径无法解析";
         }
     }
 

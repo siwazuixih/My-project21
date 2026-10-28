@@ -18,6 +18,10 @@ public class ObserveParam : MonoBehaviour
 
     private ModelCollisionHighlighter lastSelectedObject;
     private MissionController missionController;
+    private bool directionLogReady;
+    private readonly PendingParamLog directionLog = new PendingParamLog("观测方向");
+    public void FlushDirectionLog() => directionLog.Flush();
+    public void ResetDirectionLog() { if (XYZPanel != null) directionLog.Reset(XYZPanel.Value); }
 
     public float? ObservationDistanceValue => GetFloat(ObservationDistance);
     public float? XValue => XYZPanel?.Value.x;
@@ -47,8 +51,10 @@ public class ObserveParam : MonoBehaviour
         }
         if (XYZPanel != null)
         {
+            directionLog.Reset(XYZPanel.Value);
             XYZPanel.OnValueChanged += OnXYZValueChanged;
         }
+        directionLogReady = true;
     }
 
     private void OnInputValueChanged(string value)
@@ -61,6 +67,7 @@ public class ObserveParam : MonoBehaviour
 
     private void OnXYZValueChanged(Vector3 value)
     {
+        if (directionLogReady) directionLog.OnValueChanged(value);
         if (ShowTarget && ModelCollisionHighlighter.selectedObject != null)
         {
             UpdateTargetPosition();
@@ -120,8 +127,17 @@ public class ObserveParam : MonoBehaviour
     }
 
     // Update is called once per frame
+    private void OnDisable() { directionLog.Flush(); }
+    private void OnDestroy()
+    {
+        directionLog.Flush();
+        if (XYZPanel != null) XYZPanel.OnValueChanged -= OnXYZValueChanged;
+        if (Instance == this) Instance = null;
+    }
+
     void Update()
     {
+        directionLog.FlushIfIdle();
         if (ShowTarget && ModelCollisionHighlighter.selectedObject != lastSelectedObject)
         {
             lastSelectedObject = ModelCollisionHighlighter.selectedObject;

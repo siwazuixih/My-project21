@@ -102,7 +102,7 @@ class MotionDiagnosticsTests(unittest.TestCase):
         node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == 'run_unity_command')
         cycle = Mock()
         cycle.snapshot.return_value = {}
-        namespace = dict(state='IDLE', command_queue=Mock(empty=Mock(return_value=True)), contact_cycle=cycle,
+        namespace = dict(SIMULATION_ONLY=False, state='IDLE', command_queue=Mock(empty=Mock(return_value=True)), contact_cycle=cycle,
                          unity_status=lambda ok=True, message='': {'ok': ok, 'message': message})
         exec(compile(ast.Module(body=[node], type_ignores=[]), '<dispatcher>', 'exec'), namespace)
         self.assertTrue(namespace['run_unity_command']('robot_insert')['ok'])

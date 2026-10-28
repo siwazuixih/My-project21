@@ -48,6 +48,8 @@ public class MissionController : MonoBehaviour
     [Tooltip("升降缸执行器在 MujocoStaticIKSolver 的 Actuators 列表中的索引编号（通常看你 Inspector 面板里怎么排的）")]
     public int liftActuatorIndex = 6;
     private double[] initialQpos;
+    public string HistoryRecordId { get; set; }
+    private bool historyStepFailed;
 
     void Awake()
     {
@@ -106,6 +108,7 @@ public class MissionController : MonoBehaviour
             else
             {
                 Debug.LogError("⚠️ [预计算] 存在严重路径或IK问题，任务已停止，不会执行不完整的缓存路径。");
+                if (RunRecorder.IsCurrent(HistoryRecordId)) RunRecorder.FinishRun(RunRecordResult.Failed, "路径或IK预计算失败", HistoryRecordId);
                 currentState = MissionState.Idle;
                 return;
             }
@@ -146,6 +149,13 @@ public class MissionController : MonoBehaviour
 
     public void OnArmTaskFinished()
     {
+        if (RunRecorder.IsCurrent(HistoryRecordId))
+        {
+            string name = mission.targets != null && currentMissionIndex < mission.targets.Count && mission.targets[currentMissionIndex] != null
+                ? mission.targets[currentMissionIndex].name : refs.targetObject != null ? refs.targetObject.name : "目标";
+            RunRecorder.RecordStep(name, historyStepFailed ? "仿真IK失败" : "仿真轨迹执行结束（非实物拧紧）", HistoryRecordId);
+        }
+        historyStepFailed = false;
         if (mission.targets != null && mission.targets.Count > 0) {
             currentMissionIndex++;
             if (currentMissionIndex >= mission.targets.Count) {
@@ -153,6 +163,7 @@ public class MissionController : MonoBehaviour
                 else {
                     Debug.Log("🎉🎉🎉 所有任务完成！");
                     currentState = MissionState.Finished;
+                    if (RunRecorder.IsCurrent(HistoryRecordId)) RunRecorder.FinishRun(RunRecordResult.Success, "仿真所有目标轨迹执行结束", HistoryRecordId);
                     return;
                 }
             }
@@ -173,6 +184,12 @@ public class MissionController : MonoBehaviour
         } else {
             StartCoroutine(WaitAndMove(mission.intervalBetweenTasks));
         }
+    }
+
+    public void RecordArmPlanningFailure(string reason)
+    {
+        historyStepFailed = true;
+        if (RunRecorder.IsCurrent(HistoryRecordId)) RunRecorder.MarkFailure(reason, false, HistoryRecordId);
     }
 
     IEnumerator WaitAndMove(float delay)
@@ -550,10 +567,12 @@ public class MissionController : MonoBehaviour
 
     public unsafe void ResetMission()
     {
+        historyStepFailed = false;
         Debug.Log("♻️ 正在执行完整系统重置...");
         StopAllCoroutines();
         chassisCtrl.StopMovement(); 
         armCtrl.StopAndResetControls(); 
+        if (RunRecorder.IsCurrent(HistoryRecordId)) RunRecorder.FinishRun(RunRecordResult.EmergencyStop, "仿真停止/重置", HistoryRecordId);
         if (connect.Commander != null)
         {
             connect.Commander.CancelFullProcessValidation();

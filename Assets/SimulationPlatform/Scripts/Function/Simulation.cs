@@ -10,7 +10,7 @@ using System.IO;
 using System.Threading.Tasks;
 using Unity.AI.Navigation;
 
-public class Simulation : ModelImport
+public partial class Simulation : ModelImport
 {
     public JointReplace JointReplace;
 
@@ -60,11 +60,31 @@ public class Simulation : ModelImport
     private bool stepRunBeforeFullProcess;
     private Toggle fullProcessValidationToggle;
     private GameObject fullProcessValidationRow;
+    private Selectable[] fieldLockedControls;
+    private bool[] fieldPreviousInteractable;
+
+    public void SetRealRunInputsLocked(bool locked)
+    {
+        if (locked)
+        {
+            if (fieldLockedControls != null) return;
+            fieldLockedControls = new Selectable[] { StepRunToggle, SpeedSlider, RobotIpInput, ChassisIpInput, fullProcessValidationToggle, SyncToggle };
+            fieldPreviousInteractable = new bool[fieldLockedControls.Length];
+            for (int i = 0; i < fieldLockedControls.Length; i++)
+                if (fieldLockedControls[i] != null)
+                { fieldPreviousInteractable[i] = fieldLockedControls[i].interactable; fieldLockedControls[i].interactable = false; }
+        }
+        else if (fieldLockedControls != null)
+        {
+            for (int i = 0; i < fieldLockedControls.Length; i++)
+                if (fieldLockedControls[i] != null) fieldLockedControls[i].interactable = fieldPreviousInteractable[i];
+            fieldLockedControls = null; fieldPreviousInteractable = null;
+        }
+    }
 
     // 当前运行模式状态
     private bool m_isSimulationMode = true;
 
-    private int runIndex = 0;
 
     private Vector3? loadedSceneXYZ;
     private Vector3? loadedSceneRotation;
@@ -79,6 +99,9 @@ public class Simulation : ModelImport
     {
         if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked)
         { Debug.LogWarning("现场联调占用中，请在现场面板停止/确认后操作"); return; }
+        FlushAuditLogs();
+        OperationLogTool.RecordLog(fullProcessValidationEnabled ? OperationType.仿真操作 : OperationType.真实运行,
+            fullProcessValidationEnabled ? "请求开始全流程离线验证（无真实运动）" : $"请求开始运行 - {(StepRun ? "单目标半自动" : "逐目标半自动")}");
         if (fullProcessValidationEnabled)
         {
             Debug.Log("开始全流程离线验证（模拟视觉精调与模拟拧紧）");
@@ -97,27 +120,12 @@ public class Simulation : ModelImport
             return;
         }
 
-        Debug.Log($"开始运行，{(StepRun ? "单步运行" : "连续运行")}");
-        if (Notice != null)
-        {
-            Notice.SetActive(true);
-        }
-        if (StepRun)
-        {
-            if (ConnectCommander != null)
-            {
-                ConnectCommander.DispatchTask(runIndex);
-                runIndex += 1;
-            }
-        }
-        else
-        {
-            if (ConnectCommander != null)
-            {
-                ConnectCommander.DispatchNextTargetSequence();
-            }
-
-        }
+        if (m_isSimulationMode)
+        { Debug.LogWarning("实物半自动流程须切换到真实运行界面；离线请勾选全流程验证（模拟）"); return; }
+        var panel = GetComponent<FieldCommissioningPanel>();
+        if (panel == null) { Debug.LogError("半自动执行组件未就绪"); return; }
+        if (Notice != null) Notice.SetActive(false); // 真实许可改由现场参数面板的显式确认守卫。
+        _ = panel.StartSemiAutomaticAsync(StepRun);
     }
 
     private void Awake()
@@ -136,7 +144,6 @@ public class Simulation : ModelImport
     // Start is called before the first frame update
     void Start()
     {
-        runIndex = 0;
         if (robotConnection != null)
         {
             robotConnection.Msg = "未连接";
@@ -190,6 +197,7 @@ public class Simulation : ModelImport
         }
         // 加载项目参数
         LoadProjectParams();
+        InitializeAuditLogging();
         // 订阅 DobotController 事件
         SubscribeToDobotEvents();
         // 订阅 RobokitController 事件
@@ -281,6 +289,8 @@ public class Simulation : ModelImport
 
     private void HandleConnectionChanged(DobotEventArgs e)
     {
+        OperationLogTool.RecordLog(OperationType.真实运行,
+            $"连接状态更新 - {e.PortType}：{(e.IsConnected ? "已连接" : "未连接")}；{e.Message}");
         Debug.Log($"连接状态变化: Port={e.PortType}, Connected={e.IsConnected}, Message={e.Message}");
 
         if (e.PortType == "Dashboard")
@@ -322,6 +332,7 @@ public class Simulation : ModelImport
 
     private void HandleErrorOccurred(DobotEventArgs e)
     {
+        OperationLogTool.RecordLog(OperationType.真实运行, $"设备错误 - {e.Context}：{e.ErrorMessage}");
         Debug.LogError($"错误: Context={e.Context}, Error={e.ErrorMessage}");
         MessageManage.ShowMessage($"错误: {e.ErrorMessage}", 2);
     }
@@ -338,6 +349,7 @@ public class Simulation : ModelImport
 
     private void OnDestroy()
     {
+        DisposeAuditLogging();
         if (PathPlanButton != null)
         {
             PathPlanButton.onClick.RemoveListener(OnPathPlanClicked);
@@ -788,6 +800,9 @@ public class Simulation : ModelImport
         { FieldCommissioningPanel.Active.RequestStop(); Debug.LogWarning("停止确认前请勿离开实物联调页面"); return; }
         if (RunManager.RunStatus == RunStatus.IDLE || RunManager.RunStatus == RunStatus.INTERRUPT)
         {
+            FlushAuditLogs();
+            RunRecorder.FinishRun();
+            OperationLogTool.RecordLog(OperationType.仿真操作, "退出任务配置与执行界面");
             SaveProjectParams();
             ModelCollisionHighlighter.SeletectedObjects.Clear();
             if (ColliderGen != null)
@@ -796,7 +811,6 @@ public class Simulation : ModelImport
                 ColliderGen.hollowParts.Clear();
             }
             MissionController.ResetMission();
-            runIndex = 0;
             SceneManager.LoadScene("MainScene");
         }
     }
@@ -1332,7 +1346,7 @@ public class Simulation : ModelImport
     // Update is called once per frame
     void Update()
     {
-
+        TickAuditLogging();
     }
     private void OnPathPlanClicked()
     {
@@ -1360,6 +1374,17 @@ public class Simulation : ModelImport
 
         if (MissionController != null)
         {
+            if (ModelCollisionHighlighter.SeletectedObjects.Count > 0 &&
+                (MissionController.currentState == RobotLogic.MissionState.Idle ||
+                 MissionController.currentState == RobotLogic.MissionState.WaitingToStartPath ||
+                 MissionController.currentState == RobotLogic.MissionState.WaitingForNextTarget ||
+                 MissionController.currentState == RobotLogic.MissionState.WaitingForInput))
+            {
+                FlushAuditLogs();
+                MissionController.HistoryRecordId = RunHistoryCapture.Begin(RunType.SIMULATION, "仿真", false,
+                    ModelCollisionHighlighter.SeletectedObjects.Count, true);
+                OperationLogTool.RecordLog(OperationType.仿真操作, $"开始/继续仿真 - 目标{ModelCollisionHighlighter.SeletectedObjects.Count}个");
+            }
             float? chassisSpeed = ObserveParam.Instance.BaseSpeedValue;
             float? armSpeed = ObserveParam.Instance.ArmSpeedValue;
             float? distance = ObserveParam.Instance.ObservationDistanceValue;
@@ -1374,6 +1399,8 @@ public class Simulation : ModelImport
     {
         if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked)
         { FieldCommissioningPanel.Active.RequestStop(); return; }
+        FlushAuditLogs();
+        OperationLogTool.RecordLog(OperationType.仿真操作, "请求停止/复位仿真与离线验证（非硬件急停）");
         if (ConnectCommander != null)
         {
             ConnectCommander.CancelFullProcessValidation();
@@ -1458,6 +1485,7 @@ public class Simulation : ModelImport
 
     private void OnRobotXYZValueChanged(Vector3 value)
     {
+        if (auditReady) robotPositionLog.OnValueChanged(value);
         if (ModelMouseController != null)
         {
             ModelMouseController.Move(value.x, value.y, value.z);
@@ -1466,6 +1494,7 @@ public class Simulation : ModelImport
 
     private void OnRobotRotationValueChanged(Vector3 value)
     {
+        if (auditReady) robotRotationLog.OnValueChanged(value);
         if (MissionController != null && MissionController.chassis.actuatorRot != null)
         {
             MissionController.chassis.actuatorRot.Control = -value.y * Mathf.Deg2Rad;
@@ -1474,6 +1503,7 @@ public class Simulation : ModelImport
 
     private void OnSceneXYZValueChanged(Vector3 value)
     {
+        if (auditReady) scenePositionLog.OnValueChanged(value);
         if (currentModel != null)
         {
             currentModel.transform.position = value;
@@ -1482,6 +1512,7 @@ public class Simulation : ModelImport
 
     private void OnSceneRotationValueChanged(Vector3 value)
     {
+        if (auditReady) sceneRotationLog.OnValueChanged(value);
         if (currentModel != null)
         {
             currentModel.transform.rotation = Quaternion.Euler(value);
@@ -1511,6 +1542,10 @@ public class Simulation : ModelImport
     /// </summary>
     private void OnSimBtnClicked()
     {
+        if (ConnectCommander != null && ConnectCommander.OfflineValidationActive)
+        { Debug.LogWarning("离线流程运行中，请先停止再切换界面"); return; }
+        if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked)
+        { Debug.LogWarning("实物流程占用中，请先停止并确认，再切换仿真模式"); return; }
         if (!m_isSimulationMode)
         {
             m_isSimulationMode = true;
@@ -1536,6 +1571,16 @@ public class Simulation : ModelImport
     /// <param name="isSimulationMode">是否为 Simulation 模式</param>
     private void UpdateModeUI(bool isSimulationMode)
     {
+        if (StepRunToggle != null)
+        {
+            // RunScene 的标签挂在 ToggleTarget 的父 StepRun，而不是 Toggle 的子节点。
+            var labelRoot = StepRunToggle.transform.parent;
+            if (labelRoot == null || labelRoot.name != "StepRun") labelRoot = StepRunToggle.transform;
+            foreach (var label in labelRoot.GetComponentsInChildren<TMP_Text>(true))
+                if (label.text == "单步运行" || label.text == "单目标") label.text = isSimulationMode ? "单步运行" : "单目标";
+            foreach (var label in labelRoot.GetComponentsInChildren<Text>(true))
+                if (label.text == "单步运行" || label.text == "单目标") label.text = isSimulationMode ? "单步运行" : "单目标";
+        }
         if (isSimulationMode)
         {
             // Simulation 模式：SimBtn 显示选中状态，RealBtn 显示未选中状态
@@ -1568,7 +1613,6 @@ public class Simulation : ModelImport
         else
         {
             // Realtime 模式：SimBtn 显示未选中状态，RealBtn 显示选中状态
-            runIndex = 0;
             if (SimBtn != null && SimUnselected != null)
             {
                 SimBtn.image.sprite = SimUnselected;

@@ -136,6 +136,8 @@ public class JointReplace : MonoBehaviour
             GameObject oldObject = ModelCollisionHighlighter.selectedObject.gameObject;
 
             SaveReplaceRecord(oldObject, selectedJoint, position, rotation);
+            OperationLogTool.RecordLog(OperationType.仿真操作,
+                $"替换接头 - 原物体：{oldObjectName} → 新接头：{selectedJoint.Name}");
 
             if (Simulation != null)
             {

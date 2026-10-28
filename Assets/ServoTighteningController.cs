@@ -60,6 +60,10 @@ public sealed class ServoTighteningController : MonoBehaviour
 
     private Process programProcess;
     public bool FieldWorkflowOwned { get; set; }
+    public ConnectCommander OfflineWorkflowOwner { get; set; }
+    private bool OfflineWorkflowActive => OfflineWorkflowOwner != null && OfflineWorkflowOwner.OfflineValidationActive;
+    public bool SimulationOnlyService { get; private set; }
+    public bool OwnsSimulationProgram => ownsProgramProcess && SimulationOnlyService;
     private readonly System.Collections.Concurrent.ConcurrentQueue<string> pythonTraceLines =
         new System.Collections.Concurrent.ConcurrentQueue<string>();
     private bool ownsProgramProcess;
@@ -104,6 +108,7 @@ public sealed class ServoTighteningController : MonoBehaviour
         public bool ok;
         public string message;
         public bool tool_connected;
+        public bool simulation_only;
         public string state;
         public string csv;
         public string png;
@@ -163,6 +168,7 @@ public sealed class ServoTighteningController : MonoBehaviour
         for (int i = 0; i < 20 && pythonTraceLines.TryDequeue(out string traceLine); i++)
             UnityEngine.Debug.Log(traceLine);
         UpdateButtonVisibility();
+        UpdateButtonState();
         if (
             !string.IsNullOrEmpty(pendingMotionCommand)
             && Time.unscaledTime >= motionConfirmationExpiresAt
@@ -862,7 +868,7 @@ public sealed class ServoTighteningController : MonoBehaviour
             return;
         }
 
-        bool realUiVisible = statusRealObject.activeInHierarchy;
+        bool realUiVisible = statusRealObject.activeInHierarchy || OfflineWorkflowActive;
         if (toggleButton.gameObject.activeSelf != realUiVisible)
         {
             toggleButton.gameObject.SetActive(realUiVisible);
@@ -905,6 +911,11 @@ public sealed class ServoTighteningController : MonoBehaviour
 
     public async void ToggleProgram()
     {
+        if (OfflineWorkflowActive) { OfflineWorkflowOwner.ContinueOfflineValidation(); return; }
+        if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.WaitingForChassisConfirmation)
+        { FieldCommissioningPanel.Active.ConfirmLegacyChassis(); return; }
+        if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.SemiAutomaticActive)
+        { FieldCommissioningPanel.Active.ContinueSemiAutomatic(); return; }
         if (FieldWorkflowOwned) { UnityEngine.Debug.LogWarning("实物流程占用服务，请先停止流程"); return; }
         if (lifecycleRunning)
         {
@@ -913,15 +924,20 @@ public sealed class ServoTighteningController : MonoBehaviour
 
         if (IsProgramActive() || ProgramReady)
         {
+            OperationLogTool.RecordLog(OperationType.真实运行, "请求关闭拧紧程序");
             await StopProgramAsync();
         }
         else
         {
+            OperationLogTool.RecordLog(OperationType.真实运行, "请求启动拧紧程序");
             await StartProgramAsync();
         }
     }
 
-    public async Task<CommandResult> StartProgramAsync()
+    public Task<CommandResult> StartProgramAsync() => StartProgramCoreAsync(false);
+    public Task<CommandResult> StartSimulationProgramAsync() => StartProgramCoreAsync(true);
+
+    private async Task<CommandResult> StartProgramCoreAsync(bool simulationOnly)
     {
         if (lifecycleRunning)
         {
@@ -937,8 +953,14 @@ public sealed class ServoTighteningController : MonoBehaviour
             CommandResult existing = await SendCommandInternalAsync("status");
             if (existing.Success)
             {
-                ownsProgramProcess = false;
+                var info = JsonUtility.FromJson<BridgeStatus>(existing.RawResponse);
+                if (info == null || info.simulation_only != simulationOnly)
+                    return ReportFailure("现有拧紧服务的实物/隔离模拟模式不匹配，请先关闭旧服务后再启动所需模式");
+                if (info.cycle_active || info.state == "RUN_FORWARD" || info.state == "RUN_REVERSE")
+                    return ReportFailure("现有拧紧程序正在运行，不能接管");
+                if (programProcess == null || HasOwnedProcessExited()) ownsProgramProcess = false;
                 ProgramReady = true;
+                SimulationOnlyService = simulationOnly;
                 ApplyBridgeStatus(existing.RawResponse);
                 StartStatusPolling();
                 StartCurvePolling();
@@ -979,6 +1001,7 @@ public sealed class ServoTighteningController : MonoBehaviour
             startInfo.EnvironmentVariables["SERVO_BRIDGE_PORT"] =
                 bridgePort.ToString();
             startInfo.EnvironmentVariables["SERVO_UNITY_EMBEDDED_MODE"] = "1";
+            startInfo.EnvironmentVariables["SERVO_SIMULATION_ONLY"] = simulationOnly ? "1" : "0";
             startInfo.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
             startInfo.EnvironmentVariables["UNITY_ROBOT_HOST"] = "127.0.0.1";
             var robotGateway = FindObjectOfType<DobotController>();
@@ -1002,6 +1025,7 @@ public sealed class ServoTighteningController : MonoBehaviour
 
             programProcess = Process.Start(startInfo);
             ownsProgramProcess = programProcess != null;
+            SimulationOnlyService = simulationOnly;
             if (programProcess == null)
             {
                 return ReportFailure("Python 进程启动失败");
@@ -1036,6 +1060,9 @@ public sealed class ServoTighteningController : MonoBehaviour
                     continue;
                 }
 
+                var info = JsonUtility.FromJson<BridgeStatus>(status.RawResponse);
+                if (info == null || info.simulation_only != simulationOnly)
+                    return ReportFailure("启动回执模式不一致，拒绝混用实物与模拟服务");
                 ProgramReady = true;
                 ApplyBridgeStatus(status.RawResponse);
                 StartStatusPolling();
@@ -1093,6 +1120,7 @@ public sealed class ServoTighteningController : MonoBehaviour
         var query = await QueryStatusAsync();
         if (!query.Success) throw new IOException(query.Error);
         var service = JsonUtility.FromJson<BridgeStatus>(query.RawResponse);
+        if (service.simulation_only) throw new IOException("当前是隔离模拟服务，请先关闭后再启动实物服务");
         if (service.contact_api_version != 2 || service.tool_ip != settings.toolIp || service.tool_port != settings.toolPort)
             throw new IOException("现有Python服务版本或电批地址不匹配，请先停止旧服务后重试");
         if (!service.motion_diagnostics_supported || !service.robot_only_supported)
@@ -1221,16 +1249,19 @@ public sealed class ServoTighteningController : MonoBehaviour
 
     private async void HandleForwardButton()
     {
+        OperationLogTool.RecordLog(OperationType.真实运行, "请求开始拧紧（仍须原运动许可/确认）");
         await ConfirmAndSendMotionAsync("forward");
     }
 
     private async void HandleReverseButton()
     {
+        OperationLogTool.RecordLog(OperationType.真实运行, "请求电批反转回位（仍须原运动许可/确认）");
         await ConfirmAndSendMotionAsync("reverse");
     }
 
     private async void HandleStopButton()
     {
+        if (OfflineWorkflowActive) { OfflineWorkflowOwner.CancelFullProcessValidation(); return; }
         if (FieldWorkflowOwned) { FieldCommissioningPanel.Active?.RequestStop(); return; }
         if (!ProgramReady || stopCommandRunning)
         {
@@ -1244,6 +1275,7 @@ public sealed class ServoTighteningController : MonoBehaviour
         try
         {
             await StopToolAsync();
+            OperationLogTool.RecordLog(OperationType.真实运行, "立即停止电批请求已处理（非硬件急停）");
         }
         finally
         {
@@ -1254,6 +1286,7 @@ public sealed class ServoTighteningController : MonoBehaviour
 
     private async Task ConfirmAndSendMotionAsync(string command)
     {
+        if (OfflineWorkflowActive || SimulationOnlyService) { UnityEngine.Debug.LogWarning("隔离模拟期间禁止手动实物指令"); return; }
         if (FieldWorkflowOwned) { UnityEngine.Debug.LogWarning("实物流程占用电批，禁止额外手动启动"); return; }
         if (!ProgramReady || motionCommandRunning)
         {
@@ -1401,6 +1434,7 @@ public sealed class ServoTighteningController : MonoBehaviour
             programProcess = null;
             ownsProgramProcess = false;
             ProgramReady = false;
+            SimulationOnlyService = false;
             ToolConnected = false;
             ToolState = "STOPPED";
             LastResponse = "拧紧程序已关闭";
@@ -1534,6 +1568,7 @@ public sealed class ServoTighteningController : MonoBehaviour
             }
 
             ToolConnected = status.tool_connected;
+            SimulationOnlyService = status.simulation_only;
             if (!string.IsNullOrEmpty(status.state))
             {
                 ToolState = status.state;
@@ -1629,14 +1664,18 @@ public sealed class ServoTighteningController : MonoBehaviour
 
     private void UpdateButtonState()
     {
+        bool offline = OfflineWorkflowActive;
+        bool chassisWaiting = !offline && FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.WaitingForChassisConfirmation;
+        bool semi = offline || chassisWaiting || (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.SemiAutomaticActive);
+        bool waiting = offline ? OfflineWorkflowOwner.OfflineWaitingForContinue : chassisWaiting || semi && FieldCommissioningPanel.Active.WaitingForContinue;
         if (toggleButton != null)
         {
-            toggleButton.interactable = !lifecycleRunning;
+            toggleButton.interactable = semi ? waiting && !lifecycleRunning : !FieldWorkflowOwned && !lifecycleRunning;
         }
 
         if (toggleButtonText != null)
         {
-            toggleButtonText.text = lifecycleRunning
+            toggleButtonText.text = semi ? (waiting ? (offline ? "继续（模拟）" : chassisWaiting ? "确认底盘" : "确认并拧紧") : "流程执行中") : lifecycleRunning
                 ? (IsProgramActive() ? "安全停止..." : "启动中...")
                 : (ProgramReady || IsProgramActive()
                     ? "关闭程序"
@@ -1645,7 +1684,7 @@ public sealed class ServoTighteningController : MonoBehaviour
 
         if (toggleButtonBackground != null)
         {
-            toggleButtonBackground.color = lifecycleRunning
+            toggleButtonBackground.color = semi ? (waiting ? warningColor : runningColor) : lifecycleRunning
                 ? warningColor
                 : (ProgramReady || IsProgramActive()
                     ? runningColor
@@ -1653,7 +1692,7 @@ public sealed class ServoTighteningController : MonoBehaviour
         }
 
         bool controlsReady = ProgramReady && !lifecycleRunning;
-        bool motionReady = controlsReady && ToolConnected;
+        bool motionReady = controlsReady && ToolConnected && !FieldWorkflowOwned && !offline && !SimulationOnlyService;
         if (forwardButton != null)
         {
             forwardButton.interactable =
@@ -1667,7 +1706,7 @@ public sealed class ServoTighteningController : MonoBehaviour
         if (stopButton != null)
         {
             stopButton.interactable =
-                controlsReady && !stopCommandRunning;
+                (offline || FieldWorkflowOwned || controlsReady) && !stopCommandRunning;
         }
 
         if (forwardButtonText != null)

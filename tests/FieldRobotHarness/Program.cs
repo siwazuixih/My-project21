@@ -43,6 +43,8 @@ public partial class DobotController : IDisposable
     public bool Arrive = true, Feed = true, WrongId, EchoMismatch, SensorOnline = true;
     public bool HoldFrame, HoldServo, EmptyFrameId;
     public bool Drift;
+    public bool DeferTrajectory;
+    public void OverrideMotionId(ulong id) { lock(feedbackLock) currentCommandId=id; }
     public double ServoFraction = 1;
     public bool RotateToolAxis;
     public void SetNoisySpeed() { lock(feedbackLock) protocolJointSpeeds[0]=0.067851; }
@@ -107,6 +109,7 @@ public partial class DobotController : IDisposable
     }
     public async Task AcquireContact()
     { await HandleRobotRequestAsync(algorithm, new RobotRequest { op="acquire", simulate=false }); }
+    public Task ReleaseContact() => HandleRobotRequestAsync(algorithm, new RobotRequest { op="release", token=ownerToken });
     public async Task SmallContactStep()
     { await HandleRobotRequestAsync(algorithm, new RobotRequest { op="move_relative", token=ownerToken, delta=new[]{0.0,0.1,0.0}, duration=0.05 }); }
     public async Task Open()
@@ -156,7 +159,7 @@ public partial class DobotController : IDisposable
                 else if (command.StartsWith("MovJ"))
                 {
                     data = (++id).ToString(CultureInfo.InvariantCulture);
-                    if (Arrive) lock (feedbackLock)
+                    if (Arrive && (!DeferTrajectory || command.EndsWith("cp=0)"))) lock (feedbackLock)
                     {
                         actualJoints = command.Split('{')[1].Split('}')[0].Split(',').Select(v => double.Parse(v, CultureInfo.InvariantCulture)).ToArray();
                         currentCommandId = WrongId ? id-1 : id;
@@ -221,6 +224,14 @@ class Program
     static FieldCommissioningSettings Settings() => new() { jointMinDeg=Enumerable.Repeat(-90f,6).ToArray(), jointMaxDeg=Enumerable.Repeat(90f,6).ToArray(), jointTimeoutSeconds=1 };
     static async Task Main()
     {
+        using (var history = new DobotController())
+        {
+            Check(!history.HistoryCollisionObserved, "history does not invent collision without feedback");
+            history.DiagnosticCase("collision");
+            Check(history.HistoryCollisionObserved, "history classifies fresh physical collision flag");
+            history.DiagnosticCase("age");
+            Check(!history.HistoryCollisionObserved, "history ignores stale collision flag");
+        }
         CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("de-DE");
         using (var parser = new DobotController())
         {
@@ -360,6 +371,82 @@ class Program
             await Reject(()=>{ r.PermitFieldContact(true); return Task.CompletedTask; },"slow feedback port blocks contact");
         }
         s.feedbackPort=30004;
+        // Only a loopback fake robot: intermediate feedback deliberately does not reach any sample.
+        var adapted=ArmTrajectorySampling.Build(new[]{new[]{Math.PI/3,0,0,0,0,0}},new double[6],0,5,"目标1/CoarseArm");
+        var adaptedPoints=adapted.Points.Select(q=>ArmTrajectorySampling.JointsDeg(q,0)).ToList();
+        var fastPacing=new ArmTrajectoryTiming(100000,0,10,0,0);
+        using(var r=new DobotController { DeferTrajectory=true })
+        {
+            await r.Open(); r.BeginFieldWorkflow(s);
+            await r.ExecuteFieldTrajectoryAsync(adaptedPoints,new double[6],s,fastPacing,CancellationToken.None,
+                adapted.SendIntervals(fastPacing),"目标1/CoarseArm");
+            var commands=r.Commands.Where(x=>x.StartsWith("MovJ")).ToArray();
+            Check(commands.Length==12,"adapted planned edge dispatches all twelve samples");
+            Check(commands.Take(11).All(x=>x.Contains("cp=50")) && commands.Last().Contains("cp=0"),"adapted path keeps continuous intermediate CP and exact endpoint boundary");
+            Check(!r.Commands.Contains("Stop()"),"resampling adds no individual Stop or waypoint arrival wait");
+            Check(Math.Abs(r.RequireFieldTrajectoryHold()[0]-60)<1e-5,"adapted path still confirms fresh actual final joint angle");
+        }
+        foreach(string failure in new[]{"NaN","count","no final arrival"})
+        {
+            using var r=new DobotController {DeferTrajectory=true}; await r.Open(); r.BeginFieldWorkflow(s);
+            var intervals=adapted.SendIntervals(fastPacing);
+            if(failure=="NaN") intervals[1]=double.NaN;
+            if(failure=="count") intervals.RemoveAt(0);
+            if(failure=="no final arrival") r.Arrive=false;
+            await Reject(()=>r.ExecuteFieldTrajectoryAsync(adaptedPoints,new double[6],s,fastPacing,CancellationToken.None,intervals),"adapted path rejects "+failure);
+            if(failure!="no final arrival") Check(!r.Commands.Any(x=>x.StartsWith("MovJ")),"bad sampled schedule sends zero motion commands");
+        }
+        var pacing = new ArmTrajectoryTiming(5,0,10,.02,0);
+        var path = new List<double[]> { new[]{.5,0,0,0,0,0}, new[]{1.0,0,0,0,0,0}, new[]{1.5,0,0,0,0,0} };
+        using(var r=new DobotController { DeferTrajectory=true })
+        {
+            await r.Open(); r.BeginFieldWorkflow(s);
+            await r.ExecuteFieldTrajectoryAsync(path,new double[6],s,pacing,CancellationToken.None);
+            var moves=r.Commands.Where(x=>x.StartsWith("MovJ")).ToArray();
+            Check(moves.Length==3 && moves[0].Contains("cp=50") && moves[1].Contains("cp=50") && moves[2].Contains("cp=0"),"continuous intermediate commands and exact final boundary");
+            Check(!r.Commands.Contains("Stop()"),"continuous trajectory adds no per-point Stop");
+            Check(Math.Abs(r.RequireFieldTrajectoryHold()[0]-1.5)<.00001,"only final command fresh actual arrival confirms hold");
+            r.PermitFieldContact(true); await r.AcquireContact(); await r.SmallContactStep();
+            await r.ReleaseContact(); r.PermitFieldContact(false);
+            await r.ExecuteFieldTrajectoryAsync(new List<double[]> {new[]{1.0,0,0,0,0,0},new[]{.5,0,0,0,0,0},new double[6]},path.Last(),s,pacing,CancellationToken.None);
+            Check(Math.Abs(r.RequireFieldTrajectoryHold()[0])<.00001,"contact lease release hands back to confirmed continuous return");
+            r.Feed=false; await Task.Delay(300);
+            await Reject(()=>{r.RequireFieldTrajectoryHold();return Task.CompletedTask;},"stale feedback revokes manual continue");
+        }
+        using(var r=new DobotController { DeferTrajectory=true })
+        {
+            await r.Open(); r.BeginFieldWorkflow(s);
+            var many=Enumerable.Range(1,20).Select(i=>new[]{i*.01,0,0,0,0,0}).ToList();
+            await Reject(()=>r.ExecuteFieldTrajectoryAsync(many,new double[6],s,new ArmTrajectoryTiming(5,0,0,0,0),CancellationToken.None),"stalled queue does not accept unlimited points");
+            Check(r.Commands.Count(x=>x.StartsWith("MovJ"))==16,"outstanding trajectory window capped at 16");
+        }
+        foreach(string scenario in new[]{"no arrival","wrong ID","echo mismatch","cancel","wrong start","unsafe path"})
+        {
+            using var r=new DobotController(); await r.Open(); r.BeginFieldWorkflow(s);
+            if(scenario=="no arrival") r.Arrive=false;
+            if(scenario=="wrong ID") r.WrongId=true;
+            if(scenario=="echo mismatch") r.EchoMismatch=true;
+            using var cancelled=new CancellationTokenSource(); if(scenario=="cancel") cancelled.CancelAfter(50);
+            var selected=scenario=="unsafe path" ? new List<double[]> {new[]{7.0,0,0,0,0,0}} : path;
+            await Reject(()=>r.ExecuteFieldTrajectoryAsync(selected,scenario=="wrong start" ? new[]{1.0,0,0,0,0,0} : new double[6],s,pacing,cancelled.Token),"trajectory "+scenario+" rejected");
+            if(scenario=="wrong start" || scenario=="unsafe path") Check(!r.Commands.Any(x=>x.StartsWith("MovJ")),"invalid path/start sends no movement");
+            if(scenario=="cancel") Check(r.Commands.Count(x=>x.StartsWith("MovJ"))<3,"cancel stops further trajectory dispatch");
+        }
+        using(var r=new DobotController())
+        {
+            await r.Open(); r.BeginFieldWorkflow(s);
+            var moving=r.ExecuteFieldTrajectoryAsync(path,new double[6],s,new ArmTrajectoryTiming(5,0,0,.2,0),CancellationToken.None);
+            await Task.Delay(50); await r.StopFieldMotionAsync();
+            await Reject(()=>moving,"latched physical stop cancels ongoing paced dispatch");
+            Check(r.Commands.Count(x=>x.StartsWith("MovJ"))==1,"stop does not leave later trajectory points queued");
+        }
+        using(var r=new DobotController())
+        {
+            await r.Open(); r.BeginFieldWorkflow(s);
+            await r.ExecuteFieldTrajectoryAsync(path,new double[6],s,pacing,CancellationToken.None);
+            r.OverrideMotionId(999);
+            await Reject(()=>{r.RequireFieldTrajectoryHold(); return Task.CompletedTask;},"other command after arrival revokes manual permission");
+        }
         using (var r = new DobotController())
         {
             await r.Open(); r.BeginFieldWorkflow(s); r.PermitFieldContact(true);

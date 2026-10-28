@@ -18,12 +18,16 @@ public sealed class FieldCommissioningSettings
     public float robotSpeedPercent = 1, jointToleranceDeg = 0.2f, jointTimeoutSeconds = 90;
     // 默认不授予任何关节运动范围。现场依据实际型号/软限位填写六个轴范围后才能运动。
     public float[] jointMinDeg = new float[6], jointMaxDeg = new float[6];
+    // 对已规划路径自适应细分的角度步长，不限制整段粗定位的总转角。
     public float maxJointStepDeg = 5;
     public float insertionMm = 20, withdrawalMm = 20, contactSpeedMmS = 1.2f, contactStepMm = 2;
     public float contactStageTimeoutSeconds = 30, tightenTimeoutSeconds = 60;
     public float beforeTightenSeconds = 5, beforeExitSeconds = 5;
     public float forceLimitN = 30, momentLimitNm = 10, lateralLimitN = 20;
     public float chassisTimeoutSeconds = 120, chassisStartTimeoutSeconds = 10;
+    // 缺少新字段的旧JSON仍默认为false，即保留任务状态确认，不静默降级。
+    public bool useLegacyChassisTiming = false;
+    public ChassisLegacyTiming legacyChassisTiming = new ChassisLegacyTiming();
     public float chassisSpeedMS = 0.3f, chassisTurnRadS = 0.5f, liftSpeedMmS = 50;
     public float liftMinMm = 0, liftMaxMm = 0; // 无默认行程授权，包含升降任务时必须填写。
     public int firstTarget = 1;
@@ -59,6 +63,8 @@ public sealed class FieldCommissioningSettings
         Range(forceLimitN, 0.1f, 30, "力上限"); Range(momentLimitNm, 0.1f, 10, "力矩上限");
         Range(lateralLimitN, 0.1f, forceLimitN, "横向阈值");
         Range(chassisTimeoutSeconds, 1, 600, "底盘超时"); Range(chassisStartTimeoutSeconds, 1, 60, "底盘启动超时");
+        if (legacyChassisTiming == null) legacyChassisTiming = new ChassisLegacyTiming();
+        if (useLegacyChassisTiming) legacyChassisTiming.Validate();
         Range(chassisSpeedMS, 0.01f, 0.3f, "底盘速度"); Range(chassisTurnRadS, 0.01f, 0.5f, "底盘角速度");
         Range(liftSpeedMmS, 1, 50, "升降速度");
         Range(liftMinMm, -10000, 10000, "升降下限"); Range(liftMaxMm, -10000, 10000, "升降上限");

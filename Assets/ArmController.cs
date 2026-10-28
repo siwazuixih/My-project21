@@ -85,7 +85,7 @@ public class ArmController : MonoBehaviour
         debug_PlannerStatus = "Simple IK...";
         double[] finalQ = mgr.arm.enableLookAt ? mgr.refs.ikSolver.SolveIK(lockedArmTargetPos, lockedArmTargetRot) : mgr.refs.ikSolver.SolveIK(lockedArmTargetPos);
         if (finalQ != null) yield return StartCoroutine(ExecutePath(new List<double[]> { finalQ }, true)); 
-        else { Debug.LogError("IK 解算失败"); mgr.OnArmTaskFinished(); }
+        else { Debug.LogError("IK 解算失败"); mgr.RecordArmPlanningFailure("仿真IK解算失败"); mgr.OnArmTaskFinished(); }
     }
 
     IEnumerator ExecutePath(List<double[]> path, bool simpleLerp = false)

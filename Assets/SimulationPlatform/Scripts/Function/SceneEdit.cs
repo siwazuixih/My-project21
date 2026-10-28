@@ -194,6 +194,20 @@ public class SceneEdit : ModelImport
             {
                 Debug.Log("碰撞体生成并保存完成！");
                 MessageManage.ShowMessage("网格切割并保存完成，下次将自动加载", 1);
+
+                // 记录切割操作：生成结果数量
+                if (m_cachedColliderModel?.MjRoots != null)
+                {
+                    int rootCount = m_cachedColliderModel.MjRoots?.Count ?? 0;
+                    int totalMeshes = 0;
+                    foreach (var mjRoot in m_cachedColliderModel.MjRoots)
+                    {
+                        totalMeshes += mjRoot?.Meshes?.Count ?? 0;
+                    }
+                    OperationLogTool.RecordLog(
+                        OperationType.模型管理,
+                        $"切割场景模型碰撞网格 - 名称：{Scene.Name}，生成 {rootCount} 个 Root，共 {totalMeshes} 个网格");
+                }
             }
             else
             {
@@ -281,7 +295,14 @@ public class SceneEdit : ModelImport
     private void SaveSceneValues()
     {
         bool isNewScene = Scene == null;
-        
+
+        // 快照旧值，用于生成编辑前后的字段对比日志
+        string oldName = Scene?.Name ?? "";
+        string oldComment = Scene?.Comment ?? "";
+        string oldModelFileName = Scene?.Glb != null && !string.IsNullOrEmpty(Scene.Glb.FilePath)
+            ? Path.GetFileName(Scene.Glb.FilePath.Replace('\\', '/'))
+            : "";
+
         if (isNewScene)
         {
             Scene = new SceneModel();
@@ -379,11 +400,46 @@ public class SceneEdit : ModelImport
 
         if (isNewScene)
         {
-            OperationLogTool.RecordLog(OperationType.模型管理, $"添加场景模型 - 名称：{Scene.Name}");
+            string detail = $"添加场景模型 - 名称：{Scene.Name}";
+            if (!string.IsNullOrEmpty(Scene.Comment))
+            {
+                detail += $"，备注：{Scene.Comment}";
+            }
+            string fileInfo = OperationLogTool.FormatModelFileInfo(Scene.Glb?.FilePath);
+            if (!string.IsNullOrEmpty(fileInfo))
+            {
+                detail += $"，模型文件：{fileInfo}";
+            }
+            OperationLogTool.RecordLog(OperationType.模型管理, detail);
         }
         else
         {
-            OperationLogTool.RecordLog(OperationType.模型管理, $"编辑场景模型 - 名称：{Scene.Name}");
+            // 编辑：只记录实际变化的字段
+            List<string> changes = new List<string>();
+            if (!string.Equals(oldName, Scene.Name ?? "", StringComparison.Ordinal))
+            {
+                changes.Add($"名称：{(string.IsNullOrEmpty(oldName) ? "空" : oldName)}→{Scene.Name}");
+            }
+            if (!string.Equals(oldComment, Scene.Comment ?? "", StringComparison.Ordinal))
+            {
+                changes.Add($"备注：{(string.IsNullOrEmpty(oldComment) ? "空" : oldComment)}→{Scene.Comment}");
+            }
+            string newModelFileName = Scene.Glb != null && !string.IsNullOrEmpty(Scene.Glb.FilePath)
+                ? Path.GetFileName(Scene.Glb.FilePath.Replace('\\', '/'))
+                : "";
+            if (!string.Equals(oldModelFileName, newModelFileName, StringComparison.Ordinal))
+            {
+                string changedFileInfo = OperationLogTool.FormatModelFileInfo(Scene.Glb?.FilePath);
+                if (!string.IsNullOrEmpty(changedFileInfo))
+                {
+                    changes.Add($"模型文件：{changedFileInfo}");
+                }
+            }
+
+            string editDetail = changes.Count > 0
+                ? $"编辑场景模型 - {string.Join("，", changes)}"
+                : $"编辑场景模型 - 名称：{Scene.Name}";
+            OperationLogTool.RecordLog(OperationType.模型管理, editDetail);
         }
     }
 

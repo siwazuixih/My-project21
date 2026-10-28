@@ -1,5 +1,68 @@
 # Project Context
 
+### 2026-10-28 发布准备（仅教学与说明，未执行提交/构建/上传）
+
+- 只读GitHub核对发布分支及旧标签v1.12-test.20261014仍指向4f849ed；本地integration/wulaoshi-21.5-wlj保留未提交迁移/半自动/采样改动。本轮新增PUBLISH_2026-10-28.md操作教程及RELEASE_v1.12-test.20261028.md预发布说明，建议新标签v1.12-test.20261028，继续原release/software-v1.0，不创建新的远端integration分支、不移动旧标签。
+- 指导保存/提交integration→ff-only合入发布分支→完整Linux构建至TEST1028-v1.12-test→推送分支/标签→Release附完整tar.gz；源码push、Git标签、可执行包和Release是四种不同产物。Player内部版本仍1.9.0，本轮未改，不因标签自动升级。此前327项无硬件测试是10月15日记录，并非本轮复跑；现场待验收和未解决问题已如实列入说明。
+
+### 2026-10-15 稀疏机械臂路径采样适配已实施（源码，未打包/实机验收）
+
+- 新增ArmTrajectorySampling：compact路径保持原单位/轴顺序，用六转动轴的最大角差计算ceil(delta/maxJointStepDeg)，逐原线段线性细分，保留原拐点与精确端点，不折返角度、不重求IK。maxJointStepDeg通常保留5，仍可配置0.01～10，现在为预规划路径采样密度而非总转角门槛；现场单步微调原门槛不变。非有限数值/维度/索引错误拒绝，单任务最多100000采样点防爆量。
+- SnapshotFieldPlan仅修改冻结副本，同时适配粗定位、显式返程、自动逆向返程；返程声明须先与粗定位终点匹配，在既有容差内统一到实际计划端点后再采样，缺声明且首点不匹配拒绝补接。真实绝对限位、起点吻合、多目标复位、反馈/停止和段末到位保护保留。ExtractArmJoints改双精度rad→deg，避免float常数放大边界误差。执行器仍拒绝未经采样的大步跳变，错误含目标/阶段/点/轴/前后角及差值。
+- SendIntervals按原规划段计算估速/缓冲/最小最大等待一次，再按补点份额分摊，避免固定缓冲随补点倍增；ACK耗时计入，队列背压仍可延长。中间cp50、末点cp0、16条窗口及仅段末新反馈/命令ID/空闲/六轴误差稳定0.3秒不变，不逐点等待静止或Stop。不保证真实速度、CP平滑后的TCP轨迹或总耗时与旧包完全相同。
+- 离线全流程复用采样检查（默认5°，不依赖实物许可/软限位），动画仍沿原线段播放，不将每个补点重复计为0.25秒。FieldPanel解释maxJointStepDeg语义；正式半自动报告新增trajectory-plan.json，保存原始/采样六轴角度、来源点/份额与发送节流，build-info诊断标识sampled-trajectory-v2-2026-10-15。操作说明开头已更新；Editor预览补Unity JSON序列化断言但本轮未执行预览。
+- 回归101项FieldWorkflow（含51项采样）、105项假机械臂、22项原生产离线协程、21项假底盘、46项Python、25项历史、7项操作日志通过，共327通过，另1项长时跳过。独立main+Editor编译0错误47既有警告；socket仅127.0.0.1假服务，无设备连接。未改Python算法/工具标定、底盘协议、电缸超时规则、场景/版本号、来源工程、持久JSON或旧TEST包；未提交推送。用户需退出Play等待导入、重新生成任务并完整构建，核对真实限位/起点后监护单目标验收。
+
+### 2026-10-15 本机轨迹步长拦截已用具体数据复现（只诊断，未改运行代码）
+
+- 用户表示末端TCP问题已解决，本轮仅核对规划输出/角度转换/步长拦截。本机Editor.log最近一组目标1：q_start前六轴约[0,45,-90,-90,-90,0]°，q_goal约[48.7931,-32.9966,34.6410,-1.7361,-254.3646,-41.5681]°（原日志弧度四位小数，换算为近似值）；a0～a5明确为joint1～6，a6为升降joint10，不是完整qpos索引误取或TCP的XYZ。
+- BITStarPlanner.Plan直连成功只返回两个compact端点；AddArmTask只对path.Count==1插值，多点路径原样复制，故本机该粗定位任务相邻点1→2首个被拦的是J1约48.79°，最大J5约164.36°。离线ExecuteActuatorPlanRoutine逐帧插值只改Control，不把画面的中间帧写回任务轨迹，因此模拟可动与真实预检失败并不矛盾。固定10点的单解/显式返程分支也不保证每步≤5/10°。
+- /tmp临时诊断链接当前生产SnapshotSemiAutomaticPlan/Settings及现有Harness纯替身，用日志端点重放：±360绝对范围通过；5/10均准确复现相邻差错误，100先报参数上限；仅在临时内存把同一关节线段均分33段后通过5°预检。这个比较只证明点密度与保护策略不匹配，不证明真实MovJ/cp轨迹等同仿真或已安全验收，也不能把±360配置当实际软限位。未连接设备、改缓存/限位/节奏或取消保护。
+- 后续获准实施时应统一规划→执行的轨迹表示：沿已校验关节线段自适应采样，或将粗定位已规划段与微调步长策略分离；同步粗定位/返程/离线预检和详细点轴诊断，并检查发送节奏与平滑影响。不应把视觉微调的小步长直接当粗定位端点总角差上限。现场截图是否与此具体数值完全相同仍需现场计划导出。
+
+### 2026-10-15 testdata/1现场首因（不是步长拦截）
+
+- 新报告位于wulaoshi/testdata/1，两份均InsertOnly且maxJointStepDeg=10。074611首因是Tool(1)返回-1；用户Dobot V4.6.0 TCP PDF第21页明确此返回表示工具坐标索引不存在。10月8日同编号Tool(1)成功并有确认，需核对控制器工具坐标1的存在/保存/工程配置；不能改0或零标定绕过。当前未进入插入运动，motion.csv仅表头。
+- 074545服务ready后约81ms被关闭，随后配置Connection refused；UpdateButtonVisibility隐藏真实UI即关闭程序且不排除FieldWorkflowOwned是可疑路径，未有调用来源证明，尚未修代码。两新报告assemblyId相同，用户所述回退旧版失败报告未提供；共享控制器配置不会因软件回退还原。另见OperationLog LiteDB PAGE_SIZE错误，非Tool失败首因，未动数据库。
+
+### 2026-10-15 相邻步长校验的现场问题（待进一步改造，未放宽）
+
+- maxJointStepDeg默认5，Settings.Validate另硬编码范围0.01～10；FieldWorkflow规划预检与DobotController.Trajectory执行器再次比较同轴相邻角差。100触发参数范围错误，当前源码有限值10应通过参数范围校验；现场若10仍报范围错误，实际读取值/构建尚未核对，不应猜测具体点差。此阈值是应用防跳变策略，非厂家API限制。
+- 用户确认现场与本机同一组目标点位，但离线StartRun分流只回放，未走真实计划的相同步长预检，故不能以模拟可动推断该预检已通过，也不能认定选点有错。尚未掌握现场具体触发目标/点/轴及前后角度。用户在追问限制必要性，本轮仅诊断记录；调整限制需要明确方案/批准，保留真实轴范围、起点/坐标映射一致性、反馈/故障/停止及阶段末到位检查。
+
+### 2026-10-14 底盘新/旧完成判断开关（源码，未实机验收）
+
+- 现场联调/参数新增“底盘旧模式：定时等待”开关，保存在FieldCommissioningSettings.useLegacyChassisTiming；false默认状态模式，旧JSON缺字段仍false。legacyChassisTiming为可选嵌套配置，缺失补默认0.5秒通用缓冲/5秒旋转/5秒平移/0.2秒最小/0无配置上限；正上限不得截短预计时间，各段硬边界600秒。运行复制/冻结，切换撤销安全确认，执行/占用中不能切换，无自动降级。
+- ConnectCommander真实底盘路径共用几何、3055/3056方向，按模式选择ExecuteRelativeConfirmedAsync或ExecuteRelativeLegacyTimedAsync；旧路径核对应答和原估时，不查询1020，捕捉取消/断线/拒绝并请求停止。模式/速度/路径/等待复制，dispatchEvidence区分证据。现场旧模式整段底盘之后ManualTargetGate等待人工核对位置/朝向/停稳，底部程序按钮为“确认底盘”；不同于粗定位之后“确认并拧紧”，停止/重复/旧代次/反馈不符不放行。离线模拟不受影响。
+- 两种模式仍保留现有包/流水号/错误码校验，不退回fire-and-forget或忽略断线。旧模式只需导航连接端点，新模式仍要状态/导航端点；兼容IPv4-mapped IPv6表示。不能将旧模式等待/人工确认当作自动到位证据；3003应答不代表物理停止，切换/开始前需现场停稳确认。
+- 操作详见FIELD_COMMISSIONING_2026-09-16.md及CHASSIS_COMPLETION_2026-09-16.md开头。21项假底盘、50项FieldWorkflow、19项原离线/路径Harness和原机械臂/Python/日志回归通过。独立main+Editor编译通过，Unity批处理仍因项目占用未执行预览；GUI/真实底盘状态链路待验收，未改场景/版本号/旧TEST包或提交发布。
+
+### 2026-10-14 离线模拟同步人工关卡（当前源码，GUI待验收）
+
+- 全流程验证（模拟）现为粗定位动画→等待人工继续→小幅模拟视觉→auto_cycle_sim→模拟精调反向撤回→原返程→下一目标重新等待。只读/写MuJoCo模型控制量和本机模拟服务，不放行任何真实许可；动画结束不是实物到位确认。默认模拟偏移峰值J1 0.8°、J2 0.5°、第七轴2mm，支持原Inspector配置；每次运行复制模拟点与任务，不随重规划/编辑改变。
+- OfflineTargetSession复用ManualTargetGate并额外检查第七轴，代次/目标绑定、一次性继续、取消失效；等待期间模型姿态改变即失败。Servo原程序按钮在等待时显示“继续（模拟）”，未启动Python也能继续/停止；正反转禁用。FieldPanel显示轻量模拟状态/继续/停止，不展示实物许可大面板。异常统一收尾，启动过程中取消等待启动收尾再关闭本次进程；离开场景也取消并清理迟到启动。
+- StartSimulationProgramAsync显式设置SERVO_SIMULATION_ONLY=1，V26回报simulation_only；隔离模式不启动电批接收/实物命令/终端按键线程，发送底层也拒绝，命令白名单只准模拟周期/状态/配置/取消。拒绝复用实物服务；PrepareFieldService拒绝模拟服务。ContactCycle模拟取消不发无主的Gateway emergency_stop，真实停止行为不变；仍保留本机网关的带token模拟会话通信和算法原有流程，非纯计时假成功。
+- 回归：42项FieldWorkflow、12项直接提取生产离线协程的Harness、96项假机械臂、13项假底盘、46项Python、25项历史及7项操作日志通过，另1项长时跳过；真实V26隔离子进程+实际C#假Gateway完成SIMULATED_OK/取消并证明假电批零连接。独立main+Editor编译0错误；Editor预览和实际Play界面仍待人工验收，旧TEST包未更新。
+
+### 2026-10-14 真实运行半自动人工关卡（当前源码，未实机验收）
+
+- 已修复“单目标”父标签漏改：RunScene标签Text在父StepRun、Toggle在子ToggleTarget，UpdateModeUI现只向匹配StepRun的父层搜索，不扫描整个面板；真实页单目标、仿真页单步运行。Editor预览增加对应层级和无关文字不变的检查，仍需用户运行菜单验收。
+
+- Simulation.StartRun保留原离线验证分流；真实入口改走FieldCommissioningPanel的SemiSingle/SemiMultiple，同一占用会话粗定位→人工等待→完整接触→返程→下一目标，每点重新确认，无模拟J1/J2视觉。单步选项在真实页显示单目标，取消则从firstTarget逐目标；现场安全确认仍必须人工勾选，未确认只打开参数提示。
+- 离线模拟原来自动执行不暂停的问题已按本页开头同步人工关卡；真实入口仍是人工跳过视觉，不执行模拟偏移。两种模式只统一交互编排，不把模拟结果当作实机验收。
+- 原程序启停按钮在半自动会话期间复用为“确认并拧紧”，仅等待时可点；手动电批正反转互斥禁用，停止在服务未就绪时仍可用并路由总停止。模式切换不能隐藏正在占用的实物控制。ManualTargetGate以会话延续代次/目标绑定一次性许可，取消/重复/旧点击或姿态改变不能推进。
+- DobotController.Trajectory与ArmTrajectoryTiming新增独立段执行器：冻结原角差/估速/缓冲发送节奏，逐条ACK、中间cp50/末点cp0、有界16条待确认窗口；仅段末检查本次末条ID+新反馈+空闲+六轴误差持续0.3秒，段内不逐点Stop/停稳。轨迹起点须匹配实际关节，返程显式连接粗定位终点且须回原起点，接触后不匹配则失败不自动补偿。旧现场③④原节奏限制未解除，Python/网关协议未改。
+- 新报告trajectory-timing.json及semi-automatic-trajectory-v1-2026-10-14标识；历史明确人工跳过视觉与电缸沿用超时策略。底盘13项假服务状态完成回归通过，未找到完成链路实机验收证据；电缸虽读位置，读取失败返回0/超时仍继续的边界保留，不能泛称整机可靠到位。
+- 操作说明见FIELD_COMMISSIONING_2026-09-16.md开头。新增Editor只读预览菜单Semi automatic toolbar；Unity批处理因已有实例占用未执行，独立编译/无设备回归不替代GUI与现场验收。未改场景/版本号、现有TEST构建、Git标签或发布分支。
+
+### 2026-10-14 伍老师21.5.wlj日志/运行历史迁移
+
+- 集成前备份4f849ed/v1.12-test.20261014已在GitHub；当前开发分支integration/wulaoshi-21.5-wlj。迁移说明见WULAOSHI_21_5_WLJ_MIGRATION_2026-10-14.md，尚未发布迁移版本。
+- RunRecorder使用Data/Runs/RunRecords.db按项目保存运行历史；开始/步骤/收尾Upsert，runId隔离迟到回调，首因优先、参数深快照、空字段/IO异常兼容。OperationLogTool仍用Data/Operations/OperationLog.db；原枚举值保持，新分类仿真操作/真实运行为4/5。
+- 项目记录按钮调用RunHistoryPanel，按需创建TaskList/StepDetailPanel，复用Resources/Run/History两种wlj prefab和Run/Task图标，不改MainScene。历史50条分页、模式筛选/详情/返回，中文字体与窄屏滚动；未测力矩/角度显示未采集，非设备运动重放。
+- Simulation.History/PendingParamLog按0.6秒空闲或关键动作合并参数日志；MissionController/ConnectCommander.History/FieldCommissioningPanel接实际流程终态。离线全流程属仿真且标离线模拟；旧通讯下发只能记Dispatched，不能当实际到位；现场停止确认未通过不可记成功。DobotController.History只读新鲜实物collision标志作历史分类，不改变控制。
+- 核心Gateway/反馈/停止/测量、FieldWorkflow、底盘确认、碰撞/IK、场景和Python保持测试标签内容，未迁入SelectedObjects等无闭环结构。生产控制参数/端口/安全许可不因历史功能改变。GUI渲染/实物现场仍需人工验收。
+
 ### 2026-10-08 通信延迟独立小测试
 
 - ExternalCode/communication_latency_test.py有camera/robot子命令；当前相机Python直接采集/推理，Unity只显示预览，故camera模式不测试Unity图像转发。帧等待/对齐/拷贝和SDK主机可对应时间戳年龄估算分开，硬件时钟/负值/时钟跳变不伪称有效延迟。

@@ -5,8 +5,13 @@
     <Compile Include="../../Assets/DobotController.Feedback.cs" />
     <Compile Include="../../Assets/CommissioningJournal.cs" />
     <Compile Include="../../Assets/FieldCommissioningSettings.cs" Link="Settings.cs" />
+    <Compile Include="../../Assets/ChassisLegacyTiming.cs" />
     <Compile Include="../../Assets/DobotController.Commissioning.cs" Link="Commissioning.cs" />
     <Compile Include="../../Assets/DobotController.Gateway.cs" Link="Gateway.cs" />
     <Compile Include="../../Assets/DobotController.MotionDiagnostics.cs" />
+    <Compile Include="../../Assets/DobotController.History.cs" />
+    <Compile Include="../../Assets/DobotController.Trajectory.cs" />
+    <Compile Include="../../Assets/ArmTrajectoryTiming.cs" />
+    <Compile Include="../../Assets/ArmTrajectorySampling.cs" />
   </ItemGroup>
 </Project>

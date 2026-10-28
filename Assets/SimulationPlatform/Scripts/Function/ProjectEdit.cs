@@ -130,6 +130,13 @@ public class ProjectEdit : ModelImport
 
     private void SaveProjectValues()
     {
+        bool isNewProject = Project == null;
+
+        // 快照旧值，用于生成编辑前后的字段对比日志
+        string oldName = Project?.Name ?? "";
+        string oldComment = Project?.Comment ?? "";
+        string oldSceneName = ResolveSceneName(Project?.Scene?.Id);
+
         if (Project == null)
         {
             Project = new Project();
@@ -167,14 +174,62 @@ public class ProjectEdit : ModelImport
         MessageManage.ShowMessage("保存成功", 1);
         Debug.Log("Project已存在，只更新值并保存");
 
-        if (Project != null && !string.IsNullOrEmpty(Project.Id))
+        if (isNewProject)
         {
-            OperationLogTool.RecordLog(OperationType.项目管理, $"编辑项目 - 名称：{Project.Name}");
+            string detail = $"创建项目 - 名称：{Project.Name}";
+            if (!string.IsNullOrEmpty(Project.Comment))
+            {
+                detail += $"，备注：{Project.Comment}";
+            }
+            string sceneName = ResolveSceneName(Project.Scene?.Id);
+            if (!string.IsNullOrEmpty(sceneName))
+            {
+                detail += $"，场景：{sceneName}";
+            }
+            OperationLogTool.RecordLog(OperationType.项目管理, detail);
         }
         else
         {
-            OperationLogTool.RecordLog(OperationType.项目管理, $"创建项目 - 名称：{Project.Name}");
+            // 编辑：只记录实际变化的字段
+            List<string> changes = new List<string>();
+            AddChangedField(changes, "名称", oldName, Project.Name);
+            AddChangedField(changes, "备注", oldComment, Project.Comment);
+            string newSceneName = ResolveSceneName(Project.Scene?.Id);
+            if (!string.Equals(oldSceneName, newSceneName, StringComparison.Ordinal))
+            {
+                changes.Add($"场景：{(string.IsNullOrEmpty(oldSceneName) ? "空" : oldSceneName)}→{newSceneName}");
+            }
+
+            string editDetail = changes.Count > 0
+                ? $"编辑项目 - {string.Join("，", changes)}"
+                : $"编辑项目 - 名称：{Project.Name}";
+            OperationLogTool.RecordLog(OperationType.项目管理, editDetail);
         }
+    }
+
+    /// <summary>
+    /// 比较字段新旧值，有变化时加入变更列表。
+    /// </summary>
+    private static void AddChangedField(List<string> changes, string fieldName, string oldValue, string newValue)
+    {
+        if (!string.Equals(oldValue ?? "", newValue ?? "", StringComparison.Ordinal))
+        {
+            string old = string.IsNullOrEmpty(oldValue) ? "空" : oldValue;
+            changes.Add($"{fieldName}：{old}→{newValue}");
+        }
+    }
+
+    /// <summary>
+    /// 根据场景ID反查场景名称，用于日志展示。
+    /// </summary>
+    private string ResolveSceneName(string sceneId)
+    {
+        if (string.IsNullOrEmpty(sceneId))
+        {
+            return "";
+        }
+        var sceneModel = ModelManager.GetScene(sceneId);
+        return sceneModel?.Name ?? "";
     }
 
     /// <summary>

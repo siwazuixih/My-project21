@@ -45,6 +45,7 @@ UNITY_EMBEDDED_MODE = os.environ.get(
     "SERVO_UNITY_EMBEDDED_MODE",
     "0",
 ).strip().lower() in ("1", "true", "yes", "on")
+SIMULATION_ONLY = os.environ.get("SERVO_SIMULATION_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
 import matplotlib
 if UNITY_EMBEDDED_MODE:
     matplotlib.use("Agg")
@@ -319,6 +320,8 @@ def hexstr(data: bytes) -> str:
 # =========================
 def send_cmd(cmd: bytes, name: str = "CMD") -> bool:
     global client_socket
+    if SIMULATION_ONLY:
+        return False
     with sock_lock:
         if client_socket is None:
             print(f"发送失败：TCP 未连接，{name} = {hexstr(cmd)}")
@@ -360,6 +363,8 @@ def send_cmd_new_connection(cmd: bytes, name: str = "CMD-NEW", timeout: float = 
     兜底发送：重新建立一个短连接发送控制帧，然后立即关闭。
     用于排查/处理原连接处于回传状态时停止帧不生效的问题。
     """
+    if SIMULATION_ONLY:
+        return False
     try:
         with socket.create_connection((IP, PORT), timeout=timeout) as s:
             s.sendall(cmd)
@@ -507,6 +512,8 @@ def wait_for_tcp_connected(timeout: float = 3.0) -> bool:
 def send_cmd_burst(commands, name: str = "BURST") -> bool:
     """把多个控制帧尽量连续写入同一 TCP 连接，减少停止延迟。"""
     global client_socket
+    if SIMULATION_ONLY:
+        return False
     data = b"".join(cmd for cmd, _ in commands)
     labels = " + ".join(label for _, label in commands)
     with sock_lock:
@@ -1158,6 +1165,8 @@ def save_csv():
 # TCP 接收线程
 # =========================
 def tcp_receive():
+    if SIMULATION_ONLY:
+        return
     global client_socket, recv_frame_count, last_print_recv_time
 
     recv_buffer = bytearray()
@@ -1261,6 +1270,7 @@ def unity_status(ok: bool = True, message: str = "status"):
         "ok": ok,
         "message": message,
         "tool_connected": connected,
+        "simulation_only": SIMULATION_ONLY,
         "tool_ip": IP,
         "tool_port": PORT,
         "state": current_state,
@@ -1278,6 +1288,12 @@ def unity_status(ok: bool = True, message: str = "status"):
 
 
 def run_unity_command(cmd: str):
+    normalized = (cmd or "").strip().lower()
+    # 模拟服务保留相同编排算法，但启动和命令入口均不允许触碰实物。
+    if SIMULATION_ONLY and normalized not in (
+            "", "status", "stop", "reset", "auto_cycle_sim", "robot_insert_sim", "robot_withdraw_sim"
+    ) and not (cmd or '').startswith('configure_contact:'):
+        return unity_status(False, "simulation_only:real_command_rejected")
     if (cmd or '').startswith('configure_contact:'):
         if state in ('RUN_FORWARD', 'RUN_REVERSE') or not command_queue.empty():
             return unity_status(False, 'tool_busy')
@@ -1318,7 +1334,8 @@ def run_unity_command(cmd: str):
         return unity_status(True, "reverse_home_queued")
 
     if normalized in ("stop", "reset"):
-        stop_driver()
+        if not SIMULATION_ONLY:
+            stop_driver()
         return unity_status(True, "stop_requested")
 
     if normalized in ("status", ""):
@@ -1746,10 +1763,13 @@ print("物理开关同步绘图: 已启用。空闲时发送 01/00 保持回传�
 print(f"异常后自动回位: {AUTO_RETURN_HOME_AFTER_FAULT}；手动Reverse仍可用于回位调试")
 print("快捷键: f=正转，r=定量反转回初始位，s/Esc=立即急停；若无效请看终端是否打印“按钮指令已接收/鼠标兜底触发”")
 
-threading.Thread(target=command_worker, daemon=True).start()
-threading.Thread(target=tcp_receive, daemon=True).start()
+if not SIMULATION_ONLY:
+    threading.Thread(target=command_worker, daemon=True).start()
+    threading.Thread(target=tcp_receive, daemon=True).start()
+    threading.Thread(target=terminal_keyboard_worker, daemon=True).start()
+else:
+    print("隔离模拟模式：不连接电批、不启动实物命令线程，仅允许 *_sim 流程")
 threading.Thread(target=unity_command_server, daemon=True).start()
-threading.Thread(target=terminal_keyboard_worker, daemon=True).start()
 
 if UNITY_EMBEDDED_MODE:
     threading.Thread(target=curve_render_worker, daemon=True).start()

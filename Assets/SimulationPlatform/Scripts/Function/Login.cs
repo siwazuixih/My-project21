@@ -102,6 +102,7 @@ public class Login : MonoBehaviour
         else
         {
             ShowErrorMsg("账号或密码错误");
+            OperationLogTool.RecordLog(OperationType.系统操作, "登录失败（账号或密码错误）");
             SetFocusToAccountTxt();
         }
     }

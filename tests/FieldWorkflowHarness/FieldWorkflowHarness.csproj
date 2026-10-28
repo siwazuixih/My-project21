@@ -4,5 +4,10 @@
     <Compile Include="../../Assets/FieldCommissioningSettings.cs" Link="Settings.cs" />
     <Compile Include="../../Assets/ConnectCommander.FieldWorkflow.cs" Link="Plan.cs" />
     <Compile Include="../../Assets/FieldWorkflowSequence.cs" Link="Sequence.cs" />
+    <Compile Include="../../Assets/ArmTrajectoryTiming.cs" />
+    <Compile Include="../../Assets/ArmTrajectorySampling.cs" />
+    <Compile Include="../../Assets/ManualTargetGate.cs" />
+    <Compile Include="../../Assets/OfflineTargetSession.cs" />
+    <Compile Include="../../Assets/ChassisLegacyTiming.cs" />
   </ItemGroup>
 </Project>

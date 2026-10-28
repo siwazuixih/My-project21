@@ -102,8 +102,10 @@ public class PathPointManager : MonoBehaviour
         }
 
         Debug.Log($"[PathPointManager] 添加路径点: {targetObj.name}, 世界坐标: {worldPos}, 当前数量: {_pointObjList.Count}");
+
+        OperationLogTool.RecordLog(OperationType.仿真操作,
+            $"添加路径点 - 目标：{targetObj.name}（第 {_pointObjList.Count} 个）");
     }
-    
     private void CleanupNullObjects()
     {
         for (int i = _pointObjList.Count - 1; i >= 0; i--)
@@ -122,6 +124,7 @@ public class PathPointManager : MonoBehaviour
     public void RemovePoint(int index)
     {
         if (index < 0 || index >= _pointObjList.Count) return;
+        string removedName = _pointObjList[index]?.name ?? "未知";
         Debug.Log($"[PathPointManager] 移除路径点: {index}, {_pointObjList[index]?.name}");
         _pointObjList.RemoveAt(index);
         if (index < _worldPosList.Count)
@@ -155,6 +158,8 @@ public class PathPointManager : MonoBehaviour
                 marker.SetIndex(i+1);
             }
         }
+
+        OperationLogTool.RecordLog(OperationType.仿真操作, $"移除路径点 - 目标：{removedName}");
     }
 
     public void RemovePoint(GameObject targetObj)

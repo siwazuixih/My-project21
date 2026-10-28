@@ -151,7 +151,17 @@ public class SceneList : MonoBehaviour
                 RefreshSceneList();
                 Debug.Log($"场景 {scene.Name} 删除成功");
 
-                OperationLogTool.RecordLog(OperationType.模型管理, $"删除场景模型 - 名称：{scene.Name}");
+                string deleteDetail = $"删除场景模型 - 名称：{scene.Name}";
+                if (!string.IsNullOrEmpty(scene.Comment))
+                {
+                    deleteDetail += $"，备注：{scene.Comment}";
+                }
+                string deleteFileInfo = OperationLogTool.FormatModelFileInfo(scene.Glb?.FilePath);
+                if (!string.IsNullOrEmpty(deleteFileInfo))
+                {
+                    deleteDetail += $"，模型文件：{deleteFileInfo}";
+                }
+                OperationLogTool.RecordLog(OperationType.模型管理, deleteDetail);
             }
             else
             {

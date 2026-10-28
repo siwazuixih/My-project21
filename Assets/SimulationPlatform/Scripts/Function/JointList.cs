@@ -153,7 +153,17 @@ public class JointList : MonoBehaviour
                 RefreshJointList();
                 Debug.Log($"关节 {joint.Name} 删除成功");
 
-                OperationLogTool.RecordLog(OperationType.模型管理, $"删除接头模型 - 名称：{joint.Name}");
+                string deleteDetail = $"删除接头模型 - 名称：{joint.Name}";
+                if (!string.IsNullOrEmpty(joint.Comment))
+                {
+                    deleteDetail += $"，备注：{joint.Comment}";
+                }
+                string deleteFileInfo = OperationLogTool.FormatModelFileInfo(joint.Glb?.FilePath);
+                if (!string.IsNullOrEmpty(deleteFileInfo))
+                {
+                    deleteDetail += $"，模型文件：{deleteFileInfo}";
+                }
+                OperationLogTool.RecordLog(OperationType.模型管理, deleteDetail);
             }
             else
             {

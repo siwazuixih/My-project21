@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+  <ItemGroup>
+    <Reference Include="LiteDB"><HintPath>../../Assets/Plugins/LiteDB.dll</HintPath></Reference>
+    <Compile Include="../../Assets/SimulationPlatform/Scripts/Manage/RunRecorder.cs" />
+    <Compile Include="../../Assets/SimulationPlatform/Scripts/Model/RunRecord.cs" />
+    <Compile Include="../../Assets/SimulationPlatform/Scripts/Model/RunStepRecord.cs" />
+    <Compile Include="../../Assets/SimulationPlatform/Scripts/Model/SimulationParam.cs" />
+    <Compile Include="../../Assets/SimulationPlatform/Scripts/Model/Vector3D.cs" />
+    <Compile Include="../../Assets/SimulationPlatform/Scripts/Model/RunType.cs" />
+    <Compile Include="../../Assets/SimulationPlatform/Scripts/Model/OperationType.cs" />
+    <Compile Include="../../Assets/SimulationPlatform/Scripts/Tool/PendingParamLog.cs" />
+  </ItemGroup>
+</Project>

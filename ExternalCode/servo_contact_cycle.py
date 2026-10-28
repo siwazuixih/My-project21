@@ -97,9 +97,11 @@ class ContactCycle:
 
     def stop(self):
         self.cancel.set()
-        # Must interrupt an outstanding move through a different local connection.
+        # Real motion must be interrupted through a different local connection.
+        # Simulated waits observe cancel; never send an unowned hardware stop.
         try:
-            UnityRobotClient.emergency_stop()
+            if not self.simulated:
+                UnityRobotClient.emergency_stop()
         finally:
             if not self.simulated and self.workflow == 'full':
                 self.stop_tool()

@@ -709,6 +709,7 @@ public sealed class VisionImageReceiver : MonoBehaviour
         }
 
         videoEnabled = true;
+        OperationLogTool.RecordLog(OperationType.真实运行, "开启视觉预览");
         receivedFirstFrame = false;
         nextErrorLogTime = 0f;
         lastVisionMode = "";
@@ -730,6 +731,7 @@ public sealed class VisionImageReceiver : MonoBehaviour
             || streamCoroutine != null
             || (serverProcess != null && !serverProcess.HasExited);
         videoEnabled = false;
+        if (wasRunning) OperationLogTool.RecordLog(OperationType.真实运行, "关闭视觉预览");
 
         if (streamCoroutine != null)
         {

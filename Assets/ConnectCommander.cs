@@ -59,7 +59,11 @@ public sealed class MockVisionFineTuneTrajectoryProvider :
     public MockVisionFineTuneTrajectoryProvider(
         IReadOnlyList<MockVisionFineTunePoint> points)
     {
-        configuredPoints = points;
+        var frozen = new List<MockVisionFineTunePoint>();
+        if (points != null) foreach (var point in points)
+            frozen.Add(point == null ? null : new MockVisionFineTunePoint(
+                point.actuatorOffsets == null ? null : (float[])point.actuatorOffsets.Clone(), point.durationSeconds));
+        configuredPoints = frozen;
     }
 
     public bool TryBuildTrajectory(
@@ -139,6 +143,7 @@ public class TrajectoryTask
     public TrajectoryStage stage = TrajectoryStage.Unspecified;
     public List<double[]> armPoints = new List<double[]>();
     public double[] armStartPose;
+    [System.NonSerialized] public ArmTrajectorySampling armSampling;
     public List<Vector3> chassisPoints = new List<Vector3>();
     
     // 💡 新增：记录这个导航任务开始时，车头的初始朝向
@@ -146,6 +151,7 @@ public class TrajectoryTask
     
     public bool isDispatched = false; 
     [System.NonSerialized] public string dispatchError;
+    [System.NonSerialized] public string dispatchEvidence;
 
     public float targetLiftHeight;
 }
@@ -226,6 +232,15 @@ public partial class ConnectCommander : MonoBehaviour
     private IVisionFineTuneTrajectoryProvider fineTuneTrajectoryProvider;
     private ServoTighteningController validationServoController;
     private bool validationStartedServoProgram;
+    private OfflineTargetSession offlineSession;
+    private MissionController offlineMission;
+    private Simulation offlineSimulation;
+    private System.Threading.Tasks.Task<ServoTighteningController.CommandResult> offlineStartTask;
+    private List<TrajectoryTask> offlinePlan;
+    private string offlineFailureReason;
+    public bool OfflineValidationActive => offlineSession != null;
+    public bool OfflineWaitingForContinue => OfflineValidationActive && offlineSession.Waiting && !fullProcessCancelRequested;
+    public string OfflineStatus { get; private set; } = "";
     private bool chassisRouteRunning;
     private int singleTaskRunning;
     public bool AnyTaskRunning => isSequenceRunning || chassisRouteRunning || singleTaskRunning > 0;
@@ -239,6 +254,7 @@ public partial class ConnectCommander : MonoBehaviour
 
     public void ClearAllTasks()
     {
+        if (OfflineValidationActive) { CancelFullProcessValidation(); return; }
         if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked)
         { FieldCommissioningPanel.Active.RequestStop(); return; }
         if (chassisTCP != null && (chassisRouteRunning || chassisTCP.ConfirmedMotionActive)) chassisTCP.StopMovement();
@@ -249,6 +265,11 @@ public partial class ConnectCommander : MonoBehaviour
     {
         if (chassisTCP != null && (chassisRouteRunning || chassisTCP.ConfirmedMotionActive)) chassisTCP.StopMovement();
         fullProcessCancelRequested = true;
+        offlineSession?.Cancel();
+        if (validationServoController != null && validationServoController.OfflineWorkflowOwner == this)
+            validationServoController.OfflineWorkflowOwner = null;
+        if (offlineStartTask != null && !validationStartedServoProgram)
+            _ = CloseLateOfflineStartAsync(offlineStartTask, validationServoController);
         if (validationStartedServoProgram &&
             validationServoController != null &&
             validationServoController.ProgramReady)
@@ -257,6 +278,9 @@ public partial class ConnectCommander : MonoBehaviour
             // 由本次离线验证启动的本机进程。
             _ = validationServoController.StopProgramAsync();
         }
+        if (RunRecorder.IsCurrent(offlineHistoryId)) RunRecorder.FinishRun(RunRecordResult.Interrupted, "离线验证界面销毁", offlineHistoryId);
+        if (RunRecorder.IsCurrent(legacyHistoryId)) RunRecorder.FinishRun(RunRecordResult.Interrupted, "下发界面销毁", legacyHistoryId);
+        offlineSession?.Dispose(); offlineSession = null;
     }
 
     public void SetChassisMoveSpeed(string value) =>
@@ -394,17 +418,17 @@ public partial class ConnectCommander : MonoBehaviour
         if (task.type == TaskType.Chassis) 
         {
             if (chassisTCP == null) { Debug.LogError("⚠️ 未绑定 ChassisTCP！"); return; }
-            StartCoroutine(TrackSingleTask(SendChassisSegmentedRoutine(task)));
+            StartCoroutine(TrackSingleTask(RecordLegacyTaskRoutine(task, SendChassisSegmentedRoutine(task))));
         } 
         else if (task.type == TaskType.Arm) 
         {
             if (dobotTCP == null) { Debug.LogError("⚠️ 未绑定 DobotTCP！"); return; }
-            StartCoroutine(TrackSingleTask(SendArmRoutine(task)));
+            StartCoroutine(TrackSingleTask(RecordLegacyTaskRoutine(task, SendArmRoutine(task))));
         }
         else if (task.type == TaskType.Lift) // 🌟 新增分支
         {
         if (liftTCP == null) { Debug.LogError("⚠️ 未绑定 LiftTCP！"); return; }
-        StartCoroutine(TrackSingleTask(SendLiftRoutine(task)));
+        StartCoroutine(TrackSingleTask(RecordLegacyTaskRoutine(task, SendLiftRoutine(task))));
         }
     }
 
@@ -491,7 +515,7 @@ public partial class ConnectCommander : MonoBehaviour
             if (subTaskRoutine != null)
             {
                 // 🔥 核心魔法：使用 yield return 等待底层真机动作协程完全执行结束
-                yield return StartCoroutine(subTaskRoutine);
+                yield return StartCoroutine(RecordLegacyTaskRoutine(task, subTaskRoutine));
             }
 
             // 安全防御验证：确保底层状态刷新
@@ -512,7 +536,7 @@ public partial class ConnectCommander : MonoBehaviour
     }
 
     // =================================================================================
-    // 全流程离线验证：粗定位 -> 视觉精调 -> 模拟拧紧 -> 复位 -> 下一目标
+    // 全流程离线验证：粗定位动画 -> 人工继续 -> 小幅模拟视觉 -> 模拟拧紧 -> 复位
     // =================================================================================
 
     public void SetFineTuneTrajectoryProvider(
@@ -552,10 +576,28 @@ public partial class ConnectCommander : MonoBehaviour
         }
 
         EnsureMockVisionTrajectory();
-        if (fineTuneTrajectoryProvider == null)
+        if (fineTuneTrajectoryProvider == null || fineTuneTrajectoryProvider is MockVisionFineTuneTrajectoryProvider)
         {
             fineTuneTrajectoryProvider =
                 new MockVisionFineTuneTrajectoryProvider(mockVisionTrajectory);
+        }
+
+        validationServoController = FindObjectOfType<ServoTighteningController>();
+        if (validationServoController == null || validationServoController.FieldWorkflowOwned)
+        { Debug.LogError("[全流程验证] 拧紧控制组件不存在或被实物流程占用"); return; }
+        if (validationServoController.ProgramReady && !validationServoController.SimulationOnlyService)
+        { Debug.LogWarning("[全流程验证] 请先关闭当前实物拧紧服务，再开始离线模拟"); return; }
+        // 与真机限位/许可分离，但冻结回放副本，外部重规划不能改变当前会话。
+        offlinePlan = new List<TrajectoryTask>();
+        foreach (var task in taskPlaylist)
+        {
+            if (task == null) { Debug.LogError("[全流程验证] 任务包含空项"); return; }
+            var copy = new TrajectoryTask { taskName = task.taskName, type = task.type, stage = task.stage,
+                targetIndex = task.targetIndex, targetLiftHeight = task.targetLiftHeight, initialForward = task.initialForward,
+                armStartPose = task.armStartPose == null ? null : (double[])task.armStartPose.Clone(),
+                chassisPoints = task.chassisPoints == null ? new List<Vector3>() : new List<Vector3>(task.chassisPoints) };
+            if (task.armPoints != null) foreach (var p in task.armPoints) copy.armPoints.Add(p == null ? null : (double[])p.Clone());
+            offlinePlan.Add(copy);
         }
 
         foreach (TrajectoryTask task in taskPlaylist)
@@ -564,20 +606,59 @@ public partial class ConnectCommander : MonoBehaviour
         }
 
         fullProcessCancelRequested = false;
+        offlineFailureReason = "";
+        offlineMission = missionController;
+        offlineSession = new OfflineTargetSession();
+        validationServoController.OfflineWorkflowOwner = this;
+        validationStartedServoProgram = false;
+        offlineStartTask = null;
+        offlineSimulation = FindObjectOfType<Simulation>();
+        offlineSimulation?.SetRealRunInputsLocked(true);
+        OfflineStatus = "离线模拟：粗定位动画执行中（非实物到位）";
         isSequenceRunning = true;
+        offlineHistoryId = RunHistoryCapture.Begin(RunType.SIMULATION, "全流程离线验证", true, GetTargetOrder().Count);
         fullProcessCoroutine = StartCoroutine(
-            ExecuteFullProcessValidationRoutine(missionController));
+            GuardOfflineValidationRoutine(missionController));
     }
 
     public void CancelFullProcessValidation()
     {
-        if (fullProcessCoroutine == null)
+        if (!OfflineValidationActive)
         {
             return;
         }
 
         fullProcessCancelRequested = true;
+        offlineSession.Cancel();
+        OfflineStatus = "离线模拟：正在取消，等待本机模拟周期结束";
         Debug.LogWarning("[全流程验证] 已请求取消，将在当前安全检查点退出。");
+    }
+
+    public void ContinueOfflineValidation()
+    {
+        if (!OfflineWaitingForContinue || offlineMission == null) return;
+        try
+        {
+            offlineSession.Continue(offlineSession.Generation, offlineSession.Target,
+                ReadCurrentActuatorControls(offlineMission).ToArray());
+        }
+        catch (System.Exception e)
+        {
+            offlineFailureReason = e.Message;
+            Debug.LogError("[全流程验证] " + e.Message); CancelFullProcessValidation();
+        }
+    }
+
+    private static async System.Threading.Tasks.Task CloseLateOfflineStartAsync(
+        System.Threading.Tasks.Task<ServoTighteningController.CommandResult> starting,
+        ServoTighteningController servo)
+    {
+        try
+        {
+            await starting;
+            if (servo != null && servo.OwnsSimulationProgram) await servo.StopProgramAsync();
+        }
+        catch (System.Exception e) { Debug.LogWarning("[全流程验证] 离开页面后的模拟进程清理：" + e.Message); }
     }
 
     private IEnumerator ExecuteFullProcessValidationRoutine(
@@ -588,7 +669,9 @@ public partial class ConnectCommander : MonoBehaviour
             "不会向机械臂、底盘、升降缸或电批下发真实运动指令。</color>");
 
         string failureReason = "";
-        List<int> targetOrder = GetTargetOrder();
+        List<int> targetOrder = new List<int>();
+        foreach (var task in offlinePlan)
+            if (task.targetIndex >= 0 && !targetOrder.Contains(task.targetIndex)) targetOrder.Add(task.targetIndex);
         if (targetOrder.Count == 0)
         {
             failureReason = "任务清单没有目标编号，请重新进行路径预计算";
@@ -602,10 +685,11 @@ public partial class ConnectCommander : MonoBehaviour
         {
             int targetIndex = targetOrder[orderIndex];
             string targetLabel = $"目标 {targetIndex + 1}";
-            List<TrajectoryTask> group = taskPlaylist.FindAll(
+            List<TrajectoryTask> group = offlinePlan.FindAll(
                 task => task.targetIndex == targetIndex);
 
             Debug.Log($"<color=gold>[全流程验证][{targetLabel}] 开始。</color>");
+            OfflineStatus = $"离线模拟 / {targetLabel}：粗定位动画执行中";
 
             foreach (TrajectoryTask task in group)
             {
@@ -614,11 +698,10 @@ public partial class ConnectCommander : MonoBehaviour
                     continue;
                 }
 
-                yield return StartCoroutine(
-                    ExecuteOfflineTaskRoutine(
+                yield return ExecuteOfflineTaskRoutine(
                         missionController,
                         task,
-                        targetLabel));
+                        targetLabel);
 
                 if (fullProcessCancelRequested)
                 {
@@ -633,6 +716,18 @@ public partial class ConnectCommander : MonoBehaviour
 
             List<double> currentControls = ReadCurrentActuatorControls(
                 missionController);
+            OfflineStatus = $"离线模拟 / {targetLabel}：粗定位动画结束，等待点击“继续（模拟）”";
+            RecordOfflineStep(targetLabel + " / 等待人工继续", "粗定位动画结束（不是实物到位确认）");
+            Debug.Log("[全流程验证] " + OfflineStatus);
+            var manualWait = offlineSession.WaitAsync(targetIndex + 1, currentControls.ToArray());
+            while (!manualWait.IsCompleted && !fullProcessCancelRequested)
+            {
+                offlineSession.RequireUnchanged(ReadCurrentActuatorControls(missionController).ToArray());
+                yield return null;
+            }
+            if (fullProcessCancelRequested) break;
+            manualWait.GetAwaiter().GetResult();
+            RecordOfflineStep(targetLabel + " / 人工继续", "本目标一次性许可，仅模拟");
             if (!fineTuneTrajectoryProvider.TryBuildTrajectory(
                     currentControls,
                     targetIndex,
@@ -657,19 +752,20 @@ public partial class ConnectCommander : MonoBehaviour
                 $"收到 {fineTunePlan.Points.Count} 个七执行器轨迹点，" +
                 $"Source={fineTunePlan.Source}。");
 
-            yield return StartCoroutine(
-                ExecuteActuatorPlanRoutine(
+            OfflineStatus = $"离线模拟 / {targetLabel}：小幅模拟视觉精调";
+            yield return ExecuteActuatorPlanRoutine(
                     missionController,
                     fineTunePlan.Points,
                     fineTunePlan.Durations,
                     targetLabel,
-                    "视觉精调"));
+                    "视觉精调");
 
             if (fullProcessCancelRequested)
             {
                 break;
             }
 
+            RecordOfflineStep(targetLabel + " / 视觉精调", "模拟七执行器轨迹执行结束");
             if (validationServoController == null)
             {
                 validationServoController =
@@ -682,13 +778,13 @@ public partial class ConnectCommander : MonoBehaviour
                 break;
             }
 
-            if (!validationServoController.ProgramReady)
+            // 即使已经有服务，也必须确认它是隔离模拟服务，禁止复用实物服务。
             {
                 Debug.Log(
                     $"[全流程验证][{targetLabel}][拧紧] " +
                     "正在启动本机 V26 拧紧程序…");
-                System.Threading.Tasks.Task<ServoTighteningController.CommandResult>
-                    startTask = validationServoController.StartProgramAsync();
+                OfflineStatus = $"离线模拟 / {targetLabel}：准备隔离的 Python 模拟服务";
+                var startTask = offlineStartTask = validationServoController.StartSimulationProgramAsync();
                 while (!startTask.IsCompleted && !fullProcessCancelRequested)
                 {
                     yield return null;
@@ -710,15 +806,14 @@ public partial class ConnectCommander : MonoBehaviour
                     break;
                 }
 
-                validationStartedServoProgram = true;
+                validationStartedServoProgram = validationServoController.OwnsSimulationProgram;
             }
 
-            using (var cancel = new System.Threading.CancellationTokenSource())
+            OfflineStatus = $"离线模拟 / {targetLabel}：模拟卡入—拧紧—退出";
             {
-                var cycle = validationServoController.RunContactCycleAsync(true, cancel.Token);
+                var cycle = validationServoController.RunContactCycleAsync(true, offlineSession.Token);
                 while (!cycle.IsCompleted)
                 {
-                    if (fullProcessCancelRequested) cancel.Cancel();
                     yield return null;
                 }
                 if (fullProcessCancelRequested) break;
@@ -729,6 +824,7 @@ public partial class ConnectCommander : MonoBehaviour
                     break;
                 }
                 Debug.Log($"[全流程验证][{targetLabel}] 卡入—拧紧—退出 Result=SIMULATED_OK");
+                RecordOfflineStep(targetLabel + " / 卡入—拧紧—退出", "SIMULATED_OK（非实物）");
             }
 
             TrajectoryTask returnTask = group.Find(
@@ -740,11 +836,18 @@ public partial class ConnectCommander : MonoBehaviour
                     targetIndex);
             }
 
-            yield return StartCoroutine(
-                ExecuteOfflineTaskRoutine(
+            // 精调只改模型。先沿精调点反向撤回粗定位终点，再接原返程，避免姿态跳变。
+            OfflineStatus = $"离线模拟 / {targetLabel}：精调撤回与返程";
+            var undoPoints = new List<double[]>();
+            var undoDurations = new List<float>();
+            for (int i = fineTunePlan.Points.Count - 2; i >= 0; i--)
+            { undoPoints.Add(fineTunePlan.Points[i]); undoDurations.Add(fineTunePlan.Durations[i + 1]); }
+            undoPoints.Add(currentControls.ToArray()); undoDurations.Add(fineTunePlan.Durations[0]);
+            yield return ExecuteActuatorPlanRoutine(missionController, undoPoints, undoDurations, targetLabel, "模拟精调撤回");
+            yield return ExecuteOfflineTaskRoutine(
                     missionController,
                     returnTask,
-                    targetLabel));
+                    targetLabel);
 
             if (!fullProcessCancelRequested)
             {
@@ -754,6 +857,36 @@ public partial class ConnectCommander : MonoBehaviour
             }
         }
 
+        if (!string.IsNullOrEmpty(failureReason)) throw new System.InvalidOperationException(failureReason);
+    }
+
+    // 统一驱动嵌套动画，捕捉子协程异常；退出时等待异步启动/模拟周期清理，防止遗留占用。
+    private IEnumerator GuardOfflineValidationRoutine(MissionController mission)
+    {
+        string failureReason = "";
+        var stack = new Stack<IEnumerator>();
+        stack.Push(ExecuteFullProcessValidationRoutine(mission));
+        while (stack.Count > 0)
+        {
+            object next = null;
+            try
+            {
+                var iterator = stack.Peek();
+                if (!iterator.MoveNext()) { (stack.Pop() as System.IDisposable)?.Dispose(); continue; }
+                next = iterator.Current;
+            }
+            catch (System.Exception e) { failureReason = e.GetBaseException().Message; break; }
+            if (next is IEnumerator child) { stack.Push(child); continue; }
+            yield return next;
+        }
+        while (stack.Count > 0) (stack.Pop() as System.IDisposable)?.Dispose();
+        if (string.IsNullOrEmpty(failureReason)) failureReason = offlineFailureReason;
+        offlineSession.Cancel();
+        if (offlineStartTask != null)
+        {
+            while (!offlineStartTask.IsCompleted) yield return null;
+            validationStartedServoProgram = validationServoController != null && validationServoController.OwnsSimulationProgram;
+        }
         if (validationStartedServoProgram && validationServoController != null)
         {
             Debug.Log("[全流程验证] 正在关闭本次验证启动的 V26 程序…");
@@ -763,19 +896,24 @@ public partial class ConnectCommander : MonoBehaviour
             {
                 yield return null;
             }
+            if (stopTask.IsFaulted || stopTask.IsCanceled || !stopTask.Result.Success)
+                failureReason = string.IsNullOrEmpty(failureReason) ? "模拟进程清理失败，请检查日志后关闭程序" : failureReason;
             validationStartedServoProgram = false;
         }
 
-        if (fullProcessCancelRequested)
+        if (!string.IsNullOrEmpty(failureReason))
         {
-            Debug.LogWarning("[全流程验证] 流程已取消。");
-        }
-        else if (!string.IsNullOrEmpty(failureReason))
-        {
+            if (RunRecorder.IsCurrent(offlineHistoryId)) RunRecorder.FinishRun(RunRecordResult.Failed, failureReason, offlineHistoryId);
             Debug.LogError($"[全流程验证] 流程中止：{failureReason}");
+        }
+        else if (fullProcessCancelRequested)
+        {
+            if (RunRecorder.IsCurrent(offlineHistoryId)) RunRecorder.FinishRun(RunRecordResult.Interrupted, "用户取消离线验证", offlineHistoryId);
+            Debug.LogWarning("[全流程验证] 流程已取消。");
         }
         else
         {
+            if (RunRecorder.IsCurrent(offlineHistoryId)) RunRecorder.FinishRun(RunRecordResult.Success, "所有目标离线流程结束（非实物）", offlineHistoryId);
             Debug.Log(
                 "<color=green>[全流程验证] " +
                 "所有目标的离线全流程验证已完成。</color>");
@@ -787,7 +925,13 @@ public partial class ConnectCommander : MonoBehaviour
             task.isDispatched = false;
         }
 
+        OfflineStatus = !string.IsNullOrEmpty(failureReason) ? "离线模拟失败：" + failureReason :
+            fullProcessCancelRequested ? "离线模拟已取消" : "离线模拟已完成";
         fullProcessCancelRequested = false;
+        if (validationServoController != null) validationServoController.OfflineWorkflowOwner = null;
+        offlineSession.Dispose(); offlineSession = null;
+        offlineMission = null; offlineStartTask = null; offlinePlan = null;
+        offlineSimulation?.SetRealRunInputsLocked(false); offlineSimulation = null;
         fullProcessCoroutine = null;
         isSequenceRunning = false;
     }
@@ -803,33 +947,42 @@ public partial class ConnectCommander : MonoBehaviour
 
         if (task.type == TaskType.Chassis)
         {
-            yield return StartCoroutine(
-                ExecuteOfflineChassisRoutine(missionController, task));
+            yield return ExecuteOfflineChassisRoutine(missionController, task);
         }
         else if (task.type == TaskType.Lift)
         {
-            yield return StartCoroutine(
-                ExecuteOfflineLiftRoutine(missionController, task));
+            yield return ExecuteOfflineLiftRoutine(missionController, task);
         }
         else if (task.type == TaskType.Arm)
         {
+            // 模拟沿原线段逐帧插值，不为每个新增采样点重复动画时长；共享真实路径采样检查。
+            var start = task.armStartPose;
+            if (start == null)
+            {
+                var acts = missionController.refs.ikSolver.actuators;
+                start = new double[acts.Count];
+                for (int i = 0; i < acts.Count; i++) start[i] = acts[i].Control;
+            }
+            task.armSampling = ArmTrajectorySampling.Build(task.armPoints, start,
+                armJointStartIndex, ArmTrajectorySampling.DefaultStepDeg, targetLabel + "/" + task.stage);
+            Debug.Log($"[轨迹采样][模拟] {task.armSampling.Label} 原点={task.armSampling.OriginalCount} 采样点={task.armSampling.Points.Count}；仅模型插值，非实物到位");
             List<float> durations = new List<float>();
             for (int i = 0; i < task.armPoints.Count; i++)
             {
                 durations.Add(Mathf.Max(offlineArmPointDuration, 0.05f));
             }
-            yield return StartCoroutine(
-                ExecuteActuatorPlanRoutine(
+            yield return ExecuteActuatorPlanRoutine(
                     missionController,
                     task.armPoints,
                     durations,
                     targetLabel,
-                    task.stage.ToString()));
+                    task.stage.ToString());
         }
 
         if (!fullProcessCancelRequested)
         {
             task.isDispatched = true;
+            RecordOfflineStep(task.taskName, "离线回放执行结束（非实物）");
         }
     }
 
@@ -1134,18 +1287,21 @@ public partial class ConnectCommander : MonoBehaviour
     /// <summary>
     /// 🌟 完美分段走停追踪 (包含起点对齐修正)
     /// </summary>
-    private IEnumerator SendChassisSegmentedRoutine(TrajectoryTask task)
+    private IEnumerator SendChassisSegmentedRoutine(TrajectoryTask task, FieldCommissioningSettings settings = null)
     {
         if (chassisRouteRunning) yield break;
         chassisRouteRunning = true;
-        try { yield return SendChassisConfirmedCore(task); }
+        bool legacy = settings != null && settings.useLegacyChassisTiming;
+        var timing = (settings?.legacyChassisTiming ?? new ChassisLegacyTiming()).Copy();
+        try { yield return SendChassisRouteCore(task, legacy, timing); }
         finally { chassisRouteRunning = false; }
     }
 
-    private IEnumerator SendChassisConfirmedCore(TrajectoryTask task)
+    private IEnumerator SendChassisRouteCore(TrajectoryTask task, bool legacy, ChassisLegacyTiming timing)
     {
         task.isDispatched = false;
         task.dispatchError = null;
+        task.dispatchEvidence = null;
         if (chassisTCP == null || task.chassisPoints == null || task.chassisPoints.Count < 2 ||
             float.IsNaN(chassisMoveSpeedX) || float.IsInfinity(chassisMoveSpeedX) || chassisMoveSpeedX <= 0 ||
             float.IsNaN(chassisTurnSpeedW) || float.IsInfinity(chassisTurnSpeedW) || chassisTurnSpeedW <= 0)
@@ -1154,7 +1310,11 @@ public partial class ConnectCommander : MonoBehaviour
             Debug.LogError(task.dispatchError);
             yield break;
         }
-        Debug.Log($"[底盘闭环] 开始分段执行，共 {task.chassisPoints.Count} 个节点");
+        string mode = legacy ? "旧模式估时" : "新模式状态确认";
+        // 冻结本段速度与路径，Inspector/外部重规划不会在段内改变供点参数。
+        float moveSpeed = chassisMoveSpeedX, turnSpeed = chassisTurnSpeedW;
+        var points = new List<Vector3>(task.chassisPoints);
+        Debug.Log($"[底盘][{mode}] 开始分段执行，共 {task.chassisPoints.Count} 个节点；运行中不切换模式");
         int cancellationVersion = chassisTCP.CancellationVersion;
 
         if (task.chassisPoints == null || task.chassisPoints.Count < 2) yield break;
@@ -1162,11 +1322,11 @@ public partial class ConnectCommander : MonoBehaviour
         // 🌟 核心游标：记录车头【此刻】的朝向，初始值为传进来的 startForward
         Vector3 currentFacing = task.initialForward.normalized;
 
-        for (int i = 0; i < task.chassisPoints.Count - 1; i++)
+        for (int i = 0; i < points.Count - 1; i++)
         {
             if (cancellationVersion != chassisTCP.CancellationVersion) { task.dispatchError = "底盘路径已取消"; yield break; }
-            Vector3 currentPoint = task.chassisPoints[i];
-            Vector3 nextPoint = task.chassisPoints[i + 1];
+            Vector3 currentPoint = points[i];
+            Vector3 nextPoint = points[i + 1];
 
             // 1. 计算目标线段的朝向
             Vector3 dir = (nextPoint - currentPoint).normalized;
@@ -1185,7 +1345,7 @@ public partial class ConnectCommander : MonoBehaviour
                 
                 // [修改 2]：旋转方向由 vw 的正负号决定。正为逆时针，负为顺时针。
                 // ⚠️ 调试提示：如果实车旋转方向与预期相反，把这里的逻辑改成 (deltaAngleDeg < 0) 即可
-                float signedVw = deltaAngleDeg < 0 ? chassisTurnSpeedW : -chassisTurnSpeedW;
+                float signedVw = deltaAngleDeg < 0 ? turnSpeed : -turnSpeed;
 
                 // [修改 3]：构建 3056 专属的 JSON，使用 vw 字段
                 // string rotJson = $"{{\"angle\":{absAngleRad:F3}, \"vw\":{signedVw:F2}}}";
@@ -1193,7 +1353,8 @@ public partial class ConnectCommander : MonoBehaviour
                 Debug.Log($"🔄 [第{i}段] 原地旋转: 差值 {deltaAngleDeg:F1}° -> <color=yellow>{rotJson}</color>");
                 
                 // [修改 4]：发送专属转动 API 3056
-                var rotation = chassisTCP.ExecuteRelativeConfirmedAsync(3056, rotJson);
+                var rotation = legacy ? chassisTCP.ExecuteRelativeLegacyTimedAsync(3056, rotJson, timing.RotationSeconds(absAngleRad, turnSpeed)) :
+                    chassisTCP.ExecuteRelativeConfirmedAsync(3056, rotJson);
                 while (!rotation.IsCompleted) yield return null;
                 if (rotation.IsFaulted || rotation.IsCanceled || !rotation.Result)
                 {
@@ -1212,9 +1373,10 @@ public partial class ConnectCommander : MonoBehaviour
 
             if (dist > 0.01f)
             {
-                string moveJson = System.FormattableString.Invariant($"{{\"dist\":{dist:F3}, \"vx\":{-chassisMoveSpeedX:F2}, \"vy\":0.00}}");
+                string moveJson = System.FormattableString.Invariant($"{{\"dist\":{dist:F3}, \"vx\":{-moveSpeed:F2}, \"vy\":0.00}}");
                 Debug.Log($"⬆️ [第{i}段] 直线平动: <color=cyan>{moveJson}</color>");
-                var translation = chassisTCP.ExecuteRelativeConfirmedAsync(3055, moveJson);
+                var translation = legacy ? chassisTCP.ExecuteRelativeLegacyTimedAsync(3055, moveJson, timing.TranslationSeconds(dist, moveSpeed)) :
+                    chassisTCP.ExecuteRelativeConfirmedAsync(3055, moveJson);
                 while (!translation.IsCompleted) yield return null;
                 if (translation.IsFaulted || translation.IsCanceled || !translation.Result)
                 {
@@ -1226,7 +1388,8 @@ public partial class ConnectCommander : MonoBehaviour
 
         if (cancellationVersion != chassisTCP.CancellationVersion) { task.dispatchError = "底盘路径已取消"; yield break; }
         task.isDispatched = true;
-        Debug.Log($"[底盘闭环] {task.taskName} 全部动作已收到完成状态（非独立定位精度验收）");
+        task.dispatchEvidence = legacy ? "旧模式发送应答及估时等待结束，未查询任务完成状态" : "底盘API完成状态已确认（非独立定位精度验收）";
+        Debug.Log($"[底盘][{mode}] {task.taskName}：{task.dispatchEvidence}");
     }
 
     private IEnumerator SendArmRoutine(TrajectoryTask task)
@@ -1319,7 +1482,7 @@ public partial class ConnectCommander : MonoBehaviour
         for (int i = 0; i < 6; i++)
         {
             int ikIndex = armJointStartIndex + i;
-            armJoints[i] = ikIndex < sourcePose.Length ? sourcePose[ikIndex] * Mathf.Rad2Deg : 0;
+            armJoints[i] = ikIndex < sourcePose.Length ? sourcePose[ikIndex] * 180.0 / System.Math.PI : 0;
         }
         return armJoints;
     }

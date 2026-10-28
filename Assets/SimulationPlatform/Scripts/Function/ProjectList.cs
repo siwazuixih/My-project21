@@ -160,6 +160,8 @@ public class ProjectList : MonoBehaviour
     private void OnRecordProjectClick(Project project)
     {
         Debug.Log($"点击了项目记录: {project.Name} (ID: {project.Id})");
+        OperationLogTool.RecordLog(OperationType.项目管理, $"查看项目运行记录 - 名称：{project.Name}");
+        RunHistoryPanel.Open(project, this);
     }
 
     /// <summary>
@@ -171,7 +173,7 @@ public class ProjectList : MonoBehaviour
         Debug.Log($"点击了删除项目: {project.Name} (ID: {project.Id})");
         
         // 调用PopupManager弹出删除提示
-        PopupManager.Instance.ShowConfirmCancelPopup($"确定要删除项目 '{project.Name}' 吗？", (result) => {
+        PopupManager.Instance.ShowConfirmCancelPopup($"确定要删除项目 '{project.Name}' 及其运行历史吗？", (result) => {
             if (result)
             {
                 // 用户确认删除
@@ -181,6 +183,7 @@ public class ProjectList : MonoBehaviour
                 ProjectManager.RemoveProject(project.Id);
                 // 保存更改
                 ProjectManager.Save();
+                RunRecorder.DeleteProjectRecords(project.Id);
                 // 刷新项目列表
                 RefreshProjectList();
                 Debug.Log($"项目 {project.Name} 删除成功");

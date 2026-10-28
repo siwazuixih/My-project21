@@ -99,6 +99,7 @@ public partial class RobokitController : MonoBehaviour
 
     public void ResetPosition()
     {
+        OperationLogTool.RecordLog(OperationType.真实运行, "请求底盘重定位（非完成确认）");
         // 根据官方文档：当 isAuto 为 true 时，忽略 x, y, angle，底盘将执行自动重定位 
         string json = "{\"isAuto\":true}";
         

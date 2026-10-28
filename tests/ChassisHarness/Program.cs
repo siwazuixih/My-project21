@@ -68,11 +68,11 @@ class Program
 {
     static async Task ReadExact(NetworkStream s, byte[] b)
     { int n = 0; while (n < b.Length) { int r = await s.ReadAsync(b, n, b.Length - n); if (r == 0) throw new EndOfStreamException(); n += r; } }
-    static async Task Scenario(string kind, bool expected, ushort motionApi = 3055)
+    static async Task Scenario(string kind, bool expected, ushort motionApi = 3055, bool legacy = false)
     {
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
-        int motionCount = 0, stopCount = 0;
+        int motionCount = 0, stopCount = 0, statusCount = 0;
         var robot = new RobokitController();
         var server = Task.Run(async () =>
         {
@@ -90,6 +90,7 @@ class Program
                     string response = "";
                     if (api == 1020)
                     {
+                        statusCount++;
                         if (!Encoding.UTF8.GetString(data).Contains("false")) throw new Exception("simple must be false");
                         int state = motionCount == 0 ? 4 : ++poll == 1 ? 2 : 4;
                         if (motionCount > 0)
@@ -110,6 +111,8 @@ class Program
                     {
                         motionCount++;
                         response = kind == "rejected" ? "{\"ret_code\":1,\"err_msg\":\"denied\"}" : "";
+                        if (kind == "noack") continue;
+                        if (legacy && kind == "disconnect") return;
                     }
                     if (kind == "wrongseq" && motionCount > 0) seq += 50;
                     byte[] packet = RobokitProtocol.Pack((ushort)(api + 10000), response, seq);
@@ -125,11 +128,27 @@ class Program
         try
         {
             await robot.TestConnect(((IPEndPoint)listener.LocalEndpoint).Port);
-            bool actual = await robot.ExecuteRelativeConfirmedAsync(motionApi, "{}");
+            if (legacy && (!robot.FieldConnectedTo("127.0.0.1", false) || robot.FieldConnectedTo("127.0.0.1") || robot.FieldConnectedTo("127.0.0.2", false)))
+                throw new Exception("legacy requires the correct navigation endpoint, not the status port");
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            var motion = legacy ? robot.ExecuteRelativeLegacyTimedAsync(motionApi, "{}", .65) : robot.ExecuteRelativeConfirmedAsync(motionApi, "{}");
+            if (legacy && (kind == "stop" || kind == "extra"))
+            {
+                await Task.Delay(260);
+                if (kind == "stop") robot.StopMovement();
+                else
+                {
+                    robot.SendCommand(3056, "{}");
+                    if (await robot.ExecuteRelativeLegacyTimedAsync(3056, "{}", .3)) throw new Exception("overlapping legacy motion accepted");
+                }
+            }
+            bool actual = await motion;
             if (actual != expected) throw new Exception(kind + " unexpected result " + actual);
+            if (legacy && statusCount != 0) throw new Exception("legacy must not query 1020");
+            if (legacy && expected && elapsed.Elapsed.TotalSeconds < .63) throw new Exception("legacy estimated duration was shortened");
             if (motionCount != 1) throw new Exception(kind + " motion resent");
-            if (!expected && kind != "disconnect" && kind != "wrongseq" && stopCount == 0) throw new Exception(kind + " stop not requested");
-            Console.WriteLine("PASS " + kind + " api=" + motionApi);
+            if (!expected && kind != "disconnect" && kind != "wrongseq" && kind != "noack" && stopCount == 0) throw new Exception(kind + " stop not requested");
+            Console.WriteLine("PASS " + (legacy ? "legacy " : "status ") + kind + " api=" + motionApi);
         }
         finally { robot.DisConnect(); listener.Stop(); await server; }
     }
@@ -139,12 +158,17 @@ class Program
         await Scenario("success", true, 3056);
         foreach (string kind in new[] { "stale", "failed", "paused", "canceled", "missing", "rejected", "running", "disconnect", "wrongseq", "wrongtype", "badstate" })
             await Scenario(kind, false);
-        Console.WriteLine("13 chassis tests PASS (loopback only)");
+        await Scenario("success", true, 3055, true);
+        await Scenario("success", true, 3056, true);
+        await Scenario("extra", true, 3055, true);
+        foreach (string kind in new[] { "stop", "rejected", "wrongseq", "disconnect", "noack" })
+            await Scenario(kind, false, 3055, true);
+        Console.WriteLine("21 chassis tests PASS (loopback only, legacy never queries status)");
     }
     static int Main()
     {
         var pump = new Pump(); SynchronizationContext.SetSynchronizationContext(pump);
-        var run = Run(); var deadline = DateTime.UtcNow.AddSeconds(45);
+        var run = Run(); var deadline = DateTime.UtcNow.AddSeconds(75);
         while (!run.IsCompleted && DateTime.UtcNow < deadline) { pump.Tick(); Thread.Sleep(1); }
         if (!run.IsCompleted) throw new TimeoutException("Test watchdog");
         run.GetAwaiter().GetResult(); return 0;

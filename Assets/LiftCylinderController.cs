@@ -44,6 +44,7 @@ public class LiftCylinderController : MonoBehaviour
 
     public void Connect()
     {
+        OperationLogTool.RecordLog(OperationType.真实运行, $"请求连接升降缸（IP：{ipAddress}）");
         if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked) return;
         try {
             tcpClient = new TcpClient();
@@ -60,6 +61,7 @@ public class LiftCylinderController : MonoBehaviour
 
     public void Disconnect()
     {
+        OperationLogTool.RecordLog(OperationType.真实运行, "请求断开升降缸");
         if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked)
         { FieldCommissioningPanel.Active.RequestStop(); return; }
         motionEpoch++;

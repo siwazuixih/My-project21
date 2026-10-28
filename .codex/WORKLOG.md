@@ -4176,3 +4176,191 @@
 - 计划提交当前源码到release/software-v1.0，附注标签v1.12-test.20261014；包含统一通信、现场联调、底盘确认、末端实测和时延测试，不改既有bundleVersion，不虚称实机发布。发布说明见RELEASE_NOTES_v1.12-test.20261014.md。
 - 推送确认后新建integration/wulaoshi-21.5-wlj集成分支，测试标签固定在集成前提交。具体推送结果/提交ID将在后续集成记录中补充。
 - 上传前核验：恢复dotnet依赖后，CLI因已卸载的VS Code Unity分析器路径而未完成编译（CS0006），未手改生成csproj。改由Unity 2022.3.62f2c1批处理导入/编译，退出码0，无C#错误；motion诊断7项单测通过。GitHub连接在沙盒外重试fetch成功，后续推送按实际远端SHA核验。
+- 本地已提交4f849ed（59文件）并创建附注标签v1.12-test.20261014；待上传文件最大约242KB，无新增大模型或运行数据。实际push失败：could not read Username for https://github.com。当前Git无credential helper、无gh登录，SSH代理也无身份；fetch成功仅证明能读取仓库，不代表有写入认证。远端上传尚未完成，标签尚未推送。
+- 遵循用户“先上传，再集成”的顺序，尚未创建集成分支或改业务代码。需要用户在原可认证终端推送release/software-v1.0和该标签，或先恢复GitHub认证；确认远端SHA后继续移植操作日志/运行历史。当前仅本记录的阻塞说明尚未提交，不改变已固定的测试标签。
+
+### 用户完成推送，远端备份已确认
+
+- 用户在原终端成功推送release/software-v1.0和v1.12-test.20261014。本轮只读ls-remote核验远端分支及标签解引用均为4f849ed8513d408352e9e95f2171d0fbd567ce8c，上传阻塞已解除。未移动标签或再次提交/推送。
+
+## 2026-10-14：分析testdata四组现场报告（未修改运行代码）
+
+- 用户要求分析../testdata。读取各级AGENTS、近期WORKLOG/PROJECT_CONTEXT、时延/联调说明、四组配置/构建/结果/日志/原始CSV，核对MotionDiagnostics、Gateway、ContactCycle、HybridExit和communication_latency_test源码。保留已有WORKLOG修改；未连接设备、修改原数据或启动新测试。
+- Python标准库只读重算：InsertOnly/WithdrawOnly均有10步2mm、193/197个非模拟有效轨迹采样，最后反馈轴向19.997643/19.998346mm；GetPose端点净位移20.000108mm，退出回到初始报告位置。耗时21.062/21.514s、平均轴向0.949565/0.929636mm/s；本轮配置1.2mm/s，不是2mm/s。J1/J6总变化约1.24°，其他≤0.53°，不能用机械臂主体肉眼不明显否认位移。
+- 两组每步间隙约0.277/0.291s，加查询/停等使整段均速下降；并非每小步Stop。均4次Stop且PASS，但使用original-timing位置稳定策略，不能据此称旧速度阈值已解决。末端自报微米级误差不作外部精度证明；过程最大横偏约0.17mm，不只看端点0.001mm。机械臂单测未启动电批，不是全流程验收。
+- 相机500帧/帧号32～531连续，14.9928fps；时间戳年龄估算平均79.89ms/P95=82.62ms，对齐12.47ms、拷贝0.63ms、等待53.53ms。不能当USB纯延迟、视觉闭环或经Unity新增时延。
+- 机械臂延迟正式两路线均0样本：首条direct预热约1001ms读到EOF（Robot disconnected），不是5s超时或有效慢响应；根因仍需控制器/Unity同期连接日志。只有本机echo100次平均15.08ms/P95=18.19ms，不足以算转发增量。建议先核对并发连接/只读会话，必要时分时基线；不自动夺控制权。
+- 新增详细TESTDATA_ANALYSIS_2026-10-14.md，仅修改分析文档及本记录，无控制/场景/配置/版本号改动，未编译/打包。当前现场分析完成，伍老师集成仍待后续继续；Unity本轮无需验收新增代码。下一步优先补机械臂A/B有效数据，并以末端固定机位刻度确认现场运动；按已有批准方案继续选择性集成日志/历史，不整包覆盖。
+
+### 追问：如何判断主要沿Y移动20mm
+
+- 复核插入motion.csv的stage_begin/stage_end及末段实际反馈、MotionDiagnostics与Gateway坐标链路。依据同一User=0、Tool=1的GetPose返回TCP位置作差：ΔXYZ=[-0.048,+20.000,+0.045]mm，而非根据关节角变化猜测、Unity画面或请求步长推算。严格表述为净位移主要沿User=0坐标系Y正向约20mm，不是路径完全无横偏。
+- 下发本意是工具局部-X插入，RelPointTool按当前工具姿态换算成User坐标目标；当前姿态该方向近似User+Y，不是硬编码始终沿Y，也不是工具Y/UnityY。TCP为Tool=1所定义参考点，物理刀尖位置取决于工具标定。仅补解释记录，未改运行代码、连接设备或重跑测试，暂无新增Editor验收项。
+
+## 2026-10-14：选择性迁入伍老师21.5.wlj日志和运行历史
+
+- 用户批准迁移。重新读取规则、记录/上下文及对比报告、来源增量和相关CRUD/UI/控制入口；当前仅分析文档已有修改，一起保留。由已上传4f849ed创建integration/wulaoshi-21.5-wlj，没有移动测试标签或改发布分支指针；来源工程保持原样。
+- 迁入模型/项目编辑字段前后值、文件信息、网格数量、目标/接头替换、运行/设备按钮及参数变更操作日志；新增/编辑判定修正。PendingParamLog改为显式加载基线+空闲0.6秒/关键操作Flush，观测方向退出也收尾。新增日志类别保持旧枚举数值。
+- 新增RunRecord/RunStepRecord、RunRecorder、RunHistoryCapture和各入口History partial。运行/步骤/收尾按项目持久化，深拷贝参数、同项目/来源续跑、runId隔离迟到回调、首因保留、未确认状态及IO失败进程内重试。LiteDB实际单测发现空字符串可读回null，查询层兼容，避免原成功原因空引用。
+- 复用wlj TaskList/RunTypeChose/RunRecordItem/StepDetailPanel/StepCellItem及两种prefab/图标，RunHistoryPanel按需绑定项目记录按钮。MainScene/RunScene不改，50条分页、模式筛选、中文字体、垂直/横向滚动、长摘要详情和返回；力矩/角度缺实测显示未采集，详情不运动重放。只移植实际有闭环的功能，不加入SelectedObjects/SceneModel.Time空结构或无关材质。
+- 仿真在预计算失败/IK失败/目标结束/复位时记录；离线全流程标SIMULATION/离线模拟并记录各阶段和收尾；原下发只记Dispatched非验收到位；现场记录模拟视觉、真实阶段及最终停止结果并链接报告。新Dobot.History只读新鲜collision标志分类。FieldWorkflow执行器保持原样，记录在面板包装层；原升降超时策略不变。
+- 日志目录初始化纳入异常保护，不因写盘失败阻断控制调用；原停止请求优先于额外日志IO。核心Gateway/Commissioning/Feedback/MotionDiagnostics、FieldWorkflow/Sequence、底盘确认、碰撞/IK、场景、ProjectSettings和Python等17文件与测试标签逐字节相同。没有新增运动命令、放宽许可或修改同学算法。
+- 验证：RunHistory真实LiteDB25项、OperationLog7项、FieldRobot77项、FieldWorkflow15项、Chassis13项、Python38项通过，合计175通过、另1项长时测试默认跳过。底盘Harness补无IO日志替身，现有执行器测试未引入历史库耦合。Unity批处理编译及预览UI绑定/中文/窄屏滚动/结果/详情/返回检查通过；未使用实际项目数据库或设备。新增Editor菜单Tools/Validation/Wulaoshi 21.5 migration可重复只读预览验证。
+- 修复中间验证问题：项目已有同名MenuItem类，Editor验证属性改全限定UnityEditor.MenuItem；预览场景父节点不激活时测试查询改includeInactive，非运行时控制错误。diff --check通过，保留Unity自动生成meta；没有手改生成csproj/缓存。
+- 新增迁移说明WULAOSHI_21_5_WLJ_MIGRATION_2026-10-14.md，更新PROJECT_CONTEXT和FIELD_COMMISSIONING操作。源码迁移与无硬件验证完成，尚未commit/push/打包/现场验收。
+- 下一步用户Editor进入测试项目执行仿真/离线，退出后从项目“记录”验收筛选/分页/长错误/详情返回/重启保留，确认原碰撞显示和实时同步未变；再完整Linux构建并按原指南实物验收。未测力矩实测接入、真实视觉、全指令归档和机械臂直连延迟故障不在本轮完成范围。
+- 最终核对MainScene层级ListPanel→ProjectTabPanel→ProjectManage，历史UI改为挂在原ProjectTabPanel内，菜单切换自动跟随父面板隐藏，不残留覆盖模型/权限页。项目删除确认明确同时删除运行历史。所有新增资源meta齐全、GUID无冲突，两个prefab依赖引用齐全；最终Unity预览验证退出码0，未产生生产历史数据库或修改场景。
+
+## 2026-10-14：审查真实运行接入拧紧流程和按钮职责（仅方案）
+
+- 用户报告通信中转测试已成功，要求先审查正式集成想法，不实施。读取各级AGENTS、上下文/近期记录及Git状态，核对Simulation.StartRun、ServoTighteningController、FieldCommissioningPanel、FieldWorkflowSequence、ConnectCommander.FieldWorkflow/旧SendArmRoutine、Python ContactCycle和服务启动。保留当前integration/wulaoshi-21.5-wlj的全部迁移改动。
+- 当前启动程序为Python服务启动/连接/关闭；开始拧紧与反转回位分别发forward/reverse，仅电批手动动作，不是完整卡入/退出或机械臂复位。服务启动会尝试连接并复位电批，不能泛称完全无设备交互。完整auto_cycle已在现场入口，正式StartRun仍是旧轨迹下发/离线模拟分流，尚未串接真实接触周期。
+- 建议正式开始运行统一编排设备粗定位、实际到位交接、模拟视觉、卡入—拧紧—退出、机械臂返程和下一目标，自动准备/复用Python服务；沿用同学算法及Unity唯一机械臂通信入口，不复制第二套控制器。若原启动程序按钮要触发动作，应明确改名为单次拧紧流程，与仅启动服务分开，且要求已完成对位/安全许可。
+- 保留手动拧紧/电批反转供调试恢复，自动流程期间互斥禁用；停止始终可用并路由到当前执行者，取消后续任务并停止相关设备，停止未确认不解锁、不自动复位/续跑。现有停止仅在FieldWorkflowOwned时转现场总停止，旧正式下发不能假定已被覆盖。
+- 集成前须处理originalContactTiming当前禁用③④的粗定位/交接兼容问题，核对精调及退出后到原返程轨迹的连续性；不能仅连接一个按钮或解除限制。结果按本次cycle_id/目标绑定，命令入队不算成功；NG策略保留算法约定（现有部分NG会先退出再返回失败），不推进下一目标。
+- 本轮只补本记录，未修改运行代码/场景/配置/版本号，未编译、连接设备、提交或推送。方案审查完成，等待用户确定单次按钮语义及批准实施；下次从可复用执行服务和正式入口接线开始。当前无新增Editor验收项，实施后需验收按钮互斥、阶段显示、完整周期/返程及停止首因记录。
+
+### 续：粗定位到位后人工继续的半自动方案（尚未实施）
+
+- 用户要求先认真审查，不修改实现：开始运行只推进到当前目标粗定位确认，等待按钮后跳过未完成的视觉、执行完整接触周期、返程、下一目标再等待。读取规则/上下文/记录和Git状态，核对Commissioning的MoveFieldJointsAsync、Gateway健康检查、FieldWorkflowSequence及旧SendArmRoutine/底盘确认。保留全部未提交迁移内容，本轮只补记录。
+- 区分现状：正式旧机械臂下发仍估时等待；现场到位条件为反馈年龄0～0.25秒、无报警/碰撞、mode=5、应答后反馈sequence、匹配本次motionId、六轴实际关节与目标误差均≤jointToleranceDeg（默认0.2°），条件持续0.3秒，超时失败（默认90秒）。不把ACK/估时/Unity显示/interval_elapsed当到位，亦非旧QDActual阈值判断。关节到位不证明工具尖端对准实物接头，需标定和人工对位确认。
+- 建议同一任务会话增加等待人工继续状态，保留执行占用与反馈监控，不把等待实现为结束任务/调用故障Stop。当前点成功、返程完成后可自动粗定位下一点，但每点均重新等待；按钮明确为确认对位并继续拧紧，不能调用仅forward的手动电批按钮。该模式不执行模拟J1/J2偏移、不伪记视觉成功。
+- 继续前重检反馈/空闲、暂停姿态、坐标系与工具服务/接触许可；双击只推进一次，绑定runId和targetId。暂停期间故障/停止使该许可失效，不能把Stop当继续；若人为改变位姿须重新验证对位及返程连续性，不能沿用旧许可。观察确认应在安全区域进行，暂停不是人员进入工作区的安全许可。
+- 仅完整卡入—拧紧—退出周期成功后才进入经核对的返程和下一点；失败/超时/通信异常不推进。原节奏多目标限制、粗定位执行节奏与接触后返程衔接仍须处理，不能直接移除限制或逐点新增Stop。底盘有状态完成确认；升降沿用原超时可继续策略，不将整机包装为严格全部到位已验证。
+- 本轮未改运行代码、场景、配置或版本号，未编译/打包/连接设备；当前无新增Editor检查。下次获准实现后先做等待/重复点击/姿态改变/停止失效/周期失败不推进的无硬件回归，再验收GUI与单目标实物流程。该阶段仅验证人工确认的半自动编排，非真实视觉或无人值守装配验收。
+
+### 续：澄清逐点等待与整段末端到位确认
+
+- 用户担心实际反馈确认会破坏原连续轨迹。只读核对规则/上下文/记录/Git状态、ConnectCommander.SendArmRoutine、DobotController.MoveJoints、FieldWorkflow.ExecuteFieldTaskAsync、Commissioning.MoveFieldJointsAsync，并重新阅读用户V4.6.0 TCP PDF的平滑过渡、MovJ、GetCurrentCommandID章节。未覆盖已有迁移改动。
+- 确认具体差异：普通MoveJoints使用MovJ cp=50配合估算发送间隔；现场执行foreach逐点await MoveFieldJointsAsync，而该方法发送cp=0并等待本点空闲/角度误差合格持续0.3秒。因此直接搬用现场逐点实现确实会形成停等，前一轮不能仅描述到位判据而忽略这一执行差异。读反馈本身不是停顿原因。
+- 修正拟议半自动方案：区分控制器接受应答和物理到位，段内保持有序连续下发/受控队列与在线健康监测，不把每个过渡点作为静止关卡；仅粗定位/返程等阶段交接末点严格核对本段最后命令ID、新鲜反馈、空闲及最终关节误差。进入人工等待前不得预排后续运动，不靠人为缩短间隔推断队列/运动完成。
+- 厂家文档说明cp影响当前与下一运动的过渡，返回ResultID表示已接受排队而非完成；速度/加速度会影响平滑曲线。原cp=50不是误差50毫米或已认证路径保证，不能盲目增大cp/无限堆队列；保留已有经验证节奏并核对平滑后的碰撞余量。末点停止交接不等于逐点发Stop，接触Python算法不在本次讨论中改写。
+- 仅更新本记录，未改运行代码、编译、操作设备或提交推送。当前完成解释和方案修正，无新增Editor验收项；后续实施需回归段内不逐点停等、应答拒绝/队列失败、末点未到位不放行、停止取消与返程衔接，再现场核对连续性。
+
+### 续：cp=50是否只插值而不改变路径
+
+- 只读核对规则/上下文/记录、Git状态、普通MoveJoints与用户TCP文档印刷页77～78/MovJ说明。文档明确平滑过渡会不经过中间点，cp曲线还受速度/加速度影响；因此发送点表不变不等于实际路径不变，不能把cp=50解释为严格经过各点的补点插值、50毫米半径或固定误差界限。
+- 当前普通轨迹本来使用关节MovJ cp=50，不是本次方案新增；段末反馈确认本身不重算轨迹，但供点节奏/队列及运动参数变化可能影响实际过渡，不能未经验证承诺前后路径逐点一致。MovJ是关节运动，不保证工具TCP沿两点笛卡尔直线；平滑后需关注整臂碰撞余量和关键点准确到位。
+- 本轮只补解释记录，保留全部迁移修改，未改运行代码、编译或操作设备，当前无新增Editor检查。后续实施应保持/核对原运动设置与供点条件，阶段末不跨阶段混合；不以cp数值直接推断偏差或擅自增大平滑。
+
+### 续：现有发送间隔盘点与段末确认的关系
+
+- 用户询问cp/段末确认是否取代原间隔，以及原来有哪些等待。读取规则/上下文/记录/Git状态、ConnectCommander定义/下发/子任务切换、FieldWorkflow/Commissioning/Settings、RunScene等场景序列化值及Python ContactCycle/HybridExit。保留所有已有迁移修改，只补本记录。
+- RunScene实际保存armJointSpeedDeg=5、armCommandBufferTime=0、armFirstPointWaitTime=10、armMinWaitTime=0.2、armMaxWaitTime=0；与脚本声明默认3/0.5/20不同。旧协程每次调用MoveJoints后等待max(0.2,最大六轴角差/5+0)，max=0表示不设上限；只有缺少previousJoints时使用10秒兜底再限幅。估算5°/s不等于真实SpeedFactor/实际关节速度，Unity调度与串行通信也使其不是硬实时发送周期。
+- 原正式组内子任务之间硬编码0.8秒；升降启动0.5秒、轮询0.2秒、超时10秒、末尾0.5秒。RunScene还保存底盘commandBufferTime=0.5/rotTimeBuffer=5/moveTimeBuffer=5，但当前SendChassisConfirmedCore已使用完成状态，不引用这些旧估时字段；底盘状态轮询默认0.2秒。离线动画时间不能当实物发点间隔。
+- 现场到位检查50ms轮询、满足条件0.3秒/超时默认90秒，均不是段内发点频率。接触默认2mm步长/1.2mm/s对应每步名义1.667秒（最低0.2秒）及额外查询开销；拧紧前/退出前默认各5秒。现场JSON可覆盖接触/超时值，不与RunScene粗定位等待混为一谈。
+- cp负责运动过渡，实际终点反馈负责阶段完成，均不自动替代供点节奏控制。第一轮建议保留经验证的段内节奏并加强应答/有界队列，末尾以实测确认替代估时放行；以后验证可靠队列流控后可替换角差估时/人工调间隔，而不是直接删所有等待或一次塞全部点。
+- 未改运行代码、场景/参数、版本号或现有构建，未编译/操作设备/提交推送；本轮盘点完成，无新增Editor检查。提供的数值是当前工程场景保存值/源码默认值，不能宣称等于工控机旧包或运行中临时改过的参数。
+
+## 2026-10-14：实现正式真实运行的连续粗定位与逐目标人工继续
+
+- 用户批准按讨论实施，并询问底盘/电缸完成检测的实测依据。读取项目规则、上下文/历史/Git状态、Simulation/ServoTightening/FieldPanel/FieldWorkflow/Commissioning/Gateway、RunScene发送参数、底盘确认说明及testdata、升降反馈/超时逻辑和现有Harness。保留integration/wulaoshi-21.5-wlj已有全部日志/历史迁移，未创建分支、改标签或覆盖来源工程。
+- 新增ArmTrajectoryTiming、ManualTargetGate、DobotController.Trajectory及meta。冻结原角差/估速/缓冲发送节奏，逐条校验ACK，中间MovJ cp50、末点cp0；ACK耗时计入发送间隔，最多16个未确认执行完指令（软件限额，不是API容量声明），停滞失败。段内监控健康/限位/取消，不逐点等空闲或发Stop；仅整段末检查最后ID、ACK后新反馈、空闲、六轴容差持续0.3秒。轨迹全部预检，真实起点不匹配不发运动；新ID不能复用交接前ID。
+- ConnectCommander.FieldWorkflow增加半自动计划与执行入口，深复制/明确返程起点，返程末点须回粗定位起点；执行前实际关节须匹配起点。接触退出后不一致即停止，不擅自插入大步补偿或改算法。旧现场逐点执行/原节奏③④限制保留，正式半自动单独走新执行器，Python及Gateway/Commissioning协议不改。
+- FieldCommissioningPanel复用原占用、停止、首因和导出管线，新增SemiSingle/SemiMultiple：粗定位→ManualTargetGate→完整ContactAsync→返程→下一目标重新确认。未执行视觉或J1/J2模拟偏移；人工确认仅针对当前任务代次/目标，重复/旧点击/停止/暂停位姿改变不放行，位姿改变会永久失效本关卡。继续前重查末点/坐标系/新鲜反馈及电批就绪，跨会话迟到回调不影响新任务。报告增加trajectory-timing.json及semi-automatic-trajectory-v1-2026-10-14标识，历史明确人工跳过视觉/电缸规则，关键轨迹日志进入原增量诊断。
+- Simulation真实StartRun转半自动，原离线分流保留；真实页单步标签改单目标，勾选执行一目标、不勾选逐目标。没有现场显式确认时只打开参数提示。Servo原启停按钮在会话等待期间显示确认并拧紧，其余阶段禁用；人工正反转互斥，停止在服务未就绪时也可用。速度/IP/单目标/模拟选项本次冻结并锁定，未确认停止保持锁，恢复仅解锁不续跑。真实速度用现场JSON，原角差估速不是SpeedFactor。未动场景YAML，删除不再使用的私有runIndex。
+- 核实底盘：3055/3056接受应答后观察1020 RUNNING(type7)→COMPLETED(type7)，失败不推进；重跑13项本机假底盘通过。现有记录/testdata/下载日志没有找到此状态完成链路的实机验收证据，不能把旧底盘运动成功说成新完成检测已实测。电缸已有位置比较，但读取失败返回0和超时后继续按用户原要求保留，未改为严格可靠到位；操作说明明确不能宣称整机无人值守完成验收。
+- 验证：FieldWorkflow34、FieldRobot96（含新轨迹不中间停等、队列16上限、真实Stop阻止后续下发、ID/起点/反馈异常拒绝、接触占用释放后连续返程）、Chassis13、Python38、RunHistory25、OperationLog7通过，共213项；Python另1项长时默认跳过。所有socket测试经审批仅本机假服务，未连接相机或任何实物。
+- Unity批处理因用户已有实例占用而退出，未关闭编辑器/删除锁/强制导入。新增Editor菜单SemiAutomaticValidation提供无硬件预览按钮检查，但本轮未执行；当前GUI待人工验收。独立dotnet恢复使用-m:1成功，通过临时/tmp targets纳入新源并跳过不存在的旧扩展分析器，未手改生成csproj或永久IDE设置；最后main+Editor编译0错误、46警告。新增meta齐全且GUID无冲突，git diff --check通过。
+- 更新FIELD_COMMISSIONING操作说明与PROJECT_CONTEXT。源码和无硬件回归完成，未打包、提交、推送或实机验收，旧TEST目录/内部版本号不变。
+- 下一步：用户Unity退出Play刷新，确认Console，非Play运行Tools/Validation/Semi automatic toolbar；生成任务、核对真实起点/限位/速度/工具方向和急停，先单目标监护验收粗定位末点等待、停止不推进、一次人工继续完整接触与返程，再逐目标模式。底盘需单独采集运动应答→RUNNING→COMPLETED及取消/失败的现场日志，不忽略短动作或未知状态；电缸可靠失败处理仍为已知边界。
+
+### 2026-10-14：截图定位单目标选项与程序按钮（仅检查/解释）
+
+- 用户询问单目标测试在哪及启动程序是否还有作用，随后要求继续。重新读取规则、近期上下文/记录、Git状态，核对Simulation.StartRun/UpdateModeUI、RunScene序列化Toggle/Text和SetStepRun事件、Servo.ToggleProgram/UpdateButtonState及FieldPanel服务准备。保留全部已有改动。
+- 确定上轮改名存在遗漏：Text组件1617142249挂在父StepRun，Toggle1996715701在子ToggleTarget，UpdateModeUI只GetComponentsInChildren导致父文字未改；截图仍显示单步运行并非独立单目标按钮。当前新源码中该选项勾选→SemiSingle、不勾选→SemiMultiple，事件绑定正确。没有据截图断言用户已运行新版包。
+- 启动程序在空闲时仍启动/连接后台服务（可能连接/复位电批），不是完整装配；半自动开始会自动准备服务，不需预先点击。只有会话到位等待时原按钮才切为确认并拧紧，其余执行阶段禁用；结束恢复服务启停。未连接设备的截图属于空闲显示，不能期待此时出现继续按钮。
+- 本轮只更新检查记录及PROJECT_CONTEXT已知显示问题，未改运行代码/场景、编译、打包或操作设备。下一步若修复，应只向已绑定Toggle的StepRun父节点取标签并补真实层级预览测试，不扫描整个面板误改其他标签；用户当前可定位右侧速度滑条下“单步运行”右边勾选框，但旧TEST包须重新构建，不能用截图标签判断新旧执行逻辑。
+
+### 续：点击开始运行自动打开现场面板的原因
+
+- 用户新截图显示半自动前置提示及真实开始运行说明，核对规则/上下文/记录/Git状态、StartSemiAutomaticAsync、确认框、ReadSettings及限位校验。直接原因是confirmed=false：只将visible设true、提示核对后return，本次点击未进入RunAsync/下发运动；该特定提示能确认当前已走新版半自动入口，不再仅凭旧标签推断。
+- 图中设备未连接、六轴jointMin/Max均0是后续启动尚不具备条件的独立证据，不是本次弹窗的直接触发原因。正式入口复用了现场参数及本次许可；这增加了一步配置确认，界面说明需明确，无需改点旧现场①②③④。
+- 仅补解释记录，未改运行代码/配置、未连接设备或编译。需先用已核对现场参数及真实限位、连接/准备设备、人工安全确认，再使用右下开始运行；无实物时保留离线模式，不虚构限位或勾选绕过。本轮无新增Editor修改验收项，父节点标签显示修复仍待实施。
+
+### 续：全流程模拟仍执行旧自动路线的检查
+
+- 用户反馈勾选全流程仿真后不像约定的人工继续流程。读取规则/上下文/记录、Git状态，核对Simulation.StartRun提前离线分流、ConnectCommander.DispatchFullProcessValidation/ExecuteFullProcessValidationRoutine及FieldPanel人工等待；保留全部已有改动。
+- 确认原因：本轮实施只修改真实入口，旧离线仍自动回放粗定位、七执行器模拟视觉、auto_cycle_sim、返程及下一目标，不进入ManualTargetGate，程序按钮也不切人工继续。不是用户漏勾确认，也不能据此判断真实入口回归失败；上一条建议无硬件用模拟没有明确该功能范围，需纠正解释。
+- 如用户希望在电脑演示新流程，应另将离线编排同步为粗定位动画结束→人工关卡→模拟周期→返程→下一目标重新等待，并复用一次性确认/取消保护；不依赖真实连接或放宽限位，模拟结果不作实物到位/接触验收。当前只诊断和记录，未改运行代码、编译、打包或连接设备；该离线同步及父节点标签修复仍待后续实施和GUI验收。
+
+## 2026-10-14：离线模拟同步人工继续，并保留小幅模拟视觉
+
+- 用户明确批准同步，要求模拟视觉有小幅运动。读取各层AGENTS、PROJECT_CONTEXT/近期WORKLOG、Git状态，核对ConnectCommander离线协程/模拟提供器、Servo程序生命周期/按钮/协议、FieldPanel、Simulation标签/切换、V26启动线程与ContactCycle取消及现有测试。保留integration/wulaoshi-21.5-wlj上已有迁移/真实半自动未提交内容；未操作发布分支/标签或来源工程。
+- 新增OfflineTargetSession及meta：复用ManualTargetGate、目标/代次绑定一次继续，增加第七轴控制量检查。ConnectCommander离线副本冻结规划与模拟点，逐目标粗定位动画→关卡→小幅精调→auto_cycle_sim→沿精调点反向撤回→原返程→下一点新关卡；七执行器默认原小幅偏移保留，不重写视觉/拧紧算法。动画控制量不是实物反馈，结果/历史显式标模拟。
+- 统一嵌套离线协程驱动以捕捉异常并收尾；取消贯穿人工等待与Python周期，启动中取消须等启动结果再清理，场景销毁也处理迟到的本次模拟进程。冻结/锁定本次输入与跟随选项；ClearAllTasks在模拟占用中先取消，不改执行中的缓存副本。运行失败不返程、不进入下一目标。
+- Servo新增OfflineWorkflowOwner、StartSimulationProgramAsync及模式回执核对；等待时原按钮为继续（模拟），其他阶段禁用，正反转互斥，停止在Python尚未就绪时也可用并只取消模拟。FieldPanel显示轻量状态/继续/停止，不混入实物许可大面板。Simulation修复StepRun父文字漏改，并补对应Editor预览断言；不改场景YAML/ProjectSettings。
+- 检查发现旧StartProgramAsync会启动tcp_receive并连接/复位电批，旧ContactCycle模拟stop还会发无主Gateway Stop，故同步增加隔离保护而非只改动画：V26设置SERVO_SIMULATION_ONLY、返回simulation_only，不启动实物接收/命令/终端键盘线程，底层发送函数同样拒绝、命令白名单只准模拟；真实默认不变，C#拒绝混用服务模式。模拟取消仅设置cancel并清理带token的模拟会话，不发无主实物停止；真实停止仍中断Gateway并停止电批。
+- 修改文件：ConnectCommander.cs、ServoTighteningController.cs、FieldCommissioningPanel.cs、Simulation.cs、Editor/SemiAutomaticValidation.cs、V26脚本、servo_contact_cycle.py；新增OfflineTargetSession、tests/OfflineWorkflowHarness、test_offline_isolation.py、smoke_offline_service.py；扩展FieldWorkflowHarness与test_motion_diagnostics测试桩。更新本记录、PROJECT_CONTEXT和FIELD_COMMISSIONING操作说明。
+- 无设备验证：FieldWorkflow42、OfflineWorkflow12（编译原生产协程提取段，Unity/服务依赖替身；两目标等待/小幅动画/深副本/双击/失败/姿态改变/点击时首因不被取消覆盖/取消/迟到启动）、FieldRobot96、Chassis13、Python46、RunHistory25、OperationLog7通过，共241项；另1项长时默认跳过。首轮Python网络测试被沙盒拒绝，获准仅127.0.0.1后复跑通过；期间修正AST测试桩缺失新标志和Python3.8无ast.unparse兼容。真实V26隔离子进程+实际C#假Gateway在临时目录完成SIMULATED_OK、取消、6类实物命令拒绝，假电批监听器确认零连接；结束仅清理本次子进程/临时测试目录。未连接任何实物或相机。
+- 独立main+Editor C#编译0错误47警告（主要反序列化字段未赋值等已有告警，新标志同类），通过/tmp临时targets纳入新文件，未手改生成csproj/永久IDE设置。git diff --check通过。Unity已有实例占用，未强制关闭/批处理/修改锁；预览菜单与真实Play界面未执行，源码及无硬件回归完成，不宣称GUI/实机验收。
+- 未打包、提交或推送，旧TEST目录与版本号未变。下一步用户退出Play等待导入，非Play可跑Semi automatic toolbar菜单；生成任务、勾选全流程验证（模拟）、开始运行，核对每点等待与底部继续（模拟）、小幅精调、返程后再次等待、取消/失败不推进及模式服务不混用。真实流程仍是人工跳过视觉不模拟偏移，不能把离线成功当实机到位/视觉/拧紧验收。
+
+## 2026-10-14：新增底盘新/旧模式兼容开关
+
+- 用户担心现场新状态确认不兼容而无法测试，要求手动切换新旧模式。读取各层AGENTS、PROJECT_CONTEXT/近期WORKLOG与Git状态，核对当前底盘/FieldWorkflow/Settings/FieldPanel/Servo/历史/测试、git show v1.10的旧路径公式、RunScene实际0.5/5/5/0.2/0等待参数和底盘完成/操作说明。保留integration/wulaoshi-21.5-wlj上所有迁移、真实半自动及离线同步未提交内容；无分支/标签/远程写入。
+- 新增ChassisLegacyTiming及meta，原弧度或距离除速度+通用/阶段缓冲、最小等待公式，默认取当前RunScene旧节奏；旧最大等待原先可截短耗时，本次安全处理为拒绝截短、单段600秒硬边界。FieldCommissioningSettings新增默认false的useLegacyChassisTiming和嵌套legacyChassisTiming；缺字段旧JSON保持新模式，缺嵌套配置补默认，Copy保留模式并深复制等待参数。
+- FieldPanel在现场参数中提供旧模式勾选框，切换撤销本次许可，须保存参数/重新安全确认；执行或停止锁定中拒绝切换。会话冻结模式/等待，ConnectCommander共用原几何/平动3055/旋转3056与方向，按模式分发；当前段复制速度/路径和时间，不随Inspector/规划缓存改动。新模式失败不自动降级，不自动重发运动。旧模式保留发送匹配应答和取消/拒绝/断线/超时保护，不回退fire-and-forget。
+- RobokitController.ConfirmedMotion增加ExecuteRelativeLegacyTimedAsync，不查询1020，ACK耗时包含在总估时中，等待可取消，失败尝试3003。两模式共用占用和epoch/停止版本保护；FieldConnectedTo新增requireStatus参数，旧模式只要求导航端点，新模式仍要求状态与导航端点，规范化IPv4-mapped IPv6避免端点误判。未新增未知硬件API或改包结构。
+- 旧模式底盘整段估时后，FieldPanel以独立ManualTargetGate等待人工核对位置/朝向与停稳，未确认不进入升降/机械臂；实际关节快照仅保护机械臂姿态，不伪作底盘反馈。Servo原程序按钮在此阶段为“确认底盘”，不同于后续粗定位的“确认并拧紧”；双击、停止、旧代次、反馈/连接异常不放行。原离线流程不走此分支。首次安全确认补充底盘已停稳/无其他任务要求。
+- TrajectoryTask新增非序列化dispatchEvidence，FieldPanel/ConnectCommander.History日志与历史区分状态确认、旧估时和人工确认，旧模式不记“设备自动执行完成已确认”；底盘关键日志追加到原增量报告，configuration.json/历史参数保存选择和时间。
+- 修改：FieldCommissioningSettings、RobokitController.ConfirmedMotion、ConnectCommander、ConnectCommander.FieldWorkflow、ConnectCommander.History、FieldCommissioningPanel、ServoTighteningController、Editor/SemiAutomaticValidation、FieldWorkflow/FieldRobot/Chassis/OfflineWorkflow测试及提取脚本；新增ChassisLegacyTiming。更新CHASSIS_COMPLETION、FIELD_COMMISSIONING、PROJECT_CONTEXT和本记录。不修改场景YAML、ProjectSettings或Python算法。
+- 验证：假底盘21项（原13+旧模式8：零1020请求、平动/旋转/原等待、并发拒绝、停止、拒绝、错误流水号、断线/无应答），FieldWorkflow50、原离线/实际路径提取Harness19（新增选路、模式/时间/速度/路径冻结、证据、新模式失败不降级及段间取消），FieldRobot96、Python46、RunHistory25、OperationLog7通过，共264项；另1项Python长时跳过。socket仅获准127.0.0.1假服务，未连接任何实物。测试中发现mapped地址核对误判并修复，补入新源依赖。
+- 独立main+Editor编译0错误47警告，临时/tmp targets纳入新类，未手改生成项目/永久IDE设置；git diff --check通过。尝试Unity批处理执行无硬件预览仍被项目已占用拒绝，未关闭用户编辑器/删除锁/强制Play，不能声称GUI验收完成。Editor预览已补“确认底盘”标签/互斥/重复点击/选择写回JSON并撤销许可断言，待人工执行。
+- 已完成源码及无硬件回归；未打包、提交、推送或实物测试。下一步：Unity退出Play等待导入，现场参数切换/保存/重新启动验证模式记忆与运行中禁用；先监护单目标，旧模式估时后确认底盘位置/朝向与停稳，再检查升降/机械臂粗定位及后续拧紧人工关卡。新状态完成链路仍需实机RUNNING→COMPLETED日志；原协议包/流水号/ACK不匹配不会被此开关绕过，升降既有超时策略仍未改变。
+
+## 2026-10-15：诊断±360范围仍触发相邻关节差超限（未改运行代码）
+
+- 用户提供现场截图：提示“规划路径相邻关节差超限”，JSON中maxJointStepDeg=5，并说明各轴上下限±360。读取规则、上下文/近期记录和Git状态，核对FieldCommissioningSettings、ConnectCommander.FieldWorkflow的计划预检、ExtractArmJoints及FieldPanel启动顺序；保留所有已有未提交修改。
+- 确认报错来自应用SnapshotFieldPlan对同轴相邻规划值的绝对差检查，不是CheckJoints的绝对范围检查，也不是厂家返回的限位报警。±360约束目标角度范围，5°约束每对规划点差值；起点到首点、粗定位/返程均可能触发，本次选中计划会在运动与BeginReport前检查。ExtractArmJoints将缓存弧度转为度后比较，不涉及底盘模式。
+- 截图/现有泛化提示未包含目标、阶段、点号、轴号和前后角度，因此不能判定具体超限点，也不能断言轨迹错误或现场角度读取错误。需下一步经用户批准补精确诊断，再区分点过疏、路径拼接或角度表示跳变，不能盲目放宽5°或把所有真实软限位假设为±360。
+- 本轮仅记录和解释，未修改代码/参数/场景、编译、打包、提交推送或操作设备。当前完成报错类别定位；具体触发点仍待轨迹数据/诊断。Unity现场无需因本轮重新打包；后续获准加日志后需重新部署并复测精确提示。
+
+### 续：参数改10/100仍失败，与本机相同目标点位的说明
+
+- 用户新截图报错已变为“相邻关节目标最大差值必须在[0.01,10]内且为有限数值”，并确认现场目标点位与本机模拟一致。重新读取规则/上下文/记录/Git状态，核对Settings.Validate、Simulation.StartRun分流、FieldWorkflow及Trajectory二次检查；保留既有未提交修改。
+- 存在两层软件保护：参数本身硬上限10；通过参数校验后才按maxJointStepDeg检查规划相邻角差。100必然先触发前者；当前源码精确有限值10应通过参数范围校验，若现场10仍报这条，需核对实际读入值/现场构建，不能断言轨迹差必然大于10。上一条解释遗漏了参数硬上限，应明确纠正，不能继续让用户盲改。
+- 同一目标点位也可能模拟通过而真实入口拦截：离线DispatchFullProcessValidation直接回放，没有调用真实SnapshotFieldPlan/ExecuteFieldTrajectoryAsync的同一小步长预检。不能据此认定用户选点错误，也不能把“同一目标”当作已经核对过起点、采样点表及角度映射完全一致。
+- 5°默认及10°参数上限是应用加入的通用防异常跳变策略，不是厂家API运动上限；正常大角度MovJ不能仅据这项认定为错误。后续应经批准调整预规划轨迹的步长策略并提供具体读入值/目标/阶段/点/轴/角度诊断，真实软限位、起点一致性、反馈/故障/取消/终点到位保护不随之取消。当前仍无触发点数据，未执行放宽/移除代码、编译或硬件测试；无新增Unity验收操作。
+
+## 2026-10-15：快速分析testdata/1的新现场日志（只诊断）
+
+- 用户称新数据在testdata/1，且换上次成功版本仍失败。读取规则/上下文/记录/Git状态，定位实际路径wulaoshi/testdata/1（不在项目根且被默认忽略）；核对两份result/config/build/run/stop/cycle-failure/motion及10月8日成功报告、Gateway坐标切换、Servo服务生命周期和用户Dobot TCP V4.6.0 PDF工具坐标章节。保留未提交代码，本轮仅更新记录/上下文。
+- 15:45:45（UTC报告074545-60ea0caa）为InsertOnly，maxJointStepDeg=10合法，失败是Python本机服务配置请求Connection refused：46.786服务ready，46.867已安全关闭，46.901配置请求失败。存在服务就绪后被提前关闭的生命周期问题；源码UpdateButtonVisibility在真实UI隐藏时自动StopProgramAsync且不排除FieldWorkflowOwned，属于可疑触发路径，但日志没有调用来源，不能断言必由它或其他实例触发。
+- 15:46:11（074611-6a34bde2）为InsertOnly，Python配置成功，User(0)返回0并确认，随后Tool(1)返回-1导致获取阶段权限失败；cycle-failure首因及result均一致。用户PDF印刷第21页明确Tool返回-1表示工具坐标索引不存在，不应将通用错误码猜成速度/运动/刚才步长阈值。Tool(1)指机器人工具坐标系，不是电批的TCP连接编号。未进入插入ServoP阶段，motion.csv仅表头；后续Stop/停止锁存是清理，不是首因。
+- 对比10月8日105135-3155dc3e、105240-f2a927cf：同样toolNumber=1，Tool(1)均返回0并FRAME_CONFIRMED，实测单阶段成功。当前控制器对1号坐标系的认可状态已与上次不同；具体是否工程切换、标定删除/未保存/载入不同配置尚需示教器只读截图，不能直接改0或新建零偏移工具冒充已标定工具。旧软件不会恢复控制器坐标系或共用配置。
+- 两份新报告build-info完全相同（assemblyId=67c0a3eb-3d83-4f61-a5d1-cfe7d275f5ca），目前拿到的是同一构建数据，不能据此审查用户所述旧包复测。另有Tool拒绝之后的OperationLog LiteDB ReadFull PAGE_SIZE错误，属于独立日志存储问题，非本次首因；未删除/修复任何数据库。
+- 已完成这两份日志的首因与上次对比，未改运行代码/参数、编译、重跑设备、提交/推送。下一步先只读核对示教器工具坐标系列表与1号标定是否存在/已保存，必要时补旧包失败报告与服务关闭来源诊断；现场确认前不绕过Tool错误、不默认切0、不继续发送接触运动。后续若批准修服务生命周期，需测试现场流程占用时不因UI隐藏误关服务，并保留真实停止路径。
+
+## 2026-10-15：核对本机仿真规划关节坐标为什么触发步长限制（只诊断）
+
+- 用户表示末端TCP问题已解决，要求检查仿真输出机械臂坐标与限制的关系。读取各层AGENTS、PROJECT_CONTEXT/近期WORKLOG、Git状态，核对MissionController.DeepPrecomputeAll、BITStarPlanner.Plan/IsValidConnection、ConnectCommander.AddArmTask/ExtractArmJoints/离线逐帧动画、FieldWorkflow计划预检、Settings.Validate、DobotController.Trajectory、RunScene的轴索引/初始姿态，以及本机Editor.log。保留全部既有未提交代码；未再次展开工具坐标故障或操作控制器。
+- Editor.log对应当前My project21.5工程，最近目标1起始compact为a0～a5 joint1～6约[0,45,-90,-90,-90,0]°，a6 joint10为升降0米；目标六关节约[48.7931,-32.9966,34.6410,-1.7361,-254.3646,-41.5681]°。原日志只留四位弧度小数，所有换算角度均为近似。六轴相邻差依次约48.7931、77.9967、124.6412、88.2641、164.3644、41.5681度；无整圈边界跳变也足以触发，不能继续泛猜角度读错。
+- 日志明确“直线是否无碰撞: True”“IK候选1可直连”；Plan直接返回起终两个compact点。AddArmTask仅对单点解插值，两个及更多点原样复制；当前粗定位点1→2会首在J1触发>5/>10，最大变化为J5约164.36度。起点至首点基本相同，此次不是从真实反馈起点接入导致。真实预检检查的是关节度数，不是末端XYZ/TCP，也不是升降轴。
+- 离线全流程ExecuteActuatorPlanRoutine在两个缓存点之间SmoothStep逐帧改Control，原仿真ArmController也逐步StepTowards/Lerp，画面的平滑中间帧并未写回taskPlaylist。真实预检只看缓存点，所以同一目标可模拟运动但被新检查拦住。另发现single-IK/显式复位采用固定10点，也未根据总角差自适应保证5/10度步长；本轮未改这些分支。
+- 在/tmp/trajectory-step-diagnosis-20261015-O259sI创建临时Probe（非项目运行代码），链接当前生产FieldWorkflow/Settings与现有FieldWorkflowHarness的Unity/设备替身，解析日志端点重放SnapshotSemiAutomaticPlan：5和10参数校验及±360绝对范围均通过，随后精确复现“规划路径相邻关节差超限”；100精确复现参数[0.01,10]范围错误。只在临时内存将同一关节线段均分33段后通过5度预检，粗定位34点/逆向返回35点；没有调用任何设备/网络方法。此比较不作实物安全验收或实际路径/速度等同证明。
+- 结论：本机该计划的稀疏端点表示与新加微步阈值不匹配，不是用户选错目标，也不是±360不起作用。后续经批准应在规划→执行适配层按线段采样，或拆分已规划粗定位与微调的步长策略，并让模拟/真实共用诊断、记录目标/阶段/点/轴/角差；保留实际软限位、起点核对、反馈/故障/停止/段末到位保护。改变点密度需同时评估原发送节奏与cp，不承诺真实路径精确不变。
+- 本轮只更新WORKLOG和PROJECT_CONTEXT，项目运行代码/场景/配置、实时任务缓存、限位、旧TEST包均未修改；未打包、提交推送、连接硬件或触发Unity Play。临时诊断编译与执行成功，git diff --check检查记录；无需用户本轮重打包。下一步若实施修复需另获授权，并在Unity验证轨迹/返程的精确预检和离线演示；现场具体轨迹与本机是否逐点相同仍需导出，不能把本机日志数值冒充现场采集。
+
+## 2026-10-15：实施规划机械臂路径自适应采样，解决稀疏端点被小步长拦截
+
+- 用户明确批准修改。重新读取各层AGENTS、PROJECT_CONTEXT/近期WORKLOG和Git状态，检查规划输出/任务副本/真实执行器/发送节奏/离线动画、现场报告与现有测试；保留integration/wulaoshi-21.5-wlj上全部既有迁移/半自动/底盘开关未提交内容。本次只改采样适配与对应诊断/测试/说明，不改同学拧紧算法、工具标定或底盘通信。
+- 新增Assets/ArmTrajectorySampling.cs及新meta：compact数组按六机械臂转动轴rad→deg计算最大角差，ceil(delta/配置步长)逐条原线段自适应细分；保留所有原拐点、端点和轴顺序，对额外控制量保持原单位线性插值，不当关节角决定点密度，不做±360折返/IK重求。深拷贝原点与采样点并保存来源/份额；非有限数值/维度/索引/步长错误拒绝，含float 0.01边界处理及每任务100000点上限。
+- ConnectCommander.FieldWorkflow在真实计划副本适配粗定位与两类返程，执行前仍逐采样点检查绝对限位/相邻步长。先验证返程声明与粗定位终点，既有容差内统一起点后采样，缺声明且首点不匹配拒绝自动补接；自动逆向返程显式声明起点，跨目标起点与原复位终点核对不变。空点在逆向克隆前给出源点诊断。ExtractArmJoints改双精度180/Math.PI，避免float换算边界误差；不改映射符号/偏置。
+- 原角差÷估速＋缓冲及最小/最大等待在每条原规划段上算一次，新增采样点按份额分摊，避免补点倍增固定缓冲/最小间隔。DobotController.Trajectory接收并复制对应间隔，核对点数/非负有限数值，执行器仍拒绝未经采样的大步跳变，精确记录目标/阶段/点/轴/前后角/差值/发送间隔。保留逐条ACK、中间cp50、末点cp0、16条待确认窗口与停止/反馈保护；段内不逐点等待停稳或Stop，仍只在末条确认本次ID/新反馈/空闲/六轴误差稳定0.3秒。
+- 全流程离线在各机械臂段执行前复用采样检查（默认5度，不依赖实物许可/限位），动画保持沿原线段逐帧插值，不给每个补点重复播放原0.25秒；保留人工继续/模拟精调/周期/返程/取消收尾。FieldCommissioningSettings注释及FieldPanel界面明确maxJointStepDeg是规划采样密度，通常保留5，不需改100；单步微调限制未放宽。
+- 正式半自动新增trajectory-plan.json：起点、原始与采样六轴角度、点号、来源点/份额、原最大角差/轴、发送节流；末点节流0明确不是跳过实际到位。trajectory-timing.json补分摊说明，build-info标识升级sampled-trajectory-v2-2026-10-15。Editor/SemiAutomaticValidation补Unity JSON往返断言，不访问设备/生产DB；本轮未操作用户Unity实例/Play，预览菜单与实际GUI仍待人工运行。
+- 修改文件：新增ArmTrajectorySampling及meta；ConnectCommander.cs、ConnectCommander.FieldWorkflow.cs、DobotController.Trajectory.cs、FieldCommissioningSettings.cs、FieldCommissioningPanel.cs、Editor/SemiAutomaticValidation.cs；新增tests/FieldWorkflowHarness/ArmSamplingTests.cs并扩展FieldWorkflow/FieldRobot/OfflineWorkflow的csproj/测试；更新FIELD_COMMISSIONING操作文档、本记录与PROJECT_CONTEXT。不修改场景YAML、ProjectSettings、持久JSON、Python、真实硬件或wlj来源工程。
+- 无硬件验证：FieldWorkflow101（原50＋采样51；含本机实际日志角度两点→34点/10度→18点、自动/十点显式返程、拐点/端点保持、来源冻结、七轴/偏移、角度不折返、缓冲/最小最大值不倍增、缺/错起点/末点拒绝、非有限/维度/爆量及精确诊断）、FieldRobot105（原96＋适配9；假反馈中间点不动仍能连续下发12点，仅末点确认；无新增Stop；坏间隔零运动、末点不到失败）、OfflineWorkflow22（原19＋稀疏路径动画时长不倍增/人工继续保留/坏输入清理3）、Chassis21、Python46通过另1长时跳过、RunHistory25、OperationLog7，共327通过＋1跳过。socket初次被沙盒禁止后，仅获准127.0.0.1假设备复跑；未连接机械臂/底盘/电批/相机。
+- 独立main+Editor编译0错误47既有警告，先restore补缺失缓存，再通过/tmp/arm-sampling-compile-20261015.targets临时纳入新文件/忽略不存在分析器，未手改生成csproj或永久IDE设置；首轮发现ConnectCommander缺Math命名空间，已改System.Math并复编通过。新增meta GUID唯一，git diff --check通过。未启动Unity批处理、关闭编辑器、删除锁或修改自动生成源。
+- 完成源码、诊断和无设备回归，未打包、提交/推送或实物验收，旧v1.12.7等TEST目录不自动更新。下一步用户退出Play等导入、Console无错误后重新生成任务，可运行非Play预览菜单，再完整构建到新目录；JSON通常保留maxJointStepDeg=5，按实际型号核对软限位/起点/User/Tool。先监护单目标粗定位连续性、末点等待、人工继续接触、返程及停止，再多目标。采样保留规划关节线段，不承诺控制器CP平滑后的TCP几何或实际速度/总耗时与旧包完全一致；升降既有超时策略和底盘完成链实机验收边界仍保留。
+
+## 2026-10-28：准备本版GitHub上传、Linux打包教学与Release说明
+
+- 用户要求先把当前版本打包上传GitHub并教具体做法、附说明。本轮先说明仅检查并提供操作教学，不代用户提交/切分支/推送/打包。读取各层AGENTS、PROJECT_CONTEXT及近期WORKLOG、迁移/现场文档，核对Git状态/分支/日志/标签/忽略规则、ProjectVersion/PlayerSettings/BuildSettings及ExternalRuntimeBuildPostprocessor；保留全部原工作区改动。
+- 当前分支integration/wulaoshi-21.5-wlj，HEAD及本地发布分支4f849ed；原有37个跟踪修改、77个未跟踪文件均未提交。git ls-remote只读确认GitHub release/software-v1.0与v1.12-test.20261014解引用均为4f849ed8513d408352e9e95f2171d0fbd567ce8c；新标签尚不存在。未fetch修改引用或访问任何设备。
+- 新增.codex/PUBLISH_2026-10-28.md：按保存/暂存复核/commit integration、fetch及ff-only更新原发布分支、附注标签、完整Linux构建、推送/解引用核对、Release附件教学；建议标签v1.12-test.20261028与新输出TEST1028-v1.12-test，不新增远端分支或覆盖旧包/旧标签。明确各阶段失败停止、不force、不add -f、构建与标签代码保持一致。
+- 新增.codex/RELEASE_v1.12-test.20261028.md：列伍老师操作日志/运行历史迁移、半自动人工关卡、模拟精调隔离、粗定位/返程自适应采样、连续CP发送、底盘模式开关及trajectory-plan诊断。明确327通过/1跳过为10月15日历史验证，本轮未复跑；最新GUI/实物待验收、原电缸策略、Python服务提前关闭/LiteDB异常仍待核对，不虚称全设备完成闭环或全量报文存档。
+- 构建后处理确认会带顶层Python、可选模型、字体、两份现场说明，但不包含系统Python依赖；Player bundleVersion仍1.9.0，本轮不擅自改ProjectSettings。教程区分源码push/tag与Linux tar.gz/Release，完整目录上传附件，排除私人Data/现场配置并保留工控机历史备份。tests/.gitignore的csproj反向规则已核对，不会遗漏新测试工程。
+- 仅修改上述两份新文档、PROJECT_CONTEXT和本记录；git diff --check作为文档/现有工作区空白检查。未改运行代码/场景/配置、未连接设备、未复编/复跑测试、未实际构建压缩包或改变Git索引/分支/标签/远端。
+- 本轮教学及说明准备完成，实际发布尚未完成。下一步用户依教程保存、检查暂存内容、提交并打标签，Unity Console无编译错误后完整打包；如出现命令/构建错误，先提供输出再处理。现场仍需重新生成任务、核对真实软限位/起点/User/Tool，并监护单目标验收。
