@@ -596,6 +596,12 @@ public sealed class VisionImageReceiver : MonoBehaviour
         videoToggleButtonBackground = buttonObject.GetComponent<Image>();
         videoToggleButtonText =
             buttonObject.GetComponentInChildren<TextMeshProUGUI>(true);
+        if (videoToggleButtonText != null)
+        {
+            videoToggleButtonText.fontSizeMax = Mathf.Max(12f, videoToggleButtonText.fontSize);
+            videoToggleButtonText.fontSizeMin = 12f;
+            videoToggleButtonText.enableAutoSizing = true;
+        }
 
         Button logButton = logButtonObject.GetComponent<Button>();
         if (videoToggleButton != null)
@@ -767,7 +773,7 @@ public sealed class VisionImageReceiver : MonoBehaviour
     {
         if (videoToggleButtonText != null)
         {
-            videoToggleButtonText.text = enabled ? "关闭视觉" : "开启视觉";
+            videoToggleButtonText.text = enabled ? "关闭相机预览" : "开启相机预览";
         }
 
         if (videoToggleButtonBackground != null)

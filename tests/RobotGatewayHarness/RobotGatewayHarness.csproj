@@ -5,6 +5,7 @@
     <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../Assets/RunDataSession.cs" />
     <Compile Include="../FeedbackHarnessSupport.cs" />
     <Compile Include="../../Assets/DobotController.Feedback.cs" />
     <Compile Include="../../Assets/DobotController.Gateway.cs" Link="Gateway.cs" />

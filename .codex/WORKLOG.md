@@ -4364,3 +4364,219 @@
 - 构建后处理确认会带顶层Python、可选模型、字体、两份现场说明，但不包含系统Python依赖；Player bundleVersion仍1.9.0，本轮不擅自改ProjectSettings。教程区分源码push/tag与Linux tar.gz/Release，完整目录上传附件，排除私人Data/现场配置并保留工控机历史备份。tests/.gitignore的csproj反向规则已核对，不会遗漏新测试工程。
 - 仅修改上述两份新文档、PROJECT_CONTEXT和本记录；git diff --check作为文档/现有工作区空白检查。未改运行代码/场景/配置、未连接设备、未复编/复跑测试、未实际构建压缩包或改变Git索引/分支/标签/远端。
 - 本轮教学及说明准备完成，实际发布尚未完成。下一步用户依教程保存、检查暂存内容、提交并打标签，Unity Console无编译错误后完整打包；如出现命令/构建错误，先提供输出再处理。现场仍需重新生成任务、核对真实软限位/起点/User/Tool，并监护单目标验收。
+
+## 2026-10-28：审查全部自有通信入口的连接、断开与生命周期（只报告）
+
+- 用户明确要求先检查并报告，不实施修复。读取各层AGENTS、PROJECT_CONTEXT/近期WORKLOG，Git核对当前已为e906217、release/software-v1.0/v1.12-test.20261028，本地远端跟踪同提交且工作区干净，保留用户已完成的提交/标签，不再沿用上一轮未提交状态。
+- 检查自有链路：Dobot主类/Feedback/Gateway/Commissioning及相关执行保护，Robokit主类/ConfirmedMotion，LiftCylinder，ServoTightening，VisionImageReceiver，FieldPanel/Simulation/ConnectCommander清理与RunScene连接/断开UnityEvent绑定，Python V26/unity_robot_client/ContactCycle/cr10af/RealSense服务及测试覆盖。旧original/0910/独立工具不误认成当前默认服务；不重核厂家SDK内部或发送未知API，不连接设备。
+- 新增.codex/CONNECTION_LIFECYCLE_AUDIT_2026-10-28.md，按C01～C11分级记录触发条件、精确源码位置、影响和建议。高优先：统一断开按钮使底盘在停止排队/确认前关闭通道；电缸重复连接/失败/销毁资源不对称和旧动作跨重连；软件退出不等待异步停止/反馈、Servo退出不等cycle_active；Python启动失败不回滚、设备线程在本机控制口bind成功前启动；电批无限IO和sock_lock阻塞停止/状态路径。
+- 后续项：Dobot场景退出缺socket释放、Feedback坏但Dashboard仍好时Connect直接return导致无法单独恢复、UI反馈分支为空/底盘端口灯最后事件覆盖、UI隐藏停服务漏FieldWorkflowOwned、相机掉线后缓存图片仍可200、适配reader关闭异常跳过socket关闭、销毁时Dispose门与在途命令及Gateway非owner会话清理，以及主线程同步TCP连接/电缸Modbus轮询阻塞交互。指出正常安全机制应保留，不宣称所有通信失效或某一现场事故已获证明；用户原电缸超时策略不变。
+- /tmp/connection-audit-20261028-NcOfG3创建临时诊断：生产Lift类链接纯假TCP/Modbus/Unity，dotnet复现5条路径；AST提取生产Python函数和小适配类、假Socket/Reader复现3条路径，全程零真实网络/设备/服务进程。临时C#首轮缺Modbus.Message命名空间测试桩，补桩后通过，并非生产编译失败。未复跑327项回归、未做Unity Play/GUI或现场拔线/退出验收。
+- 仅新增审查报告，更新PROJECT_CONTEXT和本记录，不改任何运行代码/场景/JSON/版本号，不构建软件或提交/推送。git diff --check作记录检查。已完成本轮审查与报告；下一步待用户批准修复优先项并补假服务连接生命周期回归，Unity人工验证按钮/界面与退出，再监护现场验收。
+
+## 2026-10-28：解释连接卡顿/机械臂双端口断开，并实现日志反馈过滤
+
+- 用户描述任一设备连接失败都会卡很久，询问机械臂是否仅断控制口，并要求在日志上方增加勾选过滤反馈。读取各层AGENTS、PROJECT_CONTEXT/近期WORKLOG及Git状态，保留上一轮审查报告与未提交记录；核对RuntimeConsole完整脚本、Canvas日志Prefab只读布局、Simulation反馈打印、RunScene统一连接/断开绑定及Dobot/底盘/电缸连接入口。
+- 已明确解释：统一连接按钮会依次触发三种设备，Dobot构造TcpClient及ConnectFeedback、底盘三端口Connect、电缸Connect都在主线程同步执行，设备不可达/超时可叠加阻塞UI；本轮未擅自实施整套异步通信改造。正常Dobot.Disconnect关闭Dashboard流/client并调用CloseFeedbackConnection关闭反馈流/client、停止循环且清空新鲜度；流程占用先请求停止保留连接。旧角度未清空不代表仍收新反馈，退出场景清理缺口与手动断开不同。
+- 修改Assets/RuntimeConsole.cs，在展开日志上方动态创建260×30的Toggle“过滤机械臂反馈（仅日志）”，不改场景/Prefab YAML；默认关闭，收起随之隐藏，标签继承中文字体，组件销毁移除监听/清理新控件。SetRobotFeedbackLogFilter即时重建可见内容，只匹配普通Log类型的反馈更新: Mode=周期消息（兼容中文冒号），不误滤警告/错误、连接/断线、人工检查和StopTrace。
+- 新增Assets/RuntimeConsoleLogBuffer.cs与唯一meta：普通/反馈两类各限maxLines、总计最多2倍，输出按原顺序仍最多maxLines；反馈洪流不再挤掉普通日志，隐藏期间只缓存不重建TMP文本，取消恢复仍保留的反馈。只改RuntimeConsole显示，不停止实际反馈/Dobot事件、实时同步、到位/停止判断，也不改变Unity Console、文件/现场报告记录路径；不引入持久配置或未经请求的清除日志操作。
+- 新增tests/RuntimeConsoleHarness，直接链接生产Buffer，22项通过：真实消息分类、中文冒号、警告/错误保留、断线/StopTrace/人工检查/其他反馈不误滤、空值、即时隐藏/恢复、千条反馈和普通洪流的缓存上限/重要消息保留、顺序/可见上限、动态缩小及0/负maxLines边界。无Unity/网络依赖；未连接任何设备。
+- 独立main+Editor编译0错误，最终47既有警告；/tmp/runtime-console-compile-20261028.targets临时纳入新Buffer并跳过缺失分析器，未手改生成csproj/IDE设置，日志/tmp/runtime-console-compile-final-20261028.log。git diff --check通过、meta GUID唯一。未操作Unity Play/预览，不宣称GUI验收；未修改通信脚本/Python/ProjectSettings、安全策略或已发布标签，不打包/提交/推送。
+- 更新FIELD_COMMISSIONING操作文档及PROJECT_CONTEXT、本记录。源码功能与无设备验证完成；下一步用户Unity退出Play等待导入，展开日志确认复选框位置/字体/点击、隐藏/恢复、收起/展开状态和告警保留，机械臂正常反馈/同步继续；工控机旧包需完整重构建。连接卡顿及上一轮生命周期问题仍未修复，后续需单独实施异步/有界连接与统一清理，不把本次日志过滤当通信修复。
+
+## 2026-10-28：按简单有界方案实施通信连接、断开与异常清理改进
+
+- 用户批准开始修改，要求仔细检查但避免复杂框架、保留必要检查并参考主流做法。读取各层AGENTS、PROJECT_CONTEXT/WORKLOG、上轮通信审查、现场说明、Dobot主类/Feedback/Gateway/Commissioning、Robokit主类/ConfirmedMotion、Lift、Servo、FieldPanel、Simulation、相机与Python适配代码、测试及RunScene按钮只读绑定。保留此前RuntimeConsole过滤和全部未提交文档/测试，不覆盖用户其他改动；继续release/software-v1.0/e906217，不动已发布标签。
+- 查阅官方Microsoft ConnectAsync、Python socket、Unity2022 .NET及wantsToQuit说明；采用兼容Unity2022的两参数ConnectAsync+WhenAny/取消后关资源，不用新.NET专用重载、自动运动重试或完整状态机。新增DeviceTcpConnection及唯一meta，集中小型建连期限/取消/端点/迟到失败清理；公开原UI方法名保留并提供Task入口。
+- Dobot改异步TCP默认3秒、连接去重/同端点复用，反馈失效时空闲下单独修复；正常断开、场景销毁、应用退出对称关闭Dashboard/反馈并取消待连接。RequestControl迟到应答不能复活已断连接。反馈失败/过期和控制流关闭均派发健康变化，Simulation按控制+新鲜反馈汇总状态；断开文案明确不等于停稳。Gateway关闭全部已接入会话，监听代次隔离，保留权限/token/反馈/停止逻辑。
+- 底盘三个TCP端口并行尝试、各默认3秒，部分失败不丢失成功资源，按三端口汇总显示并在接收失败时撤销对应状态。连接取消/销毁统一清理。DisConnect遇正式占用/受控运动/停止在途先请求停止保留通道，停止应答失败不假断开；提供StopMovementAsync供总停止等待3003匹配应答，但未把它当物理停稳。请求写改有界异步，超时关失效流并观察迟到任务异常，保留流水号/应答/API/新旧完成判断。
+- 电缸Connect异步/健康复用；替换前motionEpoch失效、停止旧监控、释放master/client，失败/销毁同样收口，旧异步动作不跨新连接写目标/触发。TCP及NModbus读写默认1000ms、Retries=0，读取失败关闭连接/撤销新鲜度，仍返回原兼容0且不改变原到位超时继续策略。复查补MonitorRoutine失败后不刷新旧数值、首轮读失败不遗留协程句柄。Modbus仍同步在主线程，可能短顿，未承诺全IO后台化/绝对零卡顿。
+- FieldPanel总停止等待底盘Task，wantsToQuit在正式流程锁中暂缓Player普通退出并请求停止，停后人工再次退出；不在回调内同步阻塞主循环。Editor停止Play/强杀/断电/强制卸载不受此保护，不能说软件关闭等于整机安全停止。保持原机械臂停止确认/所有权与硬件急停要求。
+- Servo可见性包含FieldWorkflowOwned，隐藏状态UI不误关正式占用服务；持有仍活但无响应的本次Python进程时不重复启动/不覆盖引用，启动轮询约15秒，提前退出Dispose；超时保留实例供安全停止，不盲Kill。退出发现cycle_active仍为真则不按已结束杀进程；OnDestroy不Dispose仍在途需Release的managed门。未做通用实例认证/服务管理器，未升级原电批STOP软件状态为设备停止证据。
+- Python当前V26先绑定本机控制监听再启动电批线程，绑定失败显式关listener并退出；电批socket保持1秒有界IO，正常空闲recv超时继续、不因此自动重连/复位，错误关闭本次局部socket并清旧半包。UnityRobotClient.reader.close异常也在finally关闭sock/清字段。相机get_image拒绝超过2秒采集旧帧，保留原HTTP503错误路径；未重做处理结果自身年龄/实例握手/优雅退出。原算法、运动节奏、工具协议/标定不变。
+- 新增tests/ConnectionLifecycleHarness，链接完整生产Dobot主类/反馈解析及Lift，TCP仅自建127.0.0.1假服务、Dashboard握手/Modbus/Unity替身：23通过，含重复连接、反馈单独恢复、控制流失效状态变化、占用断开、双口/销毁释放、迟到ACK、旧电缸动作隔离、IO失败与监控UI不盖回旧值。新增tests/test_connection_lifecycle.py的7项AST/替身测试，不导入启动硬件线程的模块；ChassisHarness补生产连接工具引用、假生命周期收尾与3项状态/断开回归，原21+3=24通过。
+- 本轮完整无设备回归：FieldRobot105、FieldWorkflow101、OfflineWorkflow22、Chassis24、ConnectionLifecycle23、Python53（54运行/1长时跳过）、RunHistory25、OperationLog7、RuntimeConsole22，合计382通过+1跳过。socket初次受沙盒禁止后，仅获准自有loopback复跑，不连接任何物理IP、不运行原件/硬件服务；本机测试不当作真实黑洞网络、Unity按钮/退出时序或物理停止验收。
+- 最终主工程+Editor独立编译0错误47既有警告，临时/tmp/communication-compile-20261028.targets纳入新helper/前轮buffer并跳过缺失分析器，不手改生成csproj/IDE配置。编译日志/tmp/communication-compile-final-20261028.log；回归日志/tmp/communication-*-20261028.log。git diff --check通过，两新helper meta GUID项目内唯一，测试bin/obj被忽略未加入源码。
+- 新增COMMUNICATION_IMPROVEMENTS_2026-10-28.md解释具体修改、官方依据、参数/恢复/边界及C01～C11处理范围；FIELD_COMMISSIONING操作文档与PROJECT_CONTEXT更新，明确覆盖同日旧审查状态、保留历史证据。本次源码和无硬件验证完成；未改Scene/Prefab、ProjectSettings、持久JSON、旧TEST包，未Unity Play/实机连接、打包、暂存/提交/推送。
+- 下一步：用户退出Play等待导入、确认Console，先空闲测试重复连接/连接中取消/双端口断开/反馈恢复/部分连接灯/日志过滤/返回重进；检查Inspector新增期限字段默认值，无需新增场景绑定。完整Linux构建到新目录后监护单目标验收原粗定位→人工确认→接触→返程与停止，保留硬件急停；不先做运动中拔线。底盘完成链实机证据、电批物理停止、原电缸超时继续和强制退出仍是明确边界，不将软件回归当整机安全保证。
+
+## 2026-10-28：讨论下发指令与设备反馈的数据存储方案（未实施）
+
+- 用户要求先讨论：保存机械臂/电缸/底盘实际下发数据及机械臂/电缸反馈，考虑在项目运行记录关联独立文本，担心数据量。本轮重新读取各层AGENTS、PROJECT_CONTEXT/近期WORKLOG及Git状态，保留上轮全部通信/日志未提交改动；只读核对RunRecord/RunRecorder、RunHistoryPanel、FieldPanel报告、CommissioningJournal、Dobot MotionDiagnostics/Trajectory/Gateway/Feedback及Lift/Robokit下发/读取位置。
+- 现状：RunRecord已有ReportDirectory，FieldPanel已关联CommissioningReports；trajectory-plan.json为冻结计划，不等于逐条实际发送。motion.csv仅接触INSERTING/EXITING测量、有约10Hz采样和上限，不覆盖全流程三设备；现有运行历史未实现统一原始通信档案入口，不能宣称已全量存储。
+- 建议而非已实施：数据库保留项目/runId/概要/文件索引，详细数据复用每次报告目录；commands.jsonl保存实际通信边界的尝试/写入/应答/失败、原报文和明确单位参数，robot-feedback.csv/lift-feedback.csv保存有序采样，元数据记录版本/配置/频率/完整性。共用runId/目标/阶段、UTC+单调相对时间/连接代次/序号，实物与模拟分开，底盘记录m/rad而非笼统角度；电缸失败不填0冒充有效反馈。
+- 初版建议机械臂10Hz、电缸沿用约5Hz，控制指令逐条记录不抽样、不为保存新增设备查询；有界后台批量写入/定期刷盘/文件分卷，磁盘失败或队列丢失明确标不完整且不阻塞停止。运行详情增加打开数据目录/导出，不把全部采样加载UI；正式运行与现场/手动调试会话区分，不改同学算法或在按钮/普通Debug.Log层抓取以免漏指令。
+- 本轮仅更新WORKLOG记录讨论，没有实施数据保存、修改运行代码/场景/配置、编译/测试/打包/提交或访问设备。方案讨论完成，待用户确认再实现；当前无需Unity人工检查。后续应先定义最小文件字段/采样策略、统一会话生命周期与实际下发钩子，再补模拟/异常断线/写失败/批量性能回归及历史入口人工验收。
+
+## 2026-10-28：实施项目运行关联的控制指令/机械臂及电缸反馈文本档案
+
+- 用户批准按上一轮方案实现。重新读取各层AGENTS（内容相同）、PROJECT_CONTEXT/WORKLOG与Git状态，保留上轮通信连接/日志过滤/文档/测试全部未提交改动；读取RunRecord/RunRecorder/RunHistoryCapture、RunHistoryPanel/StepDetailPanel/RunRecordItem、FieldPanel报告/阶段、ConnectCommander.History、Dobot Gateway/反馈/测量/轨迹、Lift/Robokit实际读写及Linux构建后处理和现有Harness。未改场景绑定或重写通信/运动逻辑。
+- 新增Assets/RunDataSession.cs及meta：纯C#后台队列写入commands.jsonl、robot-feedback.csv、lift-feedback.csv、metadata.json；RunDataCapture共用会话/阶段，小命令句柄捕获所属旧会话，不依赖Debug.Log抓取。UTF8/Invariant数值/CSV转义，UTC+单调时间、runId/项目/目标/阶段/端点/连接代次/本地及控制器编号；元数据含版本/buildId、配置快照、行数/丢失/结束时在途和完整性，不将接受应答当物理完成。
+- 每秒后台刷新、20MiB目标大小按完整行分卷且CSV各卷有表头；4096行及2Mi字符队列双重上限，TryAdd不等待磁盘/队列空间。写失败/超限或关闭时仍有在途则明确失败/不完整，迟到事件不进新runId；参数描述复制冻结，已有文件CreateNew保护。无每行fsync/零丢失承诺，文件单行可超过分卷目标；不自动清理用户旧数据，原摘要数据库保存方式保留。
+- RunRecord仅增加DataDirectory/DataError；RunRecorder/RunHistoryCapture创建/结束对应档案，旧记录兼容。正式FieldPanel先创建原报告目录，再作为可选参数传入历史，复用CommissioningReports；其他为persistentDataPath/RunData/<runId>。完整配置用独立configurationSnapshot参数只入metadata，不把整段JSON塞入列表/数据库概要。SimulationParam使用属性，改用既有LiteDB映射生成快照，避免Unity JsonUtility悄悄变成{}，参数不可随后修改漂移。
+- Runtime初始化注册手动捕获/普通退出清理。已选项目无正式会话时首次普通通信建立“手动调试/通信记录”，主动断开任一设备/销毁/新正式任务/项目切换结束，只标Dispatched不假成功；已有正式运行不被替换。无会话孤立Stop/底盘3003/电缸105不先初始化DB，以保停止优先；未选项目不创建项目记录。模拟会话明确simulated，拒绝附加实物命令/反馈，本版仅参数/阶段，不伪造MuJoCo采样。
+- DobotController.Gateway在唯一实际交换点记录attempt/write/reply/accepted/failed、原命令/响应与排队编号，查询单个返回值不当命令ID；网络写入时刻在原异步流上观测，端点取实际socket。Dobot主类复用反馈快照上限10Hz，保存真实六轴/速度/末端/User/Tool/模式/序号/设备时间/年龄/new_sample/active_command_id，不发新查询、不用模型姿态。MotionDiagnostics只加接触INSERTING/EXITING阶段标记，原几何测量和文件不变。
+- Robokit唯一请求点记录实际API/JSON、真实流水号/打包hex、应答和失败，保持旧/新完成判断、停止和发送间隔；Lift全部实际写调用通过小日志包装，原功能码/寄存器/顺序/延时/异常不变，记录CDAB原寄存器及已知目标mm/速度。NModbus仅能得到库调用校验返回，使用library_call_returned，明确不能伪造OS写入时刻/原始响应。Lift已有各字段成功读时刻/序号，Update只采样现值上限5Hz，不新增读取；独立有效/年龄，无效字段留空不冒充0，转矩保留raw单位。
+- FieldPanel.SetMessage/执行阶段、RecordStep与旧任务包装关联目标/阶段。新增RunDataFiles.cs/meta白名单ZIP，只包含本功能数据/分卷，排除非数字分卷名/其他文件/符号链接，失败删除本次.partial，成功原子公布唯一ZIP。RunHistoryPanel动态创建打开目录/导出/状态，StepDetailPanel只后台读≤128KiB索引，校验schema/runId、活动/未刷盘/异常未收尾不假完整导出，旧记录/缺目录提示；读取允许Replace共享以免Windows状态查看干扰后台原子替换。GUI仍待人工。
+- 构建后处理附带RUN_DATA_STORAGE.md，新说明详述数据格式/位置/单位/关联/频率/边界与操作；更新FIELD_COMMISSIONING和PROJECT_CONTEXT、本记录。原motion.csv/trajectory-plan/run.log及停止报告保留，新ZIP不替代原完整报告；原历史“力矩/角度”仍指电批结果，不拿机械臂关节角混填。未改Python算法/命令协议、限位/CP/间隔、电缸原超时继续或项目版本/持久JSON。
+- 新tests/RunDataHarness直接链接生产记录器/导出器，37通过：阶段/编号/时间、JSON/CSV转义/中文、快照冻结/刷盘前运行状态、采样/旧序号/无效及有效0、模拟隔离、旧回调、JSONL/CSV分卷、队列行数/字数上限、IO失败/同路径不覆盖、一次告警、ZIP白名单/重复/中文空格路径与区域设置。RunHistory32（原25+7）验证会话/独立目录/属性快照/复用报告/概要不膨胀/手动来源和结束；FieldRobot108（+3）证明实际MovJ/ServoP/Stop及失败采集；Chassis26（+2）证明实际包/流水号/接受失败；Lifecycle25（+2）证明原主类反馈及Modbus实际寄存器/解码值。更新对应csproj链接生产core及必要Unity替身，未用假记录器冒充钩子验证。
+- 完整无实物回归：Data37、History32、Robot108、Chassis26、Lifecycle25、FieldWorkflow101、Offline22、OperationLog7、Console22、Python53通过（54运行/1长时跳过），合计433通过+1跳过。网络仅自建127.0.0.1假服务、Modbus/Unity替身；未连接机械臂/底盘/电缸/电批/相机，不导入原件硬件线程、不启动Unity Play。日志/tmp/run-data-*-tests.log及core/history日志，临时输出只在/tmp。
+- 独立主工程+Editor检查0错误，完整复编时55项现有组件/序列化等警告，最后增量复核46警告（非零警告构建）；临时/tmp/run-data-compile-20261028.targets纳入新文件、按FullPath去重并跳过本机缺失分析器，不手改Unity生成csproj/IDE设置。编译/tmp/run-data-main-build.log。git diff --check通过，新两meta GUID唯一，tests bin/obj被忽略，未改Git索引/分支/标签或提交推送，未生成Linux包/改旧TEST目录。
+- 本轮源码/无设备验证完成；下一步用户退出Play等导入，先模拟一次返回项目记录验收新按钮/状态/旧记录/中文路径/ZIP并核对simulated不混实物，再完整Linux新目录构建与监护单目标对照实际指令、机械臂/电缸反馈和原报告。Linux文件管理器打开效果/GUI布局、真实磁盘故障体验和运动时序尚未现场验收；强杀/断电可丢尾部，accepted/metadata.completed都不是到位/停稳证据，停止/硬件急停优先于保存。
+
+## 2026-10-28：讨论底盘手动挪车入口与现有API复用（未实施）
+
+- 用户询问软件内前后左右及旋转手动控制方案、是否需重发SDK。读取项目规则、PROJECT_CONTEXT/近期WORKLOG与Git状态，保留全部未提交通信及数据档案修改；核对RobokitController/ConfirmedMotion、ConnectCommander底盘下发与CHASSIS_COMPLETION说明，并直接读取下载目录仍在的《平动.pdf》《转动.pdf》，没有连接设备。
+- 已核实3055为固定速度/距离平移，dist取正值m，车体坐标vx正前负后、vy正左负右；3056为固定角速度/角度旋转，angle取正值rad，vw正逆时针负顺时针。文档明确新任务会取消未完成任务，不能靠反复覆盖相对运动实现可靠连续遥控；已有规划路径vx负号涉及原模型方向，手动界面不能直接照抄为“前进”。接口存在vy不等于实车一定支持横移。
+- 建议第一版用独立小面板定距/定角点动、低速参数、单动作不排队与独立停止，复用现有底盘连接/应答匹配/数据档案，不另起SDK控制源；与正式流程互斥，挪车后核对实际起点再执行旧规划。开始前需核对机械臂/工具已处于允许底盘移动的状态。既有1020闭环对过短动作可能漏RUNNING，实施时须明确完成/忙状态处理，不宣称短点动已实物验证或以估时冒充完成。
+- 原平动/转动资料无需重发；待用户确认底盘能否直接横移，以及希望定距点动还是按住连续走。若要后者，需另核对对应速度控制、设备侧超时停车/停止语义，不能把TCP断线或软件松手事件当可靠停车保证。
+- 本阶段只完成检查和方案讨论，仅更新本记录，未修改运行代码/场景/配置、未编译/打包/提交推送，当前无需Unity人工检查。下一步确认操作方式及横移能力后再最小实现并补无设备协议/互斥/取消测试，最后由用户现场核对车体方向与停止行为。
+
+## 2026-10-28：确认横移能力及定距点动，讨论手动面板位置
+
+- 用户确认底盘可横移、第一版采用定距点动，随后询问界面位置。本轮先答复布局，不实施运动功能；重新读取各层同内容AGENTS、近期PROJECT_CONTEXT/WORKLOG、Git状态，以及FieldCommissioningPanel.OnGUI和RuntimeConsole动态按钮布局。现有通信/数据记录等未提交改动均保留。
+- 建议在真实运行页左上角“现场联调 / 参数”旁增加“底盘手动”入口，默认收起，两个面板互斥展开；展开后在左侧用紧凑面板显示连接/动作状态、单次距离/速度、转角/角速度、前后左右及两旋转和明显停止按钮，不继续挤底部工具栏。方向按实车车头而非镜头，显示mm/deg并在协议层转换m/rad。实施时需重新安排已有x=170处流程状态条，避免入口重叠，并核对不同分辨率。
+- 打开面板本身不触发运动；自动流程占用禁用手动运动，单次动作不累计点击，停止入口保留。位置方案待用户核对；仅追加本记录，未修改运行脚本/场景或进行编译、Unity GUI/硬件操作。下一步按确认布局实施最小点动控制与回归，用户再验收入口、遮挡、字体及实车方向。
+
+## 2026-10-28：实施底盘手动挪车面板与定距/定角点动
+
+- 用户批准实施上一轮布局/定距方案。读取三层同内容AGENTS、PROJECT_CONTEXT/WORKLOG、Git状态、Robokit主类/ConfirmedMotion、FieldPanel、Commander任务/历史/底盘下发、Simulation页面/输入锁及现有测试；重新提取本地《平动.pdf》《转动.pdf》核对单位、符号和新任务覆盖规则。保留之前通信、日志过滤、数据档案全部未提交修改，不改索引/分支/标签。
+- 新增Assets/ChassisJogCommand.cs及唯一meta：不可变命令、六方向、有限数值/范围校验和Invariant JSON，界面mm/deg转API m/rad；vx正前负后、vy正左负右、vw正逆时针，dist/angle绝对值，mode=0。默认50mm/50mm-s、5°/5°-s；软件点动范围1～500mm、10～100mm-s、0.1～45°、1～15°-s，是软件限制而非厂家额定或安全认证，原自动路径映射未改。
+- 新增RobokitController.ManualJog.cs及meta：复用当前IP的状态/导航连接和唯一请求/匹配入口，不开另一套SDK。第一次await前占用，复用原1020 RUNNING→COMPLETED，不估时放行、运动重发或自动切旧模式；新任务拒绝、断线、漏RUNNING/超时等保持人工核对锁。手动停止先取消本机续动作，再调用原3003，应答成功仍保持锁；明确人工观察停稳后再次停止+查询无活动状态才可恢复，期间新停止使旧核对失效，不续跑旧动作。无运动/停止在途时允许人工恢复连接，不因重连清锁。
+- 原Robokit主类/ConfirmedMotion的发送、重连、断开及新旧受控入口纳入必要手动锁检查；不修改正式任务的原完成语义、发送间隔或底盘旧模式开关。Commander增加NonManualTaskRunning保留原条件，AnyTaskRunning叠加手动锁；FieldPanel.MotionLocked同样叠加，原停止/页面离开/Player正常退出守卫可转发手动停止，避免自动与手动同时启动。没有重写现有通信框架、机器人/电缸控制或停止认证。
+- FieldPanel改partial，新增FieldCommissioningPanel.ChassisJog.cs及meta：真实运行左上角x170/y115“底盘手动”，与现场参数面板互斥展开/默认收起，现场流程状态条移到x330避让；Simulation只增加IsRealRunPage只读属性。不改场景/Prefab，也不用Inspector新绑定。面板复用当前IP、仅连接底盘，四数值输入/安全许可/六方向/红色停止；长提示及许可自动换行，参数区可滚动而停止始终在滚动区外。活动/待核对禁止直接关闭小面板，输入与动作不排队，切页/重开/编辑/错误恢复撤销许可。
+- 手动动作/停止撤销原现场confirmed，活动/待核对锁住IP/模式等原输入，成功/明确恢复才归还；挪车后要求人工重新核对实际底盘及规划起点，不自动移动仿真模型或篡改旧规划。已选项目的实际API/流水号/应答/错误沿用数据档案入口，阶段“底盘手动/动作说明”；日志创建失败不应挡软件停止。没有相机/机械臂/电缸的新指令，也不改变电缸超时继续策略。
+- ChassisHarness直接链接生产ManualJog/Command，新增ManualJogTests：57项覆盖六方向符号/单位/区域设置、NaN/范围、无许可/占用/端点/断线拒绝、第一次await前锁定、点击不排队、实际报文、短动作/拒绝/中止锁、停止应答非物理完成、人工恢复不续跑、停止失败及恢复中再停止竞态。原26项底盘协议/旧模式/记录回归仍通过。测试只用随机127.0.0.1假服务，不连接实车；测试本身绕过实车固定端口建连，不能当实车能力验收。
+- 新tests/ChassisJogUiHarness直接链接生产UI partial/Command，28项处理器检查：真实页入口、面板互斥/收起、打开不运动、停止位于滚动区外、许可/任务/服务占用、坏输入、默认请求、点击去重、失败输入锁、恢复、仅底盘连接、停止路由、缺绑定保护。Unity GUI与设备对象为替身，不宣称真实布局/字体/缩放验收。
+- 全部无设备回归：Manual57/UI28/原Chassis26/FieldRobot108/Lifecycle25/FieldWorkflow101/Offline22/RunData37/History32/Console22/Operation7/Python53，合计518通过+1长时跳过。受限环境首次socket测试因权限失败，改为审批后的本机假服务运行后通过，没有跳过失败断言或访问实物；日志/tmp/chassis-jog-*.log。独立main+Editor编译0错误（首次55、最后46项既有警告），用/tmp/chassis-jog-compile-20261028.targets补新文件/去重/跳过缺失分析器，独立中间及输出在/tmp，未手改生成csproj/IDE设置。git diff --check通过，三GUID唯一。
+- 已更新FIELD_COMMISSIONING操作说明及PROJECT_CONTEXT、本记录，Linux构建会沿已有后处理带上更新后的FIELD_COMMISSIONING.md。源码/无设备验证完成；未操作Unity Play、真实GUI/设备、打包、旧TEST目录或Git提交推送。下一步用户退出Play等导入，在真实运行验收入口/字体/不同分辨率/滚动与停止可见，再完整Linux构建到新目录，在空旷且机械臂工具收妥的条件下低速核对六方向、短点动状态及停止/恢复；软件STOP/COMPLETED不是物理安全保证，硬件急停优先。
+
+## 2026-10-28：审查真实运行连接/启动按钮并提出合并方案（未实施）
+
+- 用户要求先整理连接按钮、分析必要性与可合并项。读取三层同内容AGENTS、PROJECT_CONTEXT/近期WORKLOG、Git状态，保留上述全部未提交修改；只读检查RunScene持久化按钮/输入绑定、Dobot/Lift/Robokit连接、FieldPanel/ManualJog、Servo服务启动/流程准备/动态按钮、VisionImageReceiver和Python电批连接初始化。未把早期生命周期审查中的已修复问题当当前结论。
+- 核实底部“连接机器人”实际三目标Dobot.Connect+Lift.Connect+Robokit.ConnectAll，旁边“连接底盘”只调用Robokit；现场又有JSON来源的机械臂与底盘/升降连接，手动面板沿用当前底盘字段。这是入口/命名/参数来源重复，底层已有连接去重，不声称重复入口必然重复TCP。断开三直接设备，不含相机/Python服务；上电、使能（含ClearError/速度3%）和底盘2002自动重定位不是普通连接。
+- 正式非Vision流程已通过PrepareFieldServiceAsync按需启动/核对拧紧服务；原“启动程序”同时承担阶段人工继续。相机按钮是启动SDK采集/HTTP预览，不是视觉精调。电批Python连接成功会reset_driver，不能把服务启动包装成无副作用网络连接；立即停止独立时主要停电批、正式时委托流程，新底盘手动有独立停止，不能统称任意状态整机急停。
+- 新增REAL_CONNECTION_BUTTON_AUDIT_2026-10-28.md，列11类入口、实际行为/保留或合并建议及证据。建议统一“设备连接”面板，机械臂/底盘/电缸保留分设备连接/断开和准确状态；范围明确的一键连接可选，不绑定上电使能/服务/重定位。现场按钮收口到同面板；底盘手动可保留共用函数/配置的快捷连接。服务启停独立管理，流程继续独立命名，重定位移高级；先统一地址/端点来源和停止占用，避免删按钮却残留多套配置。
+- 本轮只新增审查文档与更新WORKLOG，不改运行代码、场景、配置、连接策略、Git索引/提交或打包；未Unity Play、服务启动、实物通信或编译测试。git diff --check通过。审查阶段完成；下一步用户确认入口/合并范围后才实施并补无设备连接/参数/占用/断开回归，当前无需Unity手动操作。
+
+## 2026-10-28：整理正式连接入口，现场测试面板保持原样
+
+- 用户修订为保留现场面板测试入口并批准实施。重新读取三层同内容AGENTS、PROJECT_CONTEXT/WORKLOG、按钮审查、Git状态、Simulation生命周期/界面、RunScene实际按钮位置/持久化回调、各设备连接接口、Servo/Vision动态按钮与既有Harness；保留之前通信/日志/档案/底盘手动全部未提交修改。事先保存FieldCommissioningPanel.cs、ChassisJog partial及Settings SHA256，结束时逐一相同；不改现场UI/连接/JSON/单测/停止/半自动逻辑或底盘手动快捷入口。
+- 新增Assets/DeviceConnectionPanel.cs及唯一meta（9bec87df3094478fa24ed31b36eab20c），Simulation.Awake按需挂载，无Inspector新绑定。限定StatusReal查找ConnectBtn，替换整个ButtonClickedEvent移除场景中三条持久化连接回调，点击只开面板；底部靠右改152×38“设备连接”，当前实例隐藏ConnectBaseBtn/DisconnectBtn/PowerOnBtn/EnableBtn/ResetBaseBtn，不编辑场景/Prefab/YAML。原开始运行及动态日志/电批按钮不搬动；面板可关闭/拖动/滚动，不因开关窗口建立/断开连接。
+- 新面板每设备独立IP/连接补连/断开及真实端点和已有反馈信息，三设备并行连接/逐项断开为明确范围的快捷操作；失败分别显示，不把尝试结束当全部成功。复用原ConnectAsync/ConnectAllAsync和Disconnect/DisConnect，不新增socket/SDK或隐式运动。数字IP/端口校验、已连端点改变必须先断开、同端点补反馈、连接中可取消、revision防迟到结果覆盖取消提示，绑定冲突拒绝对应行。任务/算法/手动/停止核对占用时不换地址或直接断线，委托已有停止/提示后需人工再断开。
+- 原右侧机器人/底盘IP改为只读镜像，用SetTextWithoutNotify显示控制器当前值，地址编辑集中在面板；不调用旧输入回调或读写现场JSON，端口显示沿当前控制器配置。连接过程中若旧现场入口改变当前配置，保留新值并提示不一致，不把旧参数写回。正式StartRun增加连接在途提示，原FieldRun仍比较本次现场配置与实际连接，失败明确拒绝，不自动换地址。现场面板始终是原测试/流程参数入口，指南说明两者区别及重启不保存新输入。
+- 机械臂上电/使能移入明确的准备区，单独人工许可，每次消耗许可，任务/连接中撤销旧许可；仍调用原PowerOn/EnableRobot（含ClearError/速度3%），无自动串联。底盘2002自动重定位移到可展开高级区，连接三端口并单独确认现场条件，不称回原点/定位已成功。相机按钮文字改开启/关闭相机预览，拧紧空闲按钮改启动/关闭拧紧服务并适配字体缩放，原正式阶段确认/继续、独立正反转/停止保留；不改变服务启动/关闭算法或增加一键连接的Python/相机动作。
+- DeviceTcpConnection增加纯只读IsOpen/Describe/AbsentOrMatches，Dobot/Robokit/Lift增加ViewConnecting/HasConnection/EndpointsAligned/ConnectionDescription等只读信息；描述真实远端/端口及现有新鲜度，不发新硬件查询，也不把TcpClient最近Connected状态当实时探测/安全就绪。IPv4-mapped IPv6显示规范化为IPv4，匹配仍保留原端点比较；原通信时序、协议、端口、重试及电缸超时继续策略不改。
+- 新tests/DeviceConnectionUiHarness直接链接生产面板，63项处理器检查：持久化三回调整体替换/入口零通信/原事件对象不改、重复实例隐藏/开始运行保留、右侧只读无回调、模拟隐藏、错误IP/端口、单设备独立、同端点补连、异端点拒绝、并发去重、连接取消及跨入口配置变化、单项失败/断开失败隔离、八类占用及停止路由、准备/高级许可/绑定缺失和冲突/旧许可撤销。GUI和设备替身不等于Unity实际渲染/实物验收。
+- Lifecycle原25+8=33项通过，新增实际机器人双端口/反馈失效可补连、地址错配/断开状态、电缸实际端点及无额外查询等只读展示验证；原假服务Accept异步回调与Connected返回存在竞争，给测试增加有界等待真实Accept后保留原复用断言，未修改生产连接时序或放松断言。Chassis原26+1=27通过，新增部分/随机端口不能伪装三端口就绪；初轮IPv6-mapped显示不符导致检查失败，规范化显示后通过。原57手动点动/停止恢复竞态保持通过。
+- 完整无设备回归：DeviceUI63/Lifecycle33/Chassis27/Manual57/JogUI28/FieldRobot108/FieldWorkflow101/Offline22/RunData37/History32/Console22/Operation7/Python53，合计590通过+1长时跳过。网络仅审批后的本机随机127.0.0.1假服务，Modbus/相机/Unity为替身，无实物访问。各日志/tmp/device-panel-*.log；独立主工程+Editor编译0错误55项既有警告，用/tmp/device-panel-compile-20261028.targets补新文件、按FullPath去重并去掉本机缺失分析器，独立中间/输出在/tmp，不手改生成csproj/IDE设置。meta GUID唯一，git diff --check通过。
+- 更新FIELD_COMMISSIONING操作指南、PROJECT_CONTEXT及本记录，原REAL_CONNECTION_BUTTON_AUDIT加用户修订/实施边界提示，避免原“改现场入口”建议误导。源码/无设备验证完成，未改Git索引/提交/推送/标签、现场持久JSON、ProjectSettings、原Linux包或其他工程；未启动Unity Play、相机/拧紧硬件进程或实物。下一步用户退出Play等导入，先验收新入口/字体/不同分辨率、打开零连接、单设备连接/取消/端点/旧测试入口，再完整Linux构建到新目录，监护验证原正式流程；连接/应答/断开不代表物理停稳或实际到位，停止/急停保护不合并进普通连接。
+
+## 2026-10-28：审查同学新拧紧退出补丁，讨论集成方案（未实施）
+
+- 用户要求先仔细阅读新版本、说明修改进软件的思路。读取项目规则/近期PROJECT_CONTEXT与WORKLOG、Git状态，完整阅读ExternalCode/退出受力优化补丁_20261023解压目录四个文件（退出模块/安装器/测试/说明），核对ZIP清单、当前cr10af_hybrid_x/servo_contact_cycle/unity_robot_client与original两原件、Servo服务/Field配置和阶段调用、Dobot网关/测量/现场权限及Linux构建复制逻辑。保留此前通信、运行档案、底盘手动/连接界面等未提交修改。
+- 确认新包是退出专用补丁：速度≤0.6mm/s、无载小段≤0.15mm/有载≤0.05mm、提前Y/Z有限减载、首个改善位置保留、横偏0.30mm限制、实际TCP投影进度与跟踪校验、轴向提前停止min(18N,硬力限×0.6)、退出内部/外部预算90s及余量。每段stop_at_end=True是该策略设计，不改粗定位轨迹节奏；横向评价值不是纯N，触发12时清除至多7.8。补丁说明仍为未真机验证。
+- 发现不能直接安装：补丁指定-X退出，当前适配版及旧原件是-X卡入/+X退出；新模块缺配套基础参数control_period_s/min_servo_duration_s/lateral_clear_n/lateral_hard_n/search_rounds等定义。其deadline执行依赖基类，新旧超时结构也不一致；新模块直建Dashboard/Feedback及close不能替换现有共享Unity会话。仅AST及内存纯转换检查证明当前/旧原件机器人入口均Unrecognized、当前服务没有run_robot_stage、旧服务不满足ROBOT_MAX_RUNTIME_S结构；未调用安装入口或写运行文件。
+- 新增.codex/TIGHTENING_EXIT_PATCH_REVIEW_2026-10-28.md记录实参/保护/方向/时序/打包差异及方案：补齐同学真机使用的完整ubuntu20_04基座并确认方向，原件留档，只在ContactCycle的EXITING接策略；Python保留算法、Unity独占通信，目标/实测回执同源，搜索阈值与硬停分开、不放宽原保护，段末停止与全局锁存分开；同步内外超时/服务能力版本，复用单独退出入口与运行独立文本档案，先替身回归再监护短距离验收。
+- 当前审查/方案阶段完成，仅新增审查文档并追加WORKLOG，未改运行代码/现场JSON/场景/项目版本，未导入硬件模块、访问设备、执行原安装器入口或缺基座的补丁测试、启动Unity Play/编译/打包/提交推送。当前无需Unity人工检查。下一步请用户提供匹配补丁的完整基础程序及工具退出方向，确认后再最小适配；不能把同学离线测试说明当成本项目集成/真机验证结论。
+
+## 2026-10-28：补齐完整拧紧程序后的复核与适配方案修订（未实施）
+
+- 用户已取得完整代码，要求再看。重读项目AGENTS、近期PROJECT_CONTEXT/WORKLOG、Git状态、前轮审查；完整阅读新ExternalCode/程序和使用文档_X方向修订版_192.168.192.19/ubuntu20_04的机器人420行/电批1758行、两个测试、README/TXT和依赖及先读我，核对ZIP清单，复核退出模块/安装器及当前Python适配/ContactCycle、C#服务启动/版本回执、现场配置/阶段、网关测量方向/指南。保留之前全部未提交通信/档案/手动底盘/界面改动，未执行文件内的真机安装或运动说明。
+- 新完整基座与补丁两个入口在内存纯变换匹配且幂等；基类safety_ok实际检查deadline，所需滤波/阈值/搜索/周期参数齐全。先读我、CLI、自动周期和测试确认方向明确改为+X卡入/-X退出；目前项目仍旧-X卡入/+X退出。完整包未包含优化退出模块/标记，需要叠加先前补丁；旧配置不能静默获得反向授权。
+- 比对当前版确认基础算法也已更新：横向EMA/滞回、分层搜索/硬停阈值、自适应步长和限次搜索；电批接收持续更新，独立结果线程先停止/确认再保存，动作前/结果后/退出前检查新鲜低速无错反馈；新增看门狗/单调时钟、实际OK保持/JAM窗口、坏帧恢复、后台Agg同快照保存等。目标28Nm及主要故障阈值仍沿原件，不宣称重新标定。基础源码缺失障碍已消除，不必重复索要文件。
+- 修订此前“只换退出”建议：保留新版基础算法及必要结果/停转修复再叠加退出优化，Unity继续独占机械臂，ContactCycle唯一编排，保留现有界面/9100控制/9101曲线/19120网关/模拟隔离。新原件无这些桥接、env名不同且无参只检查退出，不能覆盖直跑；正常段末Stop与全局取消分开，保留Unity停止确认/锁定；启动回执、方向/测量、分层阈值、结果处理中与停转证明、单调时钟/旧time.time及内外超时必须一并适配。NG_SLIP/JAM即便成功退出也不变OK、不自动进下一目标；现有硬保护不自动从20放宽26。
+- 原包11项离线测试通过；在/tmp/tightening-full-review.ydLfSB用apply_patch生成原件+纯文本补丁的独立临时副本，不运行安装入口、不修改项目运行文件，再运行原11+退出15=26项均通过（此前11为同一套，不累计成37项独立检查）。父进程显式拒绝真实socket连接，子进程仅dry-run/--check、执行路径均Mock/Plant；禁写pycache、Matplotlib配置仅/tmp。不启动新GUI/真实服务或访问设备。初次AST比较脚本使用本机Python3.8没有的ast.unparse报错，改为get_source_segment后比较成功；无运行副作用。
+- 更新TIGHTENING_EXIT_PATCH_REVIEW文末完整复核/顶部状态提示及PROJECT_CONTEXT、本WORKLOG，保留首次审查为历史并标明最新结论。当前仅审查与无设备原件回归完成，未改运行代码/场景/现场JSON/版本，未Unity编译/Play/打包/提交推送。下一步待用户批准适配后实施并补Unity网关/周期契约回归、更新操作指南，再监护核对工具方向/停转和短距离插入退出；26项通过不是Unity集成或实机通过。当前无需Unity人工操作。
+
+## 2026-10-28～29：实施新版拧紧基座＋退出优化的统一通信适配
+
+- 用户批准开始修改。重读AGENTS、PROJECT_CONTEXT/WORKLOG、Git状态及两轮审查和完整原件，核对Python三适配层/服务启动及曲线、C#Field配置/阶段/权限/网关/测量/Servo、记录器/构建和现有Harness。保留全部前轮未提交通信/数据保存/底盘手动/设备连接界面修改，不修改Git索引/分支/标签。没有执行原件真机安装器、原件GUI或设备命令。
+- cr10af_hybrid_x.py迁移20261023基座数值逻辑，+X卡入/-X退出；保留新版EMA/滞回、有限搜索/自适应步长和内部deadline。去掉原件机器人直连，只用UnityRobotClient。新增cr10af_exit_optimized.py，保留原补丁小步/受力减载/首个改善保留/真实轴向投影及横偏、姿态、行程/跟踪检查；适配共享会话、取消和阶段停止，停止/关闭失败不能变成completed。不连接或关闭外层持有的机器人TCP，也不让Python新增真实机器人socket。
+- ContactCycle改接口3/contact-20261023，补齐原件参数、独立退出预算和方向许可；保持唯一编排，不同时运行同学原件_auto_cycle/机器人子进程。真实全周期卡入前停止请求+停转确认、结果后和缓冲后再次确认；run_id/反馈时间/新鲜live_speed/错误码/后台结果处理/停转确认必须匹配。电批故障、反馈/通信超时、取消不调度退出；NG_SLIP/JAM可在停转后退出，但结果仍NG，不放行下一目标。单独插入/退出不调用电批控制/准备回调，须现场人工确认停转及行程。
+- V26服务保留原9100控制、9101曲线、环境变量、嵌入模式和隔离模拟，不照搬独立TkGUI或原件直连机械臂。移植新结果处理线程/互斥/停止锁存、真实OK保持与卡滞窗口、帧头跨recv/CRC恢复、设备错误优先、单调时钟/看门狗、Agg同快照后台保存。新live_speed不取冻结曲线speed；接收保持运行以取得停转反馈，IO1秒边界/异常socket清理及监听先bind原改进保留。主程序实际发送边界增加停止锁存后拒绝正反转，正常Stop/Reset不被阻止；按钮入队返回真实接受/忙状态，不假forward_queued。
+- FieldCommissioningSettings增加positiveXInsertionConfirmed=false、exitStageTimeoutSeconds=90、contactLateralTrigger/Clear/Slow=18/12/12，原lateralLimitN=20硬保护不放宽至原件26；解除<触发<硬限、减速≤触发，明确原加权评价非纯N。旧JSON由new+FromJsonOverwrite显式补默认、null/数组/空文本拒绝，不自动保存或反向授权。面板增加一行明确新版方向许可并改本次确认文字，未重做连接/现场单测UI；非视觉模式开始前要求方向确认。卡入/退出单测和完整周期外层预算分别联动，不再两个阶段都用30秒。
+- Dobot网关新增受会话权限的只读relative_target，只有GetPose/RelPointTool计算，无移动；客户端缓存所算目标，移动核对六维目标漂移>0.01则拒绝。正常finish_stage与全局stop锁存分开，段末停止仍确认；真实接触时长节奏需要新方向许可或原实验许可。位置稳定停止判据仅在新接触会话/原实验许可生效，不把新方向勾选扩展成改变粗定位/返程停止规则。MotionDiagnostics参考轴同步为插入+X/退出-X，原真实GetPose/User/Tool/力/ServoP路径不改，不推测新硬件API。
+- C#Servo核对Python接口3/策略/能力/方向与本次configuration_id，并在任何接触/模拟周期请求前检查服务版本；网关acquire回执也检查策略，旧服务/旧网关混用拒绝。轮询检查周期/策略/配置未改变。结果处理、停止线程、操作未结束不直接结束Python/释放现场等待；OnApplicationQuit遇在途保留进程，不把窗口关闭当物理急停。程序仍须正常停止后关闭/完整更新。
+- 新cycle_report只按需读取一次，带计划/实测距离/载荷/搜索及tool信息，由C#捕获原RunDataSession引用，保存为commands.jsonl的algorithm_result/detail，不假作设备下发；旧会话结束不污染新运行。原motion.csv/run.log保留。电批CSV/PNG通过SERVO_LOG_DIR写persistentDataPath/ServoLogs，不要求安装目录可写；不自动进入运行数据ZIP。预检加入新模块，Linux顶层*.py构建复制沿用，后处理另附TIGHTENING_ADAPTATION.md。
+- 新test_contact_upgrade.py共21项无设备方法检查，含七种OK/NG/通信终态、前后停转、旧run/后台未完阻止退出、共享会话/取消/停止失败、假位移/旋转工具轴、原件数值方法AST比对、旧网关拒绝、真实发送边界停止及入队冲突。原测试按新接口3/新方向更新，不放宽停止/力反馈断言；接触测试原来只缩短HybridExit而未缩短新退出会保留长周期并造成后续lease冲突，改为明确配置插入和退出两段短距离，保留真实算法执行。新增网关只读预计算/目标漂移拒绝、Field旧JSON/新预算/限值、RunData完整算法证据测试。
+- 测试过程中修正了迁移后独立电批按钮的EXECUTION_ENABLED原件专用变量及不可达AUTO_CYCLE分支；最终四运行模块的LOAD_GLOBAL字节码检查无未定义全局。AST对照卡入lateral_state/lateral_search及退出read_pose/wrench/sampled_cost/update_progress/move_checked/search_exit八方法不变。原件两脚本及退出补丁SHA256与审查记录相同；未改原ZIP/解压原件。
+- 最终无实物回归620通过+1长时跳过：DeviceUI63/Lifecycle33/Chassis27/Manual57/JogUI28/FieldRobot108/FieldWorkflow107/Offline22/RunData38/History32/Console22/Operation7/Python76（77方法运行、1长时跳过；21新测试已含其中，不重复累计）。另实际隔离Python子进程冒烟成功：接口3、六种实物命令拒绝、SIMULATED_OK、取消、零假电批连接；只用自建127.0.0.1服务和设备/Unity替身。没有启动新实物服务、连接真实设备/相机或运行Unity Play。
+- 主工程+Editor独立编译0错误55项序列化/既有等警告，使用此前临时targets纳入前轮新C#文件、去重及跳过本机缺失分析器，中间/输出仅/tmp/contact-upgrade-*，不手改Unity生成csproj、Library/Temp、场景/Prefab/ProjectSettings或版本。git diff --check通过。日志/tmp/contact-python-tests.log、contact-robot/field/lifecycle/chassis/data等及contact-*-Harness-tests.log、contact-upgrade-build.log、contact-smoke-tests.log；CLI dry-run分别核对负X优化退出0.6/0.15/90及正X卡入1.2/2/30，无设备命令。
+- 新增TIGHTENING_ADAPTATION_2026-10-28.md具体改造/配置/操作，FIELD指南最前添加新版优先说明，更新PROJECT_CONTEXT与审查状态。本阶段源码与无设备验证完成；未打包Linux、修改工控机持久配置、提交/推送/打标签。下一步用户退出Play导入、检查新版方向框/滚动/字体/提示与旧入口，然后完整构建新目录、正常停旧服务并部署，现场核对工具方向/净空/停转，先监护短距离仅插入/退出并对照数据，再单目标全周期。无新Inspector绑定；GUI/真实协议/停转和减载效果仍待现场验收，不能把默认20mm或软件完成当实际安全到位证明。
+
+## 2026-10-30：核对最新实测卡入/下发失败（只诊断）
+
+- 用户要求先检查并报告，不批准修代码。重读同内容父级/项目AGENTS、近期PROJECT_CONTEXT/WORKLOG及Git状态，保留上一轮通信/档案/底盘手动/设备界面/新拧紧适配所有未提交修改。读取wulaoshi/testdata/20261029-*全部12报告的result/config/build-info、run.log/cycle-failure、commands/metadata、robot-feedback/motion，核对Python客户端/HybridExit/优化退出/ContactCycle/电批服务、C#网关/Field连接及服务日志出口、Device面板和场景只读端口、相关Harness测试替身；本地读取用户Dobot V4.6.0 PDF端口和RobotMode说明。
+- 三次InsertOnly首因均是预计算目标非六维，记录中零ServoP/MovJ请求、GetPose/RelPointTool返回正常，moved_mm=0。客户端无preview仍显式发expected_target:null，Unity按非null数组进入长度检查。用apply_patch只在/tmp/contact-diagnosis-20261030.hYvxdG创建无控制组件的独立最小Unity工程，2022.3.62f2c1 batch/nographics实际JsonUtility四输入复现：null→长度0、缺省→null、[]→0、六值→6，进程退出0。旧System.Text.Json Harness没覆盖此差异，属于我们的可选字段契约适配缺陷，不是同学卡入算法运动失败。
+- 两次SemiSingle的robot-feedback.csv证明实际连192.168.192.19:30005，配置期望30004，mode5/有效；流程在FieldConnectedTo即拒绝，未发运动。正式连接面板只采用当前控制器端口，控制器/RunScene旧值30005与FieldSettings30004未统一。另054224真实mode6且新鲜/无报警，文档确认拖拽模式，拒绝正确，不能删模式检查。
+- 054457 Contact首因卡入前停转门槛EXIT_BLOCKED，电批TCPtrue但samples0/feedback_time0/live_speed空/device_error缺省-1；未发机械臂卡入。原始电批stdout未进入run.log（只有RobotTrace/ContactCycle入队），尚不能区分设备没回传/模式无效/解析丢帧；需Player.log或电批完整stdout/原始帧，保留门槛而不是假0停转。
+- 代码额外发现通用hard_stop_driver第469行设置stop_requested，新同学原件无此副作用；正常hold/复位/结果停止会使后续启动及wait_tool_stopped自锁。仅AST提取当前和原件相关函数，假send_cmd/时钟/事件、没有导入主服务，组合复现当前正常启动false/零正转、正常新鲜停转false、hold后启动false，原件能发送正转/确认停转且不设置取消锁。此前Mock停止/确认各自隔离而漏了组合副作用；此缺陷不是本批日志首因，不混为同一事件。
+- 退出两份横向评价越20、另一Unity力/力矩先超限后停止确认超时；最后054851在90s走约10.5864/20mm，70条ServoP，段起点间隔中位1.284s/单段运动约0.3s，串行查询/网关调度监控开销不可忽略；回执耗时非纯TCP延迟，不能仅删载荷/无限延时。Recovery成功只代表停止恢复成功。
+- 新增TESTDATA_DIAGNOSIS_2026-10-30.md逐份证据/归属/未知项/建议顺序，更新PROJECT_CONTEXT与本日志；未修改任何运行脚本/现场JSON/场景/限值/服务，未连接设备或运行实物Python主程序，未加载本项目Unity Play、打包、提交/推送。诊断阶段完成、缺陷尚未修复。下一步用户批准后先修可选字段契约/连接端口来源/正常停止vs用户取消，补真实Unity和组合回归，再取电批有效反馈证据、优化退出节奏预算。当前不需要Inspector操作，也不建议未修适配前继续全流程试车。
+
+## 2026-10-30：仅修机械臂连接端口/IP来源，统一已保存JSON
+
+- 用户批准先改连接端口，要求JSON修改实际生效；未授权本轮修卡入/停止等其余问题。重读父级同内容AGENTS、项目AGENTS、最新PROJECT_CONTEXT/WORKLOG与诊断/Git状态，读取完整Device面板、Field配置加载/保存/连接、Dobot主连接及Commissioning端点匹配/DeviceTcpConnection、场景只读端口、DeviceUI/FieldRobot/FieldWorkflow/Lifecycle Harness与操作指南。保留所有此前未提交通信/档案/底盘手动/拧紧工作，没有覆盖用户现场文件。
+- 修改FieldCommissioningSettings增加统一FileName、ReadRobotConnectionFile及机械臂端点专用校验：只读已保存JSON的robotIp/dashboardPort/feedbackPort，缺文件/坏JSON/无效数字IP/越界端口拒绝，不静默取场景30005，也不硬编码30004，不因无关Python未装/运动参数拒绝正式设备面板的连接。未改全流程原有配置/保护校验。
+- 修改DeviceConnectionPanel机械臂行改只读JSON IP/端口，打开和“重读JSON/当前地址”只刷新，连接时重新读文件；失效不保留旧JSON显示或回退，不写文件；底盘/电缸仍沿原编辑/连接方式。FieldCommissioningPanel机械臂连接同用已保存文件，草稿与文件连接字段不同则提示先保存或重读；增加明确“从文件重新读取JSON（覆盖未保存内容）”，任务/机器人连接在途禁止，解析失败保留旧编辑内容，成功重置确认但不变已有连接/文件。面板文字和连接来源提示同步。
+- 修改DobotController.Commissioning新增共用ConfigureFieldConnection，先校验/检查流程和连接在途，再比较实际控制+反馈socket；不匹配先明确断开，不自动关连接/热切，有部分连接也不跳过。无连接或已有同端点才应用JSON三字段并复用原ConnectAsync。FieldConnectedTo采用DeviceTcpConnection实际规范IP匹配；正式RunAsync错误加入期望与实际双端点。DobotController.cs仅把“30005反馈”Inspector标题改成通用说明，未改旧调试默认/场景序列化值、RequestControl或反馈线程/指令。
+- 新增tests/FieldRobotHarness/ConnectionSettingsTests.cs共13项，真实生产配置器＋自建loopback验证三端点应用、不能伪造已连接、连接/现场/算法占用保护、控制单通道不算完整、旧反馈端口必须明确断开、拒绝后保留通道/字段、实际端点拒绝与详细错误、断开后应用新配置。Harness链接生产DeviceTcpConnection并补配置字段替身。DeviceUI链接生产Settings/ChassisLegacy，独立临时文件模拟JSON读取，扩展81项：开窗零网络/零改控制器、旧30005被文件覆盖、自定义端口而非写死30004、点击前外改文件、新旧IP/端口冲突/断开再连、坏文件/缺失/无效IP/端口、无关参数不阻止连接、忙/取消/权限等。测试临时文件只在自建/tmp GUID目录，不动生产JSON。
+- 最终回归342通过：DeviceUI81、FieldRobot121、FieldWorkflow107、ConnectionLifecycle33。FieldRobot初次沙盒执行因socket创建权限被拒，随后经审核仅运行自有127.0.0.1假服务成功；Lifecycle同样仅回环及Modbus替身，不访问真实设备。独立Assembly-CSharp主+Editor编译0错误55项既有/序列化等警告；临时targets仅跳过不存在的本机分析器，生成/输出/tmp/robot-json-build-*，未改Unity生成csproj/Library/Temp/obj、场景/Prefab或ProjectSettings。测试日志/tmp/robot-json-ui/field/workflow/lifecycle-tests.log及robot-json-build.log，git diff --check通过。
+- 更新FIELD_COMMISSIONING操作文档顶部和旧连接说明、TESTDATA_DIAGNOSIS后续状态、PROJECT_CONTEXT及本WORKLOG。源码/无设备检查完成，未Play/真实设备连接、运行电批服务、修改工控机配置、打包/提交/标签/推送。下一步用户退出Play导入，先验收JSON只读端口、新重载按钮、文件外改后重读、旧30005断开再按30004连接并核对实际端点；无需新Inspector绑定。工控机需完整重构建部署；卡入空值、普通停止误取消、电批零反馈和退出预算等本轮刻意未动，不建议仅凭连接修复就跑完整拧紧流程。
+
+## 2026-10-30：修拧紧适配空值/普通停止误取消，补电批无反馈诊断
+
+- 用户批准开始修拧紧程序。重读AGENTS/近期PROJECT_CONTEXT及WORKLOG、Git状态和诊断，复核UnityRobotClient/HybridExit、ContactCycle、V26服务停止/发送/接收/解析/结果线程和同学原件；读取C#网关DTO/六维校验、Servo服务版本/启动/日志和Field捕获、构建复制、现有Python/网关/FieldRobot/离线/Console Harness与指南。保留所有前轮未提交修改，特别是刚完成的JSON连接来源统一；未动场景/Prefab/工控机持久JSON或限值。
+- 新增tests/test_tightening_fixes.py，先用11项组合回归复现原缺陷6失败（可选目标显式null、普通准备/hold导致正转失败、正常结果停止不能确认、反转前停止自取消），原取消保护/缺反馈拒绝仍通过。修后11项全部通过；随后补5项诊断/实际收包处理组合共16项。没有直接导入会启动硬件线程的V26主模块，而是AST提取相关真实函数组合，使用假socket/事件/时钟。
+- UnityRobotClient.move_original_interval没有preview时省略expected_target，避免真实Unity把null数组变[]；匹配preview仍发送完整原六维并消费缓存，失配preview不误用。未新增卡入预计算往返，也没放宽网关的非有限/长度/0.01漂移拒绝。请求追踪可显示实际提供的预计算目标（不记录会话token）。原同学运动/搜索/退出数值方法不改。
+- V26 hard_stop_driver、quick_stop_for_home、fast_stop_after_home_reverse去掉普通设备停止设置取消事件的旧副作用，均不清人工停止锁。明确stop_cycle_tool/_do_stop_driver及故障中止保留set，新显式enqueue/prepare才依旧清锁，send_cmd边界拒绝取消后的Forward/Reverse保持。组合验证卡入前hold→正常开始、正常结果停止→本次新鲜低速确认和反转前/后停止均可正常完成；准备中/已有人工取消仍零后续正转，取消后结果不能报告停转确认成功。
+- V26新增tool_io连接级诊断（独立锁）：收字节/有效反馈/成帧候选拒绝/解析拒绝/滤波拒绝、连接代号、最近接收前96字节/控制发送前32字节hex、最近IO错误240字符、收字节年龄；连接重置计数，不能混为全量丢包或丢失字节数。接收各拒绝路径和发送/连接失败更新，仅连接事件和约1Hz[ToolTrace]打印，不改变硬件协议/设备模式，不新增运动或查询。unity_status/失败快照返回tool_io，停转超时附连接/年龄/原始转速/错误缺省值/IO证据，不能把原device_error=-1缺省当真设备报警。
+- C#Servo把[ToolTrace]入原主线程队列，Field捕获进报告及滚动诊断日志；RuntimeConsole新增测试确认该前缀不会被机械臂周期反馈过滤。ContactCycle接口改4，策略仍contact-20261023，C#附加旧服务、准备、周期请求/轮询检查4；旧3版本明确拒绝，避免只更新UI而继续跑未修Python。未动JSON配置字段/运动力限/方向/原始帧格式/机器人独占通信。
+- 真实Unity JSON检查：只在/tmp/contact-diagnosis-20261030.hYvxdG独立最小工程更新DTO探针，不加载项目控制组件/Scene、无网络；2022.3.62f2c1 batch验证修后省略字段保null/运动参数标志完整、旧显式null仍复现空数组、[]/3值仍会拒绝、6值保留，共6检查退出0。证据/tmp/tightening-unity-json-check.log。不是用System.Text.Json替身假称Unity契约通过。
+- 完整Python93项运行92通过/1长时跳过（16新项含于其中，不重复累计）；自建C#网关仅回环且Python套接字守卫拒绝非回环地址。原数值方法AST匹配仍通过。FieldRobot121（含端口来源和原停止/漂移/轨迹保护）、OfflineWorkflow22、RuntimeConsole23，共166项C#检查通过。主工程+Editor独立编译0错误64项警告，输出/tmp/tightening-fix-build-*、只跳过缺失本机分析器，未改Unity生成csproj、Library/Temp/obj。五运行Python源码compile通过，不启动入口；diff检查通过，原件两脚本SHA256仍分别fd8e3f…32a/c632c1…bfb。
+- 新增tests/smoke_tool_service.py：实际V26子进程SERVO_SIMULATION_ONLY=0，但所有设备/控制/曲线都指定自建127.0.0.1假端点，不访问机器人；假驱动按现有41字节/CRC协议回传并注入一坏CRC。验证真实入队/worker普通复位后正转OK→新鲜停转→CSV落盘、反转RELEASE_CONFIRMED、手动停止后零迟到正反转、[ToolTrace]和坏CRC计数。另tests/smoke_offline_service.py实进程隔离验证接口4/6实物命令拒绝/SIMULATED_OK/取消/零假电批连接通过。两个冒烟单列，不把假驱动成功当物理停转/真机通过；均在临时副本执行并回收自有子进程。
+- 更新TIGHTENING_ADAPTATION顶部具体改造/诊断字段/接口4/更新验收，FIELD指南/诊断报告后续状态、PROJECT_CONTEXT与本日志。源码和本轮无设备验收完成；没有连接真实电批/机械臂/相机、运行本项目Play、实际Linux打包、Git提交/标签/推送，也未改现场配置。退出查询/调度节奏和90秒预算本轮未优化/放宽，上次20mm仅走10.59mm仍须后续处理；实际零反馈根因需新报告定位。下一步先用旧软件安全停旧服务，再完整构建新目录部署，退出Play检查Console/日志，核对真实JSON双端点、空闲模式、工具/User/方向和有效停转反馈后监护短距离逐项验收；无新Inspector绑定，不以默认20mm完整周期直接验收。
+
+## 2026-10-30：对照同学柔顺卡入/退出V2（只审查与提出迁移方案）
+
+- 用户新发更新包，要求比较当前差异和改进思路，未授权本轮迁移。重读AGENTS/PROJECT_CONTEXT/WORKLOG/Git状态，保留全部通信/数据/手动底盘/正式连接/拧紧适配未提交修改。读取新包README/VERSION/使用方法/验证/哈希/依赖及全部核心Python、六组测试；逐项对照20261023原件、退出补丁、当前HybridExit/优化退出/ContactCycle/UnityClient、网关/反馈/配置/构建。复核用户Dobot V4.6 PDF印刷112–113页和官方SDK取力接口，不将同学文档中的硬件/安装命令当成本轮操作授权。
+- 明确本次电批28Nm/协议/判定/滤波相对原件未变，实质是卡入也用小步实测、两向连续载荷减速、12/18N轴向软停、八轮有改善搜索且限制载荷转移、0.30mm偏移、异常持久文件和只读probe。指出当前退出已有小步实测/力限，不把旧功能算作全新；当前适配写死两轮/插入30s/独立JSON行程需要联动，不能只换退出脚本。
+- 16哈希与清单一致（清单CRLF用只读管道规整，不改原件）。/tmp只读离线runner在Ubuntu/Python3.8.10、NumPy1.24.4、Matplotlib3.7.5运行随包46测试全通过，测试主进程禁止网络；已检查子进程仅dry-run/check/参数互斥验证。补充假Plant检查复现：Stop回执失败仍completed并删除状态；blocked记录复位跳过仍存活PID；现有两轮参数传入V2后总轮数仍2。未连接任何实物、运行原件GUI/execute或本项目服务/Play，不以离线通过当工艺/硬件验收。
+- 新增.codex/TIGHTENING_V2_REVIEW_2026-10-30.md，记录差异、源码位置/文档依据、风险、最小迁移与短行程验证方案；更新PROJECT_CONTEXT及本日志。本轮未修改运行代码/现场JSON/场景/项目设置、未打包或Git写操作。当前运行版本仍contact-20261023/接口4；建议保留Unity独占IO和ContactCycle编排，迁入双向算法，统一取力/有效参数/预算/版本，接完整周期持久锁，保留停止失败保护及10-30修复。报告/比较已完成，迁移待用户批准；暂无新增Unity手动检查或Inspector绑定。
+
+## 2026-10-30：迁移柔顺卡入/退出V2到软件（接口5）
+
+- 用户批准开始修改。重读项目/父级AGENTS（内容一致）、PROJECT_CONTEXT/WORKLOG、Git状态和V2审查；核对新旧算法、ContactCycle/UnityClient/V26、网关/反馈/配置、Servo启动/版本/证据、现场面板完整流程/恢复、打包及相关测试/指南。保留前轮未提交改动，不覆盖同学原件或现场JSON。
+- 改cr10af_exit_optimized引入V2双向实测小步/连续减速/8轮改善搜索与负荷转移拒绝，保留Unity共享client/cancel、停止失败不成功/释放保护；ContactCycle两向、HybridExit公共run/CLI统一V2，实物CLI不允许绕现场入口。卡入≤0.4mm/s/0.10mm、退出≤0.6mm/s/0.15mm，有载进一步缩步，12/18N软停与0.30mm偏移保持。6个数值方法AST对V2原件一致。电批28Nm判定/帧协议、底盘/升降/视觉/粗定位CP与间隔未变。
+- 新contact_session.py由C#传SERVO_CONTACT_STATE_PATH固定到persistentDataPath/contact-session.json，独占创建、fsync/原子保存、有界JSON/所有权/PID/身份核对。覆盖完整接触周期，阶段立即/段内约1Hz检查点；完整历史仍在algorithm_result，不塞入状态文件。仅插入成功、异常、取消/重启保留，完整安全退出/停止/释放后才清；补收尾期间取消不能报成功。模拟不读写清除真实记录；遗留记录挡住新目标/偏移/粗定位、手动电批和快捷键入队，保留原取消锁。
+- Field面板新增人工解除接触复核：先结束占用/机器人及电批停止、同一设备/User/Tool、旧操作进程不在，再经Unity只读contact_probe复核全局与原始力/力矩、工具/反馈，电批新鲜无错误低速稳定0.3s；失败保留，不运动/使能/切坐标/清零/自动续跑。恢复日志带旧记录/观测写入现场报告。本机停止解锁与接触恢复分开；仅插入完成仍可能接触，不能接着盲点仅退出。单独机械臂测试仍不控制电批，须人工先确认停转。
+- 网关统一ReadGlobalToolWrenchAsync的GetForce()，读前后检查Tool/传感器/新鲜度，保留User改变/原始力硬保护；contact_probe无运动租约。带参API文档也合法，本次兼容同学新现场用法，不用失败零力回退。UnityClient/网关/服务/Servo改contact-compliant-v2-20261029/接口5，启动/附加/准备/周期核对目录与版本，拒绝旧3/4服务混用。新建插入预算90s，旧JSON不自动改；有效速度预算校验/面板日志同步，未封顶step/speed时长拒绝不再适用V2（实际受0.25s周期约束），实际网关时间/力限仍保留。未直接消除退出20mm/90s查询调度问题。
+- 新tests/test_compliant_v2.py共29项，覆盖数值/实际位移/减载、Stop/存储失败、跨实例/重启/PID/身份/所有权、完整周期跨等待/拧紧/释放、仅插入保留、取消竞态、全局/原始力恢复、手动入队互锁及隔离服务状态/报告不读真实文件。实物服务内的模拟动作不改/清记录，状态仍可显示真实互锁。原配置/升级/诊断/时长/隔离测试按新策略接口更新。Python完整122运行121通过1长时跳过，禁止非回环连接。C#FieldRobot新增8项为129（工具不符/中途变化、无参GetForce、只读无Stop/运动/坐标变化、非有限力/过期），FieldWorkflow110、Offline22、Console23，共284通过。
+- 新tests/smoke_contact_v2.py使用实际V26进程+生产C#网关，Dashboard/反馈/电批均自建127.0.0.1，验证完整插入/拧紧/退出、仅插入保留、拒绝盲退出/手动、重启仍锁、显式只读恢复。FieldRobotHarness增加专用--contact-gateway分支，不影响常规测试。原实际进程假电批正转OK/新鲜停转/CSV、反转释放/人工停止及隔离模式完成/取消/六实物命令拒绝/零电批连接冒烟也通过。测试socket经审核仅回环、自有进程均回收，不将假设备成功当物理停转证明。
+- 主+Editor独立编译0错误68警告，输出/tmp/compliant-v2-build-*，仅临时targets跳过缺失本机分析器；预检包括新模块/字体/Agg通过，diff检查通过，同学原件16哈希一致。新增V2迁移/操作指南，原适配/现场指南顶部改接口5并保留历史，审查文档标记后续迁移；Editor后处理额外复制V2指南，顶层.py原复制逻辑已包含新模块。同步PROJECT_CONTEXT/本日志。
+- 源码及无设备验证完成，未连真实设备/生产Play/Unity画面验收/实际Linux打包/提交标签推送，未改现场JSON/场景/Prefab/ProjectSettings或Unity生成目录。下一步用户退出Play导入，手动检查新区域滚动、有效参数/预算提示/恢复确认（无新增Inspector绑定），安全关闭旧服务后完整构建到新目录，核对端点/实际工具与两类力/有效停转，再监护短行程验证；不以默认20mm或离线通过替代工艺验收。
+
+## 2026-10-30：修复本次现场普通仿真/下发/插入与无预检报告问题
+
+- 用户授权找因并修复三项；随后明确仅仿真模型底盘动，最后亲自确认开启实时反馈是仿真机械臂不动原因、关掉已恢复。重读父/项目AGENTS（同哈希）、PROJECT_CONTEXT/WORKLOG/Git状态，保留通信/拧紧/数据/底盘等全部原未提交修改。读取Simulation/ArmController/MissionController/RealRobotFollower/ChassisController/BITStarPlanner/IK状态还原、场景相关只读字段、Field Settings/Panel/Dobot流程/Servo/ContactCycle、现有测试及指南；已有testdata最新仅10-29，当前机器Player.log也是旧日期，未冒充本次现场日志。只读现场同名JSON见20mm/30s，与照片预算拒绝一致；没有改现场配置。
+- 普通仿真入口原未关闭反馈跟随，ArmController.externalControlActive使StartArmSequence直接return；原全流程只赋followEnabled=false也会遗留外部标志。Simulation新增统一只针对模型的模式交接，用完整DisableRealRobotFollow+实际arm释放，更新SyncToggle且不在仿真页恢复已保存同步许可；普通开始/切页/模拟入口共用，已有实物/离线任务则拒绝。不连设备/断端口/发运动。不改路径、角度/单位、IK或同学V2数值方法。Arm/Mission增加播放、停靠/等待及冲突日志，不再无声拒绝。
+- 截图下发/插入明确由V2有效0.4mm/s而旧20mm/30s不可能预算挡住；原Validate还把此检查耦合保存/连接/关节微调/仅退出/恢复。Settings保留原严格默认，新增可分离预算和按方向检查；Panel执行所选方向前严格校验，Dobot通用关节占用/Servo配置不执行未用阶段预算，Python将配置期预算校验移到真实start按workflow，在prepare/tool/线程/租约/持久文件前拒绝。原数值范围、力限、方向、有效反馈、停止、持久接触互锁保持。
+- 面板新增明确行程/有效速度/理论时长/预算及“补足V2预算并保存”：仅显式点击才保存时间增量max(90,ceil(理论+30))，保留更长值，超过600拒绝且不部分修改；不改速度/行程/力限/方向，清本次确认。20mm旧30补90仅消除不可能预算，仍不承诺查询/停止/搜索耗时能在90s完成，保留现场短行程验收要求。
+- 原RunAsync在Busy/BeginReport前的参数/计划失败不会建报告；现在预检拒绝也保存配置草稿、结果/原因、日志、构建信息，明确未进入执行阶段。预检FailureCause不沿用上次周期首错，ExportReport preflightOnly不结束另一任务诊断或混入上次周期失败/清理证据，失败后重新确认。
+- 测试：新增SimulationModeHarness编译真实ArmController/RealRobotFollower及从Simulation提取的原入口守卫（含UI调用次序断言），假Unity执行器复现占用/修后播放/遗留标志/四种任务不抢占等10通过，未调用native MuJoCo或真实Unity场景。FieldWorkflow由110增120，检查分阶段/旧预算可保存/修复不增授权/不缩短/超600不部分改。Python配置新增3项，完整125运行124通过1长时跳过；FieldRobot129、Offline22、RuntimeConsole23，共C#304通过。
+- 实际Python进程+生产C#网关+自建127.0.0.1假机器人/电批smoke_contact_v2通过：旧预算允许configure、20mm/30s真实插入/完整周期在cycle_id/接触文件变化前拒绝，未用插入30不挡独立退出，仅插入成功/重启仍互锁，旧预算允许显式只读恢复，原完整卡入/拧紧/退出仍通过。沙盒不允许socket的首次检查退出PermissionError后，经审核仅开放自有回环测试；全Pythonrunner有非回环拒绝守卫，子进程均回收，绝无实物连接。
+- 主+Editor编译0错误68警告（输出/tmp/field-regression-build-*，临时targets仅跳过本机缺失分析器）、diff检查通过；测试日志/tmp/field-regression-{python-tests,robot-tests,contact-smoke,upgrade-tests}.log。更新FIELD指南、随构建的V2指南、PROJECT_CONTEXT及本日志，接口5不变，要求完整部署修复后的C#/Python，不混用旧服务。源码及无设备验证完成；未打包/提交/标签/推送、未改场景/Prefab/ProjectSettings/Unity生成目录或原件。
+- 待人工Unity检查：退出Play导入无编译错，无新增Inspector绑定；打开实时反馈后点普通开始仿真应自动释放模型，确认底盘停靠→机械臂播放日志；有实物任务不可抢。现场核对行程后按新预算按钮并重新确认，先短行程/只读再真实测试；故意无效预算应在“最近报告”产生未执行报告。未做画面/实机验收，不能把回环假设备通过当真机到位或工艺验收。
+
+## 2026-11-12：合入伍老师新UI前的GitHub源码备份教学（未执行上传）
+
+- 目标：用户要求先上传上一次版本，继续由用户手动执行，并解释每一步命令。本轮按当前My project21.5未合入新管理UI的开发版准备教程，未代执行Git提交或推送。
+- 读取父/本工程AGENTS、WORKLOG、PROJECT_CONTEXT、旧PUBLISH/Release草稿、Git状态/分支/标签/日志、.gitignore与tests/.gitignore、Player版本及原件对照测试引用。48个跟踪修改、86个未跟踪文件及其他旧工作全部保留；新增教学文档另计。
+- 只读核对本地当前release/software-v1.0及GitHub同名分支均为e9062176009174a2a4eb813f09cd4d405497ed20，v1.12-test.20261028已有；新建议v1.12-test.20261112本地/远端无同名标签。Github插件编码斜杠branch URL被参数校验拒绝，随后以matching-refs接口核对成功，无远端写操作。
+- 新增.codex/PUBLISH_2026-11-12.md：按当前发布分支编排目录/状态、fetch、指定目录add、暂存审阅、commit、push分支、检查并建立/推送新标签、比较本地及远端分支/标签提交哈希；逐条解释作用和异常停止位置，不复用旧教程的integration切换合并。
+- 新增.codex/RELEASE_v1.12-test.20261112.md作为可选测试Release说明，围绕通信/手动底盘/运行档案/柔顺V2/普通仿真及预算修复，区分10月30日历史测试与本轮未复跑状态；源码备份不宣称实机验收/新安装包，保留Player1.9.0和原大资源忽略规则。
+- 更新本日志及PROJECT_CONTEXT；同步父级记录和教程入口。没有修改任何业务源码、场景、Prefab、meta、ProjectSettings、忽略规则或运行配置。
+- 验证：git diff --check原有改动无空白问题；add --dry-run核对目标不实际暂存。测试会读取ExternalCode内新原件，教程保留完整ExternalCode，避免只加顶层Python导致复算缺依赖。最大未跟踪文件约3MB，无需为本轮引入LFS/重写历史。最终再次核对源码哈希及Git索引/refs保持不变，并检查新文档空白与路径。
+- 教程和说明准备完成；实际暂存/提交/fetch/推送/标签/Release尚未由本轮执行。未复跑Unity编译、Play、软件测试、Linux构建或设备动作。
+- 下次从用户第8步核对结果开始，确认GitHub分支/标签与新HEAD一致，再考虑选择性迁入根SimulationPlatform新UI；不要覆盖旧标签或把未提交状态当已备份。Unity仅需用户保存文件、退出Play并确认当前脚本编译无错误，无新增Inspector绑定。

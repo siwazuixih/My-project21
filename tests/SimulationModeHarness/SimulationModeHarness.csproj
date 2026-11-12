@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><AllowUnsafeBlocks>true</AllowUnsafeBlocks></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../Assets/ArmController.cs" />
+    <Compile Include="../../Assets/RealRobotFollower.cs" />
+    <Compile Include="../../Assets/RobotData.cs" />
+    <Compile Include="$(BaseIntermediateOutputPath)SimulationEntry.cs" />
+  </ItemGroup>
+  <Target Name="ExtractEntry" BeforeTargets="CoreCompile">
+    <Exec Command="python3 &quot;$(MSBuildProjectDirectory)/ExtractProduction.py&quot; &quot;$(MSBuildProjectDirectory)/../../Assets/SimulationPlatform/Scripts/Function/Simulation.cs&quot; &quot;$(MSBuildProjectDirectory)/$(BaseIntermediateOutputPath)SimulationEntry.cs&quot;" />
+  </Target>
+</Project>

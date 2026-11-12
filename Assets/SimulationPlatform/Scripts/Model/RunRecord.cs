@@ -36,6 +36,8 @@ public class RunRecord
     public bool Simulated { get; set; }
     public bool Completed { get; set; }
     public string ReportDirectory { get; set; } = "";
+    public string DataDirectory { get; set; } = "";
+    public string DataError { get; set; } = "";
     [BsonId]
     [XmlAttribute("Id")]
     public string Id { get; set; }

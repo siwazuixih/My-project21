@@ -243,7 +243,9 @@ public partial class ConnectCommander : MonoBehaviour
     public string OfflineStatus { get; private set; } = "";
     private bool chassisRouteRunning;
     private int singleTaskRunning;
-    public bool AnyTaskRunning => isSequenceRunning || chassisRouteRunning || singleTaskRunning > 0;
+    public bool NonManualTaskRunning => isSequenceRunning || chassisRouteRunning || singleTaskRunning > 0;
+    public bool AnyTaskRunning => NonManualTaskRunning ||
+        (chassisTCP != null && chassisTCP.ManualJogLocked);
 
     private IEnumerator TrackSingleTask(IEnumerator task)
     {

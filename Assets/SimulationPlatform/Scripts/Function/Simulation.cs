@@ -84,6 +84,7 @@ public partial class Simulation : ModelImport
 
     // 当前运行模式状态
     private bool m_isSimulationMode = true;
+    public bool IsRealRunPage => !m_isSimulationMode;
 
 
     private Vector3? loadedSceneXYZ;
@@ -122,6 +123,9 @@ public partial class Simulation : ModelImport
 
         if (m_isSimulationMode)
         { Debug.LogWarning("实物半自动流程须切换到真实运行界面；离线请勾选全流程验证（模拟）"); return; }
+        var connections = GetComponent<DeviceConnectionPanel>();
+        if (connections != null && connections.IsConnectionOperationInProgress)
+        { Debug.LogWarning("设备仍在连接中，请等连接尝试结束并核对各设备状态后再开始运行"); return; }
         var panel = GetComponent<FieldCommissioningPanel>();
         if (panel == null) { Debug.LogError("半自动执行组件未就绪"); return; }
         if (Notice != null) Notice.SetActive(false); // 真实许可改由现场参数面板的显式确认守卫。
@@ -131,6 +135,7 @@ public partial class Simulation : ModelImport
     private void Awake()
     {
         if (GetComponent<FieldCommissioningPanel>() == null) gameObject.AddComponent<FieldCommissioningPanel>();
+        if (GetComponent<DeviceConnectionPanel>() == null) gameObject.AddComponent<DeviceConnectionPanel>();
     }
 
     public void PrepareFieldMode()
@@ -140,6 +145,22 @@ public partial class Simulation : ModelImport
             fullProcessValidationToggle?.SetIsOnWithoutNotify(false);
             OnFullProcessValidationChanged(false);
         }
+    }
+    // 只转交本地模型的控制权，不断开端口，不向实物发送任何命令。
+    private bool PrepareSimulationPlayback()
+    {
+        if ((FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked) ||
+            (ConnectCommander != null && ConnectCommander.AnyTaskRunning) ||
+            (Dobot != null && (Dobot.FieldWorkflowActive || Dobot.ExternalControlActive)))
+        { Debug.LogWarning("[仿真] 已有实物/离线任务占用，请先停止并确认，不能开始普通仿真"); return false; }
+        bool followed = (RealRobotFollower != null && RealRobotFollower.followEnabled) ||
+            (MissionController?.armCtrl != null && MissionController.armCtrl.externalControlActive);
+        // 不能只赋followEnabled=false：必须同时解除ArmController的externalControlActive。
+        RealRobotFollower?.DisableRealRobotFollow();
+        MissionController?.armCtrl?.SetExternalControlActive(false);
+        SyncToggle?.SetIsOnWithoutNotify(false);
+        if (followed) Debug.Log("[仿真] 已关闭实时反馈跟随并释放机械臂模型，接下来只播放本地轨迹（无实物下发）");
+        return true;
     }
     // Start is called before the first frame update
     void Start()
@@ -293,22 +314,20 @@ public partial class Simulation : ModelImport
             $"连接状态更新 - {e.PortType}：{(e.IsConnected ? "已连接" : "未连接")}；{e.Message}");
         Debug.Log($"连接状态变化: Port={e.PortType}, Connected={e.IsConnected}, Message={e.Message}");
 
-        if (e.PortType == "Dashboard")
+        if (e.PortType == "Dashboard" || e.PortType == "Feedback")
         {
             if (robotConnection != null)
             {
-                robotConnection.Msg = e.IsConnected ? "已连接" : "未连接";
-                robotConnection.StatusType = e.IsConnected ? StatusType.SUCCESS : StatusType.NONE;
+                bool ready = Dobot != null && Dobot.IsDashboardConnected && Dobot.HasFreshFeedback(1f);
+                robotConnection.Msg = ready ? "已连接" : Dobot != null && Dobot.IsDashboardConnected ? "控制已连，反馈未就绪" : "未连接";
+                robotConnection.StatusType = ready ? StatusType.SUCCESS : StatusType.NONE;
             }
-        }
-        else if (e.PortType == "Feedback")
-        {
         }
         else if (e.PortType == "Chassis")
         {
             if (boltConnection != null)
             {
-                boltConnection.Msg = e.IsConnected ? "已连接" : "未连接";
+                boltConnection.Msg = e.IsConnected ? "已连接" : "未连接/部分连接";
                 boltConnection.StatusType = e.IsConnected ? StatusType.SUCCESS : StatusType.NONE;
             }
             Debug.Log($"底盘连接状态: {e.IsConnected}, {e.Message}");
@@ -427,6 +446,8 @@ public partial class Simulation : ModelImport
     {
         if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked)
         { fullProcessValidationToggle?.SetIsOnWithoutNotify(fullProcessValidationEnabled); return; }
+        if (enabled && !PrepareSimulationPlayback())
+        { fullProcessValidationToggle?.SetIsOnWithoutNotify(fullProcessValidationEnabled); return; }
         fullProcessValidationEnabled = enabled;
 
         if (enabled)
@@ -446,10 +467,6 @@ public partial class Simulation : ModelImport
             {
                 SyncToggle.SetIsOnWithoutNotify(false);
                 SyncToggle.interactable = false;
-            }
-            if (RealRobotFollower != null)
-            {
-                RealRobotFollower.followEnabled = false;
             }
 
             Debug.LogWarning(
@@ -1335,11 +1352,11 @@ public partial class Simulation : ModelImport
 
         if (RealRobotFollower != null)
         {
-            RealRobotFollower.followEnabled = param.IsSync;
+            RealRobotFollower.SetRealRobotFollow(!m_isSimulationMode && param.IsSync);
         }
         if (SyncToggle != null)
         {
-            SyncToggle.isOn = param.IsSync;
+            SyncToggle.SetIsOnWithoutNotify(!m_isSimulationMode && param.IsSync);
         }
     }
 
@@ -1350,6 +1367,7 @@ public partial class Simulation : ModelImport
     }
     private void OnPathPlanClicked()
     {
+        if (!PrepareSimulationPlayback()) return;
         /*
         if (ModelCollisionHighlighter.selectedObject != null)
         {
@@ -1546,6 +1564,7 @@ public partial class Simulation : ModelImport
         { Debug.LogWarning("离线流程运行中，请先停止再切换界面"); return; }
         if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked)
         { Debug.LogWarning("实物流程占用中，请先停止并确认，再切换仿真模式"); return; }
+        if (!PrepareSimulationPlayback()) return;
         if (!m_isSimulationMode)
         {
             m_isSimulationMode = true;

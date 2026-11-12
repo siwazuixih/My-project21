@@ -19,6 +19,8 @@ public static class Program
         var parameters = new SimulationParam { RobotXYZ = new Vector3D { X = 1 }, BaseSpeedValue = .3f };
         string id = RunRecorder.BeginRun(RunType.SIMULATION, parameters, 2, 1, "", "仿真");
         Check(RunRecorder.IsCurrent(id), "begin session");
+        var firstData=RunDataCapture.Current;
+        Check(firstData != null && firstData.RunId==id && firstData.Simulated,"history starts a matching isolated data session");
         parameters.RobotXYZ.X = 99; parameters.BaseSpeedValue = 99;
         Check(RunRecorder.Current.SimParams.RobotXYZ.X == 1 && RunRecorder.Current.SimParams.BaseSpeedValue == .3f, "deep parameter snapshot");
         Check(RunRecorder.BeginRun(RunType.SIMULATION, parameters, 2, 1, "", "仿真") == id, "step-mode resumes same project/source");
@@ -30,9 +32,12 @@ public static class Program
         RunRecorder.RecordStep("目标甲", "执行结束", id);
         Check(!RunRecorder.Current.Steps[0].HasTorque && !RunRecorder.Current.Steps[0].HasAngle, "missing measurements are explicitly unknown");
         RunRecorder.FinishRun(RunRecordResult.Success, null, id);
+        firstData.Completion.GetAwaiter().GetResult();
         var first = RunRecorder.GetRecords(a).Single();
         Check(first.Result == "Success" && first.Completed && first.ResultReason == "", "success with null reason safely persists");
         Check(first.Steps.Count == 1 && first.Steps[0].Index == 0, "steps persist and index correctly");
+        Check(first.DataDirectory==firstData.DirectoryPath && File.Exists(Path.Combine(first.DataDirectory,"metadata.json")),"history links independent data files, not samples in database");
+        Check(File.ReadAllText(Path.Combine(first.DataDirectory,"metadata.json")).Contains("RobotXYZ"),"property-based parameters are not silently serialized as an empty Unity JSON object");
         id = RunRecorder.BeginRun(RunType.SIMULATION, null, 1, 0, null, "全流程离线验证", true, false);
         Check(RunRecorder.Current.Simulated && RunRecorder.Current.Mode == RunType.SIMULATION, "offline never classified as physical");
         RunRecorder.MarkFailure("首次错误", false, id);
@@ -80,15 +85,35 @@ public static class Program
         log.Flush(); Check(OperationLogTool.Logs.Count == 1, "flush does not duplicate last edit");
         log.OnValueChanged(new UnityEngine.Vector3(4, 2, 3)); log.Reset(new UnityEngine.Vector3(5, 2, 3)); log.Flush();
         Check(OperationLogTool.Logs.Count == 1, "programmatic load resets baseline without operation log");
+        string report=Path.Combine(temp,"field-report");
+        id=RunRecorder.BeginRun(RunType.REALTIME,null,1,0,"field snapshot","field",false,false,report,"{\"robotSpeedPercent\":2.0}");
+        var fieldData=RunDataCapture.Current; RunRecorder.FinishRun(RunRecordResult.Dispatched,"not arrival",id); fieldData.Completion.GetAwaiter().GetResult();
+        var linked=RunRecorder.GetRecords(a).Single(r=>r.Id==id);
+        Check(linked.DataDirectory==report && linked.ReportDirectory==report,"field diagnostics and archive reuse one report directory");
+        Check(linked.RealParamsSummary=="field snapshot" && File.ReadAllText(Path.Combine(report,"metadata.json")).Contains("robotSpeedPercent"),"full field configuration stays in files, not the UI/database summary");
+        typeof(RunRecorder).GetMethod("InitializeDataCapture",System.Reflection.BindingFlags.Static|System.Reflection.BindingFlags.NonPublic).Invoke(null,null);
+        using(var command=RunDataCapture.Command("robot","fake",1,"manual target","deg")) { command.Written(); command.Accepted(); }
+        var manualData=RunDataCapture.Current; string manualId=RunRecorder.Current.Id;
+        Check(RunRecorder.Current.Source=="手动调试/通信记录","manual transport creates explicitly labeled debug history");
+        RunDataCapture.EndManualSession(); manualData.Completion.GetAwaiter().GetResult();
+        Check(RunRecorder.Current==null && RunRecorder.GetRecords(a).Single(r=>r.Id==manualId).Result=="Dispatched","manual scene cleanup ends recording without claiming physical success");
         Console.WriteLine($"RunHistoryHarness: {passed} passed. Temporary reports: {temp}");
     }
 }
-public sealed class Project { public string Id { get; set; } public string Name { get; set; } }
+public sealed class Project { public string Id { get; set; } public string Name { get; set; } public SimulationParam SimulationParam { get; set; } }
 public static class RunManager { public static Project Project { get; set; } }
 public static class PathTool { public static string Root; public static string GetExecutableDirPath() => Root; }
 public static class OperationLogTool { public static List<string> Logs = new List<string>(); public static void RecordLog(OperationType type, string value) => Logs.Add(value); }
 namespace UnityEngine
 {
+    public enum RuntimeInitializeLoadType { BeforeSceneLoad }
+    public sealed class RuntimeInitializeOnLoadMethodAttribute : Attribute { public RuntimeInitializeOnLoadMethodAttribute(RuntimeInitializeLoadType _) {} }
+    public static class Application {
+        public static string persistentDataPath => Path.Combine(PathTool.Root,"persistent");
+        public static string version => "harness";
+        public static event Action quitting;
+    }
+    public static class JsonUtility { public static string ToJson(object o) => System.Text.Json.JsonSerializer.Serialize(o); }
     public static class Debug { public static void Log(object text) { } public static void LogWarning(object text) { } }
     public static class Time { public static float unscaledTime; }
     public struct Vector3

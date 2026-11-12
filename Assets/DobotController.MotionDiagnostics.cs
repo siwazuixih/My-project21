@@ -137,12 +137,13 @@ public partial class DobotController
     {
         if (!measurementClock.IsRunning) measurementClock.Start();
         if (request.stage != "INSERTING" && request.stage != "EXITING") throw new ArgumentException("无效运动测量阶段");
+        RunDataCapture.Current?.Phase("接触/" + request.stage);
         if (!Finite(request.planned_distance_mm) || request.planned_distance_mm < 0 || request.planned_distance_mm > 100)
             throw new ArgumentException("无效测量距离");
         if (!ownerSimulation) RequireRobotReady(false);
         var origin = await ReadPoseAsync();
         double originObservedAt = measurementClock.Elapsed.TotalSeconds;
-        double direction = request.stage == "INSERTING" ? -1 : 1;
+        double direction = request.stage == "INSERTING" ? 1 : -1;
         double[] target;
         if (ownerSimulation) { target = (double[])origin.Clone(); target[0] += direction; }
         else target = ParseValues(await ExchangeDashboardAsync("RelPointTool(pose={" + Numbers(origin) + "},{" + Number(direction) + ",0,0,0,0,0})", true));

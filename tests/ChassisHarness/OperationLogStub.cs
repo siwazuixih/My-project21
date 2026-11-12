@@ -4,3 +4,9 @@ public static class OperationLogTool
 {
     public static void RecordLog(OperationType type, string message) { }
 }
+public class FieldCommissioningPanel
+{
+    public static FieldCommissioningPanel Active;
+    public int Stops;
+    public void RequestStop() { Stops++; }
+}

@@ -15,9 +15,30 @@ public static class RunRecorder
     public static RunRecord Current => current;
     public static string LastError { get; private set; } = "";
     public static string DatabasePath => Path.Combine(PathTool.GetExecutableDirPath(), "Data", "Runs", "RunRecords.db");
+    private const string ManualSource = "手动调试/通信记录";
+
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+    private static void InitializeDataCapture()
+    {
+        if (current != null) FinishRun(RunRecordResult.Interrupted,"运行环境重新初始化，旧会话不代表完成");
+        RunDataCapture.EnsureManualSession = EnsureManualDataRun;
+        RunDataCapture.EndManualSession = FinishManualDataRun;
+        RunDataCapture.ReportSaveError = error => Debug.LogWarning("[RunData] 保存失败，记录不完整：" + error);
+        Application.quitting -= EndDataOnQuit;
+        Application.quitting += EndDataOnQuit;
+    }
+    private static void EndDataOnQuit() => FinishRun(RunRecordResult.Interrupted,"应用退出，记录结束不代表设备停稳");
+    private static void EnsureManualDataRun()
+    {
+        if (current?.Source == ManualSource && current.ProjectId != RunManager.Project?.Id) FinishManualDataRun();
+        if (current != null || RunManager.Project == null) return;
+        BeginRun(RunType.REALTIME,RunManager.Project.SimulationParam,0,0,"手动通信，不代表完整任务或到位验收",ManualSource,false,false);
+    }
+    private static void FinishManualDataRun()
+    { if (current?.Source == ManualSource) FinishRun(RunRecordResult.Dispatched,"手动通信会话结束，不代表设备到位/停稳"); }
 
     public static string BeginRun(RunType mode, SimulationParam simParams, int targetCount,
-        int replaceCount, string realSummary, string source = "仿真", bool simulated = false, bool resume = true)
+        int replaceCount, string realSummary, string source = "仿真", bool simulated = false, bool resume = true, string reportDirectory = null, string configurationSnapshot = null)
     {
         lock (Gate)
         {
@@ -36,6 +57,21 @@ public static class RunRecorder
             current = new RunRecord { ProjectId = projectId, Mode = mode, Simulated = simulated,
                 Source = source ?? "", StartTime = DateTime.Now, TargetCount = targetCount,
                 ReplaceCount = replaceCount, SimParams = Snapshot(simParams), RealParamsSummary = realSummary ?? "" };
+            current.ReportDirectory = reportDirectory ?? "";
+            try
+            {
+                current.DataDirectory = string.IsNullOrEmpty(reportDirectory) ?
+                    Path.Combine(Application.persistentDataPath,"RunData",current.Id) : reportDirectory;
+                RunDataCapture.Begin(new RunDataSession(current.DataDirectory,new RunDataSession.Info {
+                    runId=current.Id, projectId=projectId, source=current.Source,
+                    simulated=simulated || mode==RunType.SIMULATION, version=Application.version, mode=mode.ToString(),
+                    buildId=typeof(RunRecorder).Assembly.ManifestModule.ModuleVersionId.ToString(),
+                    // SimulationParam uses properties: Unity JsonUtility would silently output {}.
+                    configuration=(current.SimParams==null ? "{}" : LiteDB.JsonSerializer.Serialize(BsonMapper.Global.ToDocument(current.SimParams))) + "\n" + (configurationSnapshot ?? current.RealParamsSummary) }));
+                RunDataCapture.Context(current.Id,0,current.Source);
+                Debug.Log("[RunData] 数据记录目录（完整性见metadata）：" + current.DataDirectory);
+            }
+            catch (Exception e) { current.DataError=e.Message; Debug.LogWarning("[RunData] 无法初始化数据记录：" + e.Message); }
             Save(current); // A crash must leave a running/unconfirmed record, never a false success.
             Debug.Log($"[RunRecorder] 开始记录：{current.Source}，目标{targetCount}个");
             return current.Id;
@@ -51,6 +87,7 @@ public static class RunRecorder
             if (current == null || step == null || (runId != null && !IsCurrent(runId))) return;
             step.Index = current.Steps.Count;
             current.Steps.Add(step);
+            if (RunDataCapture.Current?.RunId == current.Id) RunDataCapture.Current.Phase(step.TargetName);
             Save(current);
         }
     }
@@ -84,6 +121,7 @@ public static class RunRecorder
             current.EndTime = DateTime.Now;
             current.DurationSeconds = Math.Max(0, (current.EndTime - current.StartTime).TotalSeconds);
             current.Completed = true;
+            _ = ObserveDataCompletionAsync(RunDataCapture.Current, current.Id, current.Result + ": " + current.ResultReason);
             Save(current);
             Debug.Log($"[RunRecorder] 结束记录：{current.Result}，{current.ResultReason ?? ""}，步骤{current.Steps.Count}条");
             current = null;
@@ -91,6 +129,15 @@ public static class RunRecorder
     }
 
     public static void FinishRun() => FinishRun(RunRecordResult.Interrupted, "离开界面/流程未确认完成");
+
+    private static async System.Threading.Tasks.Task ObserveDataCompletionAsync(RunDataSession session, string id, string result)
+    {
+        await RunDataCapture.Finish(id,result);
+        if (session != null && session.RunId == id && session.Status != "保存完成")
+            Debug.LogWarning("[RunData] " + id + " " + session.Status);
+        else if (session != null && session.RunId == id)
+            Debug.Log("[RunData] 数据保存完成：" + session.DirectoryPath);
+    }
 
     public static void SetReportDirectory(string directory, string runId)
     {
@@ -146,6 +193,8 @@ public static class RunRecorder
                         record.ResultReason = record.ResultReason ?? "";
                         record.Source = record.Source ?? "";
                         record.ReportDirectory = record.ReportDirectory ?? "";
+                        record.DataDirectory = record.DataDirectory ?? "";
+                        record.DataError = record.DataError ?? "";
                         record.Steps = record.Steps ?? new List<RunStepRecord>();
                         records[record.Id] = record;
                     }
@@ -171,7 +220,8 @@ public static class RunRecorder
                 using (var db = new LiteDatabase(DatabasePath))
                     db.GetCollection<RunRecord>(CollectionName).DeleteMany(x => x.ProjectId == projectId);
                 foreach (string id in Unsaved.Where(x => x.Value.ProjectId == projectId).Select(x => x.Key).ToArray()) Unsaved.Remove(id);
-                if (current?.ProjectId == projectId) current = null;
+                if (current?.ProjectId == projectId)
+                { _ = RunDataCapture.Finish(current.Id,"项目记录被删除，停止记录但不控制设备"); current = null; }
             }
             catch (Exception e) { LastError = e.Message; Debug.LogWarning("[RunRecorder] 删除项目运行记录失败：" + e.Message); }
         }

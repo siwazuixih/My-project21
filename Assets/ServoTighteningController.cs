@@ -23,6 +23,10 @@ public sealed class ServoTighteningController : MonoBehaviour
     private const string CurveImageObjectName = "ServoTorqueCurveImage";
     private const string CurveAreaLabel = "实时力矩曲线";
     private const float MotionConfirmationSeconds = 3f;
+    public const int ContactApiVersion = 5;
+    public const string ContactProfile = "contact-compliant-v2-20261029";
+    public static string ContactSessionPath => Path.Combine(Application.persistentDataPath, "contact-session.json");
+    public bool ContactSessionBlocked => File.Exists(ContactSessionPath);
 
     [Header("Unity -> 拧紧程序")]
     [SerializeField] private string bridgeHost = "127.0.0.1";
@@ -119,6 +123,11 @@ public sealed class ServoTighteningController : MonoBehaviour
         public string cycle_error;
         public string cycle_first_error, cycle_failure_json, cycle_cleanup_errors, cycle_workflow;
         public int contact_api_version;
+        public string contact_profile, cycle_report_json;
+        public bool contact_session_supported, contact_session_blocked;
+        public string contact_session_path, contact_session_json;
+        public bool exit_optimization_supported, tool_stop_confirmation_supported, positive_x_insertion;
+        public bool result_processing, operation_busy, stop_in_progress;
         public bool original_timing_supported, original_contact_timing;
         public bool motion_diagnostics_supported, robot_only_supported;
         public string configuration_id;
@@ -666,6 +675,12 @@ public sealed class ServoTighteningController : MonoBehaviour
         toggleButtonBackground = buttonObject.GetComponent<Image>();
         toggleButtonText =
             buttonObject.GetComponentInChildren<TextMeshProUGUI>(true);
+        if (toggleButtonText != null)
+        {
+            toggleButtonText.fontSizeMax = Mathf.Max(12f, toggleButtonText.fontSize);
+            toggleButtonText.fontSizeMin = 12f;
+            toggleButtonText.enableAutoSizing = true;
+        }
 
         Button logButton = logButtonObject.GetComponent<Button>();
         if (toggleButton != null)
@@ -868,7 +883,7 @@ public sealed class ServoTighteningController : MonoBehaviour
             return;
         }
 
-        bool realUiVisible = statusRealObject.activeInHierarchy || OfflineWorkflowActive;
+        bool realUiVisible = statusRealObject.activeInHierarchy || OfflineWorkflowActive || FieldWorkflowOwned;
         if (toggleButton.gameObject.activeSelf != realUiVisible)
         {
             toggleButton.gameObject.SetActive(realUiVisible);
@@ -956,6 +971,10 @@ public sealed class ServoTighteningController : MonoBehaviour
                 var info = JsonUtility.FromJson<BridgeStatus>(existing.RawResponse);
                 if (info == null || info.simulation_only != simulationOnly)
                     return ReportFailure("现有拧紧服务的实物/隔离模拟模式不匹配，请先关闭旧服务后再启动所需模式");
+                if (info.contact_api_version != ContactApiVersion || info.contact_profile != ContactProfile || !info.contact_session_supported)
+                    return ReportFailure("现有拧紧服务不是V2接口5，请先通过旧软件安全停止并关闭旧服务，再部署完整新版");
+                if (!simulationOnly && info.contact_session_path != ContactSessionPath)
+                    return ReportFailure("现有拧紧服务接触状态目录不同，不能接管；请安全关闭旧服务后由本软件启动");
                 if (info.cycle_active || info.state == "RUN_FORWARD" || info.state == "RUN_REVERSE")
                     return ReportFailure("现有拧紧程序正在运行，不能接管");
                 if (programProcess == null || HasOwnedProcessExited()) ownsProgramProcess = false;
@@ -970,6 +989,9 @@ public sealed class ServoTighteningController : MonoBehaviour
                 );
                 return existing;
             }
+            if (programProcess != null && !HasOwnedProcessExited())
+                return ReportFailure("已有本次Python进程但控制口未响应；请先安全停止/检查日志，不重复启动第二个实例");
+            if (programProcess != null) { programProcess.Dispose(); programProcess = null; ownsProgramProcess = false; }
 
             string projectRoot =
                 Directory.GetParent(Application.dataPath)?.FullName;
@@ -1001,6 +1023,8 @@ public sealed class ServoTighteningController : MonoBehaviour
             startInfo.EnvironmentVariables["SERVO_BRIDGE_PORT"] =
                 bridgePort.ToString();
             startInfo.EnvironmentVariables["SERVO_UNITY_EMBEDDED_MODE"] = "1";
+            startInfo.EnvironmentVariables["SERVO_LOG_DIR"] = Path.Combine(Application.persistentDataPath, "ServoLogs");
+            startInfo.EnvironmentVariables["SERVO_CONTACT_STATE_PATH"] = ContactSessionPath;
             startInfo.EnvironmentVariables["SERVO_SIMULATION_ONLY"] = simulationOnly ? "1" : "0";
             startInfo.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
             startInfo.EnvironmentVariables["UNITY_ROBOT_HOST"] = "127.0.0.1";
@@ -1034,7 +1058,7 @@ public sealed class ServoTighteningController : MonoBehaviour
             {
                 if (string.IsNullOrEmpty(e.Data)) return;
                 // 后台只入队；主线程输出才能被RuntimeConsole接收。
-                if (e.Data.StartsWith("[RobotTrace]") || e.Data.StartsWith("[ContactCycle]"))
+                if (e.Data.StartsWith("[RobotTrace]") || e.Data.StartsWith("[ContactCycle]") || e.Data.StartsWith("[ToolTrace]"))
                 {
                     pythonTraceLines.Enqueue(e.Data);
                     while (pythonTraceLines.Count > 500) pythonTraceLines.TryDequeue(out _);
@@ -1043,14 +1067,14 @@ public sealed class ServoTighteningController : MonoBehaviour
             };
             programProcess.BeginOutputReadLine();
 
-            for (int attempt = 0; attempt < 50; attempt++)
+            var startupDeadline = Stopwatch.StartNew();
+            for (int attempt = 0; attempt < 50 && startupDeadline.Elapsed.TotalSeconds < 15; attempt++)
             {
                 if (HasOwnedProcessExited())
                 {
-                    return ReportFailure(
-                        "拧紧程序启动后提前退出，退出码: "
-                        + programProcess.ExitCode
-                    );
+                    int exitCode = programProcess.ExitCode;
+                    programProcess.Dispose(); programProcess = null; ownsProgramProcess = false;
+                    return ReportFailure("拧紧程序启动后提前退出，退出码: " + exitCode);
                 }
 
                 await Task.Delay(200);
@@ -1063,6 +1087,9 @@ public sealed class ServoTighteningController : MonoBehaviour
                 var info = JsonUtility.FromJson<BridgeStatus>(status.RawResponse);
                 if (info == null || info.simulation_only != simulationOnly)
                     return ReportFailure("启动回执模式不一致，拒绝混用实物与模拟服务");
+                if (info.contact_api_version != ContactApiVersion || info.contact_profile != ContactProfile ||
+                    !info.contact_session_supported || (!simulationOnly && info.contact_session_path != ContactSessionPath))
+                    return ReportFailure("启动回执不是完整V2接口5/固定接触目录，请安全关闭旧服务后部署整个新构建目录");
                 ProgramReady = true;
                 ApplyBridgeStatus(status.RawResponse);
                 StartStatusPolling();
@@ -1075,7 +1102,7 @@ public sealed class ServoTighteningController : MonoBehaviour
                 return status;
             }
 
-            return ReportFailure("拧紧程序启动超时，控制端口未就绪");
+            return ReportFailure("拧紧程序启动超时，控制端口未就绪；保留本次进程供安全停止，不重复启动");
         }
         catch (Exception exception)
         {
@@ -1108,9 +1135,10 @@ public sealed class ServoTighteningController : MonoBehaviour
         return SendPublicCommandAsync("forward", true);
     }
 
-    public async Task PrepareFieldServiceAsync(FieldCommissioningSettings settings)
+    public async Task PrepareFieldServiceAsync(FieldCommissioningSettings settings, bool recovery = false)
     {
-        settings.Validate(false);
+        settings.Validate(false, false); // 配置/只读恢复不等于启动卡入；Python start按实际workflow再次检查。
+        settings.RequireContactDirection();
         if (!ProgramReady)
         {
             pythonExecutable = settings.pythonExecutable; toolHost = settings.toolIp; toolPort = settings.toolPort;
@@ -1121,8 +1149,13 @@ public sealed class ServoTighteningController : MonoBehaviour
         if (!query.Success) throw new IOException(query.Error);
         var service = JsonUtility.FromJson<BridgeStatus>(query.RawResponse);
         if (service.simulation_only) throw new IOException("当前是隔离模拟服务，请先关闭后再启动实物服务");
-        if (service.contact_api_version != 2 || service.tool_ip != settings.toolIp || service.tool_port != settings.toolPort)
+        if (service.contact_api_version != ContactApiVersion || service.contact_profile != ContactProfile ||
+            !service.contact_session_supported || service.contact_session_path != ContactSessionPath ||
+            !service.exit_optimization_supported || !service.tool_stop_confirmation_supported ||
+            service.tool_ip != settings.toolIp || service.tool_port != settings.toolPort)
             throw new IOException("现有Python服务版本或电批地址不匹配，请先停止旧服务后重试");
+        if (!recovery && service.contact_session_blocked)
+            throw new IOException("存在未解除接触记录，请先现场解除接触并在现场面板复核；重启/改参数不能续跑。" + service.contact_session_json);
         if (!service.motion_diagnostics_supported || !service.robot_only_supported)
             throw new IOException("Python服务缺少末端测量/机械臂单测功能，请关闭旧服务并部署完整新版");
         if (settings.originalContactTiming && !service.original_timing_supported)
@@ -1135,7 +1168,21 @@ public sealed class ServoTighteningController : MonoBehaviour
             throw new IOException("Python未确认本次接触配置: " + configured.Error);
         if (JsonUtility.FromJson<BridgeStatus>(configured.RawResponse).original_contact_timing != settings.originalContactTiming)
             throw new IOException("Python接触节奏配置回执不一致");
+        if (!JsonUtility.FromJson<BridgeStatus>(configured.RawResponse).positive_x_insertion)
+            throw new IOException("Python未确认新版+X卡入/-X退出方向");
         UnityEngine.Debug.Log("[实物联调] Python接触参数已确认，configuration_id=" + id);
+        UnityEngine.Debug.Log("[ContactCycle][EFFECTIVE_PLAN] " + settings.ContactEffectiveSummary);
+    }
+
+    public async Task ResetContactSessionAsync(FieldCommissioningSettings settings)
+    {
+        if (FieldWorkflowOwned || OfflineWorkflowActive) throw new IOException("先结束当前实物/模拟流程再复核接触记录");
+        await PrepareFieldServiceAsync(settings, true);
+        var result = await SendPublicCommandAsync("reset_contact_session:{\"confirm_tool_free\":true}", false);
+        if (!result.Success) throw new IOException(result.Error);
+        var status = JsonUtility.FromJson<BridgeStatus>(result.RawResponse);
+        if (status == null || status.contact_session_blocked || File.Exists(ContactSessionPath))
+            throw new IOException("接触记录尚未解除，禁止继续");
     }
 
     public async Task RequireFieldToolReadyAsync(bool requireTool = true)
@@ -1143,7 +1190,7 @@ public sealed class ServoTighteningController : MonoBehaviour
         var result = await QueryStatusAsync();
         if (!result.Success) throw new IOException(result.Error);
         var status = JsonUtility.FromJson<BridgeStatus>(result.RawResponse);
-        if (status == null || (requireTool && !status.tool_connected) || status.cycle_active || status.state == "RUN_FORWARD" || status.state == "RUN_REVERSE")
+        if (status == null || (requireTool && !status.tool_connected) || HasPendingToolWork(status) || status.state == "RUN_FORWARD" || status.state == "RUN_REVERSE" || status.state == "RUN_PHYSICAL")
             throw new IOException("接触服务未就绪: tool_connected=" + status?.tool_connected + " cycle_active=" + status?.cycle_active + " tool_state=" + status?.state);
     }
 
@@ -1155,7 +1202,7 @@ public sealed class ServoTighteningController : MonoBehaviour
             if (!result.Success) throw new IOException(result.Error);
             var status = JsonUtility.FromJson<BridgeStatus>(result.RawResponse);
             CaptureCycleFailure(status, lastMeasuredCycleId);
-            if (status != null && !status.cycle_active) return;
+            if (status != null && !HasPendingToolWork(status)) return;
             await Task.Delay(200);
         }
         throw new TimeoutException("Python接触流程未结束");
@@ -1193,8 +1240,15 @@ public sealed class ServoTighteningController : MonoBehaviour
     }
     private async Task<CommandResult> RunMeasuredCycleAsync(string command, string expected, bool unlockTool, CancellationToken cancellation, double timeoutSeconds)
     {
+        var evidenceSession = RunDataCapture.Current;
         ClearCycleFailure();
         if (cancellation.IsCancellationRequested) return Failure("流程已取消");
+        var capabilityReply = await QueryStatusAsync();
+        if (!capabilityReply.Success) return capabilityReply;
+        var capability = JsonUtility.FromJson<BridgeStatus>(capabilityReply.RawResponse);
+        if (capability == null || capability.contact_api_version != ContactApiVersion || capability.contact_profile != ContactProfile ||
+            !capability.exit_optimization_supported || !capability.tool_stop_confirmation_supported || !capability.contact_session_supported)
+            return Failure("拧紧服务不是V2接口5，请先安全关闭旧服务并部署完整新版");
         CommandResult start = await SendPublicCommandAsync(command, unlockTool);
         if (!start.Success) return start;
         BridgeStatus initial = JsonUtility.FromJson<BridgeStatus>(start.RawResponse);
@@ -1210,7 +1264,8 @@ public sealed class ServoTighteningController : MonoBehaviour
                 CommandResult result = await QueryStatusAsync();
                 if (!result.Success) throw new IOException(result.Error);
                 var status = JsonUtility.FromJson<BridgeStatus>(result.RawResponse);
-                if (status == null || status.cycle_id != initial.cycle_id) throw new IOException("自动流程编号改变，拒绝采用其他任务结果");
+                if (status == null || status.contact_api_version != ContactApiVersion || status.cycle_id != initial.cycle_id || status.contact_profile != ContactProfile || status.configuration_id != initial.configuration_id)
+                    throw new IOException("自动流程编号/策略/配置改变，拒绝采用其他任务结果");
                 CaptureCycleFailure(status, initial.cycle_id);
                 if (!string.IsNullOrEmpty(LastCycleFirstError)) throw new IOException(LastCycleFirstError);
                 if (phase != status.cycle_phase)
@@ -1220,6 +1275,7 @@ public sealed class ServoTighteningController : MonoBehaviour
                 }
                 if (!status.cycle_active)
                 {
+                    await CaptureContactEvidenceAsync(initial.cycle_id, evidenceSession);
                     return status.cycle_phase == "DONE" && status.cycle_result == expected
                         ? result : Failure("接触装配失败: " + status.cycle_result + " " + status.cycle_error);
                 }
@@ -1238,8 +1294,23 @@ public sealed class ServoTighteningController : MonoBehaviour
             }
             catch (Exception detailError) { UnityEngine.Debug.LogWarning("[ContactCycle] 取原始错误失败: " + detailError.Message); }
             try { await stopping; } catch (Exception stopError) { UnityEngine.Debug.LogWarning("[ContactCycle] 停止回执失败: " + stopError.Message); }
+            await CaptureContactEvidenceAsync(initial.cycle_id, evidenceSession);
             return Failure(LastCycleFirstError ?? e.Message);
         }
+    }
+
+    private async Task CaptureContactEvidenceAsync(int cycleId, RunDataSession session)
+    {
+        try
+        {
+            var reply = await SendPublicCommandAsync("cycle_report", false);
+            if (!reply.Success) throw new IOException(reply.Error);
+            var report = JsonUtility.FromJson<BridgeStatus>(reply.RawResponse);
+            if (report == null || report.cycle_id != cycleId || string.IsNullOrEmpty(report.cycle_report_json))
+                throw new IOException("接触证据周期编号不一致/报告缺失");
+            session?.Evidence(ContactProfile, report.cycle_report_json);
+        }
+        catch (Exception e) { UnityEngine.Debug.LogWarning("[ContactCycle] 接触算法证据未保存: " + e.Message); }
     }
 
     public Task<CommandResult> ReverseHomeAsync()
@@ -1374,14 +1445,14 @@ public sealed class ServoTighteningController : MonoBehaviour
             if (stopResult.Success)
             {
                 var cycleStatus = JsonUtility.FromJson<BridgeStatus>(stopResult.RawResponse);
-                for (int i = 0; cycleStatus != null && cycleStatus.cycle_active && i < 100; i++)
+                for (int i = 0; cycleStatus != null && HasPendingToolWork(cycleStatus) && i < 100; i++)
                 {
                     await Task.Delay(100);
                     var poll = await SendCommandInternalAsync("status");
                     if (!poll.Success) return Failure("无法确认接触装配已停止，保留程序");
                     cycleStatus = JsonUtility.FromJson<BridgeStatus>(poll.RawResponse);
                 }
-                if (cycleStatus != null && cycleStatus.cycle_active) return Failure("接触装配尚未停止，保留程序");
+                if (cycleStatus != null && HasPendingToolWork(cycleStatus)) return Failure("接触装配/电批结果或停止处理尚未结束，保留程序");
             }
             if (stopResult.Success)
             {
@@ -1491,6 +1562,7 @@ public sealed class ServoTighteningController : MonoBehaviour
                 250,
                 (int)Math.Round(commandTimeoutSeconds * 1000f)
             );
+            if (command.StartsWith("reset_contact_session:", StringComparison.Ordinal)) timeoutMs = Math.Max(timeoutMs, 20000);
             return await Task.Run(
                 () => SendCommandBlocking(command, timeoutMs)
             );
@@ -1678,8 +1750,8 @@ public sealed class ServoTighteningController : MonoBehaviour
             toggleButtonText.text = semi ? (waiting ? (offline ? "继续（模拟）" : chassisWaiting ? "确认底盘" : "确认并拧紧") : "流程执行中") : lifecycleRunning
                 ? (IsProgramActive() ? "安全停止..." : "启动中...")
                 : (ProgramReady || IsProgramActive()
-                    ? "关闭程序"
-                    : "启动程序");
+                    ? "关闭拧紧服务"
+                    : "启动拧紧服务");
         }
 
         if (toggleButtonBackground != null)
@@ -1913,6 +1985,9 @@ public sealed class ServoTighteningController : MonoBehaviour
         }
     }
 
+    private static bool HasPendingToolWork(BridgeStatus status)
+        => status.cycle_active || status.result_processing || status.operation_busy || status.stop_in_progress;
+
     private static string GetHierarchyPath(Transform current)
     {
         string path = current.name;
@@ -1996,6 +2071,12 @@ public sealed class ServoTighteningController : MonoBehaviour
         bool safeToClose = !ProgramReady;
         if (stop.Success)
         {
+            var cycle = JsonUtility.FromJson<BridgeStatus>(stop.RawResponse);
+            if (cycle != null && HasPendingToolWork(cycle))
+            {
+                UnityEngine.Debug.LogError("退出时接触流程尚未结束，保留Python进程；请先在软件中停止并确认，不把退出当作停稳。");
+                return;
+            }
             ApplyBridgeStatus(stop.RawResponse);
             safeToClose =
                 IsSafeStoppedState(ToolState) || !ToolConnected;
@@ -2032,6 +2113,6 @@ public sealed class ServoTighteningController : MonoBehaviour
     private void OnDestroy()
     {
         SceneManager.sceneLoaded -= HandleSceneLoaded;
-        commandGate.Dispose();
+        // In-flight continuations still release this managed gate; disposing here races them.
     }
 }

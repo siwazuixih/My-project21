@@ -50,7 +50,7 @@ def main():
         fake_tool.setblocking(False)
         temporary = Path(directory)
         for name in ('servo_tcp_client_fault_control_v26_28Nm_abnormal_stop_only.py',
-                     'servo_contact_cycle.py', 'unity_robot_client.py', 'cr10af_hybrid_x.py'):
+                     'servo_contact_cycle.py', 'contact_session.py', 'unity_robot_client.py', 'cr10af_hybrid_x.py', 'cr10af_exit_optimized.py'):
             shutil.copy2(ROOT / 'ExternalCode' / name, temporary / name)
         bridge, curve, gateway_port = port(), port(), port()
         env = dict(os.environ, SERVO_SIMULATION_ONLY='1', SERVO_UNITY_EMBEDDED_MODE='1',
@@ -58,6 +58,7 @@ def main():
                    SERVO_BRIDGE_HOST='127.0.0.1', SERVO_BRIDGE_PORT=str(bridge),
                    SERVO_CURVE_HOST='127.0.0.1', SERVO_CURVE_PORT=str(curve),
                    UNITY_ROBOT_HOST='127.0.0.1', UNITY_ROBOT_PORT=str(gateway_port),
+                   SERVO_CONTACT_STATE_PATH=str(temporary/'contact-session.json'),
                    MPLCONFIGDIR=str(temporary / 'mpl'), PYTHONUNBUFFERED='1')
         dll = ROOT / 'tests/RobotGatewayHarness/bin/Debug/net8.0/RobotGatewayHarness.dll'
         with (temporary / 'gateway.log').open('w') as gateway_log, (temporary / 'python.log').open('w') as python_log:
@@ -68,7 +69,7 @@ def main():
                 service = subprocess.Popen([sys.executable, str(temporary / 'servo_tcp_client_fault_control_v26_28Nm_abnormal_stop_only.py')],
                                            cwd=directory, env=env, stdout=python_log, stderr=subprocess.STDOUT)
                 info = wait_until(lambda: command(bridge, 'status'))
-                assert info['simulation_only'] and not info['tool_connected'] and info['contact_api_version'] == 2, info
+                assert info['simulation_only'] and not info['tool_connected'] and info['contact_api_version'] == 5, info
                 for value in ('connect', 'forward', 'reverse', 'auto_cycle', 'robot_insert', 'robot_withdraw'):
                     assert not command(bridge, value)['ok'], value
                 settings = dict(ContactCycle(None, None, None).settings, configuration_id='offline-smoke',

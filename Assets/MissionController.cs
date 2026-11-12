@@ -128,11 +128,16 @@ public class MissionController : MonoBehaviour
 
     public void OnChassisReachedTarget()
     {
+        Debug.Log($"[仿真] 目标{currentMissionIndex + 1}：底盘模型已停靠，自动启动机械臂={chassis.autoStartArm}");
         diagUI.RunDetailedDiagnosis(currentMissionIndex);
         if (chassis.autoStartArm) {
             currentState = MissionState.Stabilizing;
             StartCoroutine(WaitAndStartArm());
-        } else currentState = MissionState.WaitingForInput;
+        } else
+        {
+            currentState = MissionState.WaitingForInput;
+            Debug.Log("[仿真] 正在等待手动启动机械臂，请再次点击开始仿真（或空格）");
+        }
     }
 
     IEnumerator WaitAndStartArm()

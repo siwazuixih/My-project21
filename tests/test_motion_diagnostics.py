@@ -16,12 +16,14 @@ from servo_contact_cycle import ContactCycle
 class MotionDiagnosticsTests(unittest.TestCase):
     def cycle(self):
         cycle = ContactCycle(Mock(), Mock(), Mock())
+        cycle.session = Mock()
+        cycle.session.snapshot.return_value = dict(contact_session_blocked=False)
         cycle.configure(dict(cycle.settings, configuration_id='measurement-test', originalContactTiming=True))
         cycle.simulated = False
         return cycle
 
     def test_robot_only_never_calls_tool(self):
-        for workflow, direction in [('insert', -1), ('withdraw', 1)]:
+        for workflow, direction in [('insert', 1), ('withdraw', -1)]:
             cycle = self.cycle()
             cycle.workflow = workflow
             client = Mock()
@@ -56,11 +58,11 @@ class MotionDiagnosticsTests(unittest.TestCase):
             raise RuntimeError('secondary stop failure')
         client.stop.side_effect = stop
         client.close.side_effect = RuntimeError('secondary release failure')
-        cycle.read_tool.return_value = dict(state='NG_DEVICE', filtered_torque=7.5, speed=10)
+        cycle.read_tool.return_value = dict(state='NG_DEVICE', filtered_torque=7.5, speed=10, run_id='fault-test')
         output = io.StringIO()
         with redirect_stdout(output), \
              patch('servo_contact_cycle.UnityRobotClient', return_value=Mock(open=Mock(return_value=client))), \
-             patch.object(cycle, '_stage'), patch.object(cycle, '_wait'):
+             patch.object(cycle, '_stage'), patch.object(cycle, '_wait'), patch.object(cycle, '_tool_stopped'):
             cycle._run(False)
         status = cycle.snapshot()
         self.assertEqual(status['cycle_first_error'], 'Tightening failed: NG_DEVICE')
@@ -90,9 +92,8 @@ class MotionDiagnosticsTests(unittest.TestCase):
     def test_measurement_marks_both_stage_boundaries(self):
         cycle = self.cycle()
         client = Mock()
-        with patch('servo_contact_cycle.HybridExit') as algorithm:
-            algorithm.return_value.run.return_value = {'result': 'completed'}
-            cycle._stage(client, -1, False)
+        with patch('servo_contact_cycle.run_exit', return_value={'result': 'completed'}) as algorithm:
+            cycle._stage(client, 1, False)
         client.begin_stage.assert_called_once_with('INSERTING', 20)
         client.end_stage.assert_called_once()
 
@@ -103,7 +104,8 @@ class MotionDiagnosticsTests(unittest.TestCase):
         cycle = Mock()
         cycle.snapshot.return_value = {}
         namespace = dict(SIMULATION_ONLY=False, state='IDLE', command_queue=Mock(empty=Mock(return_value=True)), contact_cycle=cycle,
-                         unity_status=lambda ok=True, message='': {'ok': ok, 'message': message})
+                         unity_status=lambda ok=True, message='': {'ok': ok, 'message': message},
+                         result_busy=Mock(is_set=Mock(return_value=False)), operation_busy=Mock(is_set=Mock(return_value=False)))
         exec(compile(ast.Module(body=[node], type_ignores=[]), '<dispatcher>', 'exec'), namespace)
         self.assertTrue(namespace['run_unity_command']('robot_insert')['ok'])
         cycle.start.assert_called_once_with(simulated=False, workflow='insert')

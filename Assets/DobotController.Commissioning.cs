@@ -8,6 +8,7 @@ public partial class DobotController
     public bool FieldWorkflowActive { get; private set; }
     private FieldCommissioningSettings fieldSettings;
     private bool OriginalContactTimingActive => FieldWorkflowActive && fieldSettings != null && fieldSettings.originalContactTiming;
+    private bool VendorContactTimingActive => FieldWorkflowActive && fieldSettings != null && fieldSettings.positiveXInsertionConfirmed;
     public void CheckFieldHealth()
     {
         if (!FieldWorkflowActive) return;
@@ -16,17 +17,27 @@ public partial class DobotController
         fieldSettings.CheckJoints(CopyRobotState().joints);
     }
     public bool IsDashboardConnected => tcpClient != null && tcpClient.Connected;
+    public void ConfigureFieldConnection(FieldCommissioningSettings settings)
+    {
+        if (settings == null) throw new ArgumentNullException(nameof(settings));
+        settings.ValidateRobotConnection();
+        if (FieldWorkflowActive || ExternalControlActive)
+            throw new InvalidOperationException("流程正在执行，不能修改机械臂连接配置");
+        if (ViewConnecting) throw new InvalidOperationException("机械臂正在连接，请等待完成或先取消连接");
+        if (!DeviceTcpConnection.AbsentOrMatches(tcpClient, settings.robotIp, settings.dashboardPort) ||
+            !DeviceTcpConnection.AbsentOrMatches(feedbackClient, settings.robotIp, settings.feedbackPort))
+            throw new InvalidOperationException("请先明确断开旧机械臂连接，再按JSON重新连接；" + DescribeFieldConnection(settings));
+        robotIP = settings.robotIp;
+        dashboardPort = settings.dashboardPort;
+        feedbackPort = settings.feedbackPort;
+    }
+    public string DescribeFieldConnection(FieldCommissioningSettings settings) =>
+        $"JSON期望控制 {settings.robotIp}:{settings.dashboardPort} / 反馈 {settings.robotIp}:{settings.feedbackPort}；" +
+        $"实际控制 {DeviceTcpConnection.Describe(tcpClient)} / 反馈 {DeviceTcpConnection.Describe(feedbackClient)}";
     public bool FieldConnectedTo(FieldCommissioningSettings s)
     {
-        try
-        {
-            var dashboard = tcpClient?.Client.RemoteEndPoint as System.Net.IPEndPoint;
-            var feedback = feedbackClient?.Client.RemoteEndPoint as System.Net.IPEndPoint;
-            var ip = System.Net.IPAddress.Parse(s.robotIp);
-            return IsDashboardConnected && feedbackClient.Connected && dashboard != null && feedback != null &&
-                dashboard.Address.Equals(ip) && dashboard.Port == s.dashboardPort && feedback.Address.Equals(ip) && feedback.Port == s.feedbackPort;
-        }
-        catch { return false; }
+        return s != null && DeviceTcpConnection.Matches(tcpClient, s.robotIp, s.dashboardPort) &&
+            DeviceTcpConnection.Matches(feedbackClient, s.robotIp, s.feedbackPort);
     }
     public string InspectFieldFeedback()
     {
@@ -41,7 +52,7 @@ public partial class DobotController
         ContactAcquisitionError = null;
         ContactWorkflowError = null;
         if (FieldWorkflowActive || ExternalControlActive) throw new InvalidOperationException("机械臂已有任务占用");
-        settings.Validate(true);
+        settings.Validate(true, false); // 这里只申请关节/设备流程；接触预算由所选接触入口检查。
         InspectFieldFeedback();
         settings.CheckJoints(CopyRobotState().joints);
         fieldSettings = settings.Copy();
@@ -57,6 +68,7 @@ public partial class DobotController
         if (enabled && !FieldWorkflowActive) throw new InvalidOperationException("未持有实物流程权限");
         if (enabled)
         {
+            fieldSettings.RequireContactDirection();
             if (fieldSettings.feedbackPort != 30004)
                 throw new InvalidOperationException("真实接触要求30004高频反馈，请修改现场JSON的feedbackPort并重新连接（30005为200ms周期）");
             RequireContactSensor();

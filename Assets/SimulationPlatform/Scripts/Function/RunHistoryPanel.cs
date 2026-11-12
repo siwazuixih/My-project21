@@ -56,8 +56,11 @@ public static class RunHistoryPanel
         GameObject detailRoot = Panel("ProjectRunStepDetails", host);
         StepDetailPanel detail = detailRoot.AddComponent<StepDetailPanel>();
         detail.StepItemPrefab = step;
-        detail.TimeText = Label(detailRoot.transform, "", 20, new Vector2(.025f, .90f), new Vector2(.65f, .98f));
-        detail.SpanText = Label(detailRoot.transform, "", 16, new Vector2(.025f, .78f), new Vector2(.98f, .90f));
+        detail.TimeText = Label(detailRoot.transform, "", 20, new Vector2(.025f, .90f), new Vector2(.49f, .98f));
+        detail.SpanText = Label(detailRoot.transform, "", 16, new Vector2(.025f, .85f), new Vector2(.98f, .90f));
+        detail.DataStatusText = Label(detailRoot.transform, "", 15, new Vector2(.025f, .78f), new Vector2(.98f, .85f));
+        detail.OpenDataBtn = Button(detailRoot.transform, "打开数据目录", .50f, .92f, .67f, .98f);
+        detail.ExportDataBtn = Button(detailRoot.transform, "导出数据ZIP", .69f, .92f, .83f, .98f);
         detail.BackBtn = Button(detailRoot.transform, "返回记录", .85f, .92f, .98f, .98f);
         detail.TableContent = Table(detailRoot.transform, "序号 / 目标或阶段 / 力矩(Nm) / 角度(°) / 结果及说明", 1280);
         list.DetailPanel = detail;

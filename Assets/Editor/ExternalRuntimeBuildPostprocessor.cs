@@ -72,6 +72,12 @@ public sealed class ExternalRuntimeBuildPostprocessor :
 
         string fieldGuide = Path.Combine(projectRoot, ".codex", "FIELD_COMMISSIONING_2026-09-16.md");
         if (File.Exists(fieldGuide)) File.Copy(fieldGuide, Path.Combine(buildRoot, "FIELD_COMMISSIONING.md"), true);
+        string dataGuide = Path.Combine(projectRoot, ".codex", "RUN_DATA_STORAGE_2026-10-28.md");
+        if (File.Exists(dataGuide)) File.Copy(dataGuide, Path.Combine(buildRoot, "RUN_DATA_STORAGE.md"), true);
+        string tighteningGuide = Path.Combine(projectRoot, ".codex", "TIGHTENING_ADAPTATION_2026-10-28.md");
+        if (File.Exists(tighteningGuide)) File.Copy(tighteningGuide, Path.Combine(buildRoot, "TIGHTENING_ADAPTATION.md"), true);
+        string v2Guide = Path.Combine(projectRoot, ".codex", "TIGHTENING_V2_MIGRATION_2026-10-30.md");
+        if (File.Exists(v2Guide)) File.Copy(v2Guide, Path.Combine(buildRoot, "TIGHTENING_V2_MIGRATION_2026-10-30.md"), true);
         string latencyGuide = Path.Combine(projectRoot, ".codex", "COMMUNICATION_LATENCY_2026-10-08.md");
         if (File.Exists(latencyGuide)) File.Copy(latencyGuide, Path.Combine(buildRoot, "COMMUNICATION_LATENCY.md"), true);
 

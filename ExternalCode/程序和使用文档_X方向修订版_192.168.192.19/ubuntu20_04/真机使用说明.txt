@@ -1,0 +1,52 @@
+CR10AF 机械臂与电批真机使用说明
+适用环境：Ubuntu 20.04 图形桌面；整个 ubuntu20_04 文件夹放在桌面。
+
+2026-10-23 方向修订：卡入为工具 +X（--direction 1.0），退出为工具 -X（--direction -1.0）。省略方向参数时默认为退出。
+已知问题：此前现场 GetForce(1) 返回 -1 的力反馈接口兼容问题未在本次方向修订中修复；若仍报此错，机器人动作会被程序中止。
+
+一、运行前核对
+机械臂连接地址：192.168.192.19；电批连接地址：192.168.192.21:1200。
+工具编号默认 1。机器人沿工具 +X 卡入、沿工具 -X 退出，默认相对行程均为 20 mm；拧紧目标为 28 N·m。
+在真机执行前，由现场人员确认工具坐标、工装净空、批头与工件位置、设备状态和硬件急停。单独运行机器人脚本不会检查电批是否停转。
+
+二、首次安装（在真机桌面打开终端，逐行输入）
+cd "$(xdg-user-dir DESKTOP)/ubuntu20_04"
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip python3-tk
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
+python3 servo_tcp_client_fault_control_v26_28Nm_abnormal_stop_only.py --check
+python3 -m unittest discover -s tests -v
+
+--check 和自动测试不连接真机；通过仅表示配置与离线逻辑检查通过。
+
+三、以后每次重新打开终端，先输入
+cd "$(xdg-user-dir DESKTOP)/ubuntu20_04"
+source .venv/bin/activate
+
+四、按需选择一种操作
+
+1. 只卡入：机械臂沿工具 +X 相对移动 20 mm
+python3 cr10af_hybrid_x.py --ip 192.168.192.19 --tool 1 --distance-mm 20 --direction 1.0 --execute
+
+2. 只退出：机械臂沿工具 -X 相对移动 20 mm
+python3 cr10af_hybrid_x.py --ip 192.168.192.19 --tool 1 --distance-mm 20 --direction -1.0 --execute
+
+3. 只拧紧：确认批头已正确卡入，然后输入
+python3 servo_tcp_client_fault_control_v26_28Nm_abnormal_stop_only.py --execute
+界面打开后点击 Tighten Only，或使曲线窗口获得焦点后按 t。此操作不调度机械臂卡入或退出。
+
+4. 完整自动周期：输入与“只拧紧”相同的主程序启动命令，再点击 Auto Cycle 或按 f。
+程序顺序：工具 +X 卡入 -> 等待 5 s -> 电批拧紧 -> 确认停转 -> 等待 5 s -> 工具 -X 退出。
+
+主程序加 --execute 后会连接电批并发送复位、停止及监控回传命令；点击 Tighten Only / Auto Cycle 或按对应快捷键才启动拧紧或自动周期。
+
+五、停止、异常与记录
+界面点击 Reset/Stop，或按 s / Esc，请求停止；关闭窗口或在终端按 Ctrl+C 也会请求停止。软件网络停止请求不能代替硬件急停。
+Reverse / r 是电批手动反转，不是机械臂沿 -X 退出。
+出现 EXIT_BLOCKED 表示未确认电批停转，自动退出已取消。通信失联、反馈超时、设备 NG 或拧紧超时也会终止周期，不会自动退出。
+如果卡入中途停止，先确认实际位置，不要盲目执行完整 20 mm 的退出命令；如有扭转载荷或机械约束，停止自动操作并由现场人员处理。
+曲线与结果默认保存在本目录 servo_logs/YYYYMMDD 下。
+
+说明：程序和说明中的默认参数尚需按现场工装、设备协议、力反馈和工艺要求验收。离线测试不能证明真机运动、停转确认或异常判定效果。

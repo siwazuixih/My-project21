@@ -18,7 +18,7 @@ public partial class RobokitController
             if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
             bool navigation = navClient != null && navClient.Connected && navStream != null && navStream.CanRead && navStream.CanWrite &&
                 ChassisEndpointMatches(navClient, address);
-            return navigation && (!requireStatus || (statusClient != null && statusClient.Connected &&
+            return navigation && (!requireStatus || (statusClient != null && statusClient.Connected && statusStream != null && statusStream.CanRead && statusStream.CanWrite &&
                 ChassisEndpointMatches(statusClient, address)));
         }
         catch { return false; }
@@ -91,6 +91,11 @@ public partial class RobokitController
         foreach (var pending in entries)
             if (pending.stream == stream) pending.completion.TrySetException(error);
         stream.Close();
+        bool changed = false;
+        if (ReferenceEquals(stream, statusStream)) { isStatusOn = false; changed = true; }
+        if (ReferenceEquals(stream, controlStream)) { isControlOn = false; changed = true; }
+        if (ReferenceEquals(stream, navStream)) { isNavOn = false; changed = true; }
+        if (changed) PublishChassisConnection();
     }
     private async Task<string> RequestConfirmedAsync(ushort api, string json, CancellationToken cancel)
     {
@@ -98,10 +103,15 @@ public partial class RobokitController
         await chassisRequestGate.WaitAsync(cancel);
         ushort sequence = 0;
         NetworkStream stream = null;
+        Task writing = null;
         bool sent = false;
+        var dataClient = api < 2000 ? statusClient : api < 3000 ? controlClient : navClient;
+        var record = RunDataCapture.Command("chassis",RunDataCapture.Endpoint(dataClient,"not_connected"),
+            connectionGeneration,"API=" + api + " " + json,"dist/x/y:m; angle/theta:rad; vx/vy:m/s; w:rad/s",ensureManual:api!=3003);
         try
         {
             cancel.ThrowIfCancellationRequested();
+            if (api >= 2000 && api != 3003 && ManualJogNeedsReview) throw new InvalidOperationException("底盘手动状态待核对，禁止下发新运动");
             if (api >= 2000 && api != 3003 && epoch != chassisEpoch) throw new OperationCanceledException("旧底盘命令已取消");
             stream = api < 2000 ? statusStream : api < 3000 ? controlStream : navStream;
             if (stream == null) throw new IOException("底盘对应端口未连接");
@@ -110,21 +120,42 @@ public partial class RobokitController
             var pending = new ChassisPending { stream = stream, responseApi = (ushort)(api + 10000) };
             chassisPending.Add(sequence, pending);
             byte[] packet = RobokitProtocol.Pack(api, json, sequence);
+            record?.Prepared(sequence.ToString(System.Globalization.CultureInfo.InvariantCulture),"hex=" + BitConverter.ToString(packet));
             sent = true;
-            stream.Write(packet, 0, packet.Length);
+            writing = stream.WriteAsync(packet, 0, packet.Length);
+            if (await Task.WhenAny(writing, Task.Delay(TimeSpan.FromSeconds(Math.Max(.2, responseTimeoutSeconds)))) != writing)
+                throw new TimeoutException("底盘发送超时");
+            await writing;
+            record?.Written();
             using (cancel.Register(() => pending.completion.TrySetCanceled()))
             {
                 if (await Task.WhenAny(pending.completion.Task, Task.Delay(TimeSpan.FromSeconds(Math.Max(0.2, responseTimeoutSeconds)))) != pending.completion.Task)
                     throw new TimeoutException($"底盘API {api} seq={sequence} 应答超时");
                 string reply = await pending.completion.Task;
+                record?.Reply(reply);
                 DecodeChassisReply(reply);
+                record?.Accepted();
                 // 厂商建议每端口请求间隔至少100~200ms；统一串行限制普通UI和自动查询。
                 await Task.Delay(200, cancel);
                 return reply;
             }
         }
-        catch (TimeoutException) { if (sent) stream?.Close(); throw; }
-        finally { chassisPending.Remove(sequence); chassisRequestGate.Release(); }
+        catch (TimeoutException e)
+        {
+            record?.Failed(e);
+            if (sent) FailChassisStream(stream, e);
+            if (writing != null) _ = DeviceTcpConnection.ObserveAsync(writing);
+            throw;
+        }
+        catch (Exception e) { record?.Failed(e); throw; }
+        finally
+        {
+            record?.Dispose();
+            // A timeout may close the stream before this request awaits its failed reply.
+            if (chassisPending.TryGetValue(sequence, out var pending) && pending.completion.Task.IsFaulted)
+                _ = DeviceTcpConnection.ObserveAsync(pending.completion.Task);
+            chassisPending.Remove(sequence); chassisRequestGate.Release();
+        }
     }
     public void CancelConfirmedMotion()
     {
@@ -135,7 +166,7 @@ public partial class RobokitController
     // 兼容旧耗时等待，但仍核对发送应答/取消；不请求1020，也绝不声称已到位。
     public async Task<bool> ExecuteRelativeLegacyTimedAsync(ushort api, string json, double estimatedSeconds)
     {
-        if (ConfirmedMotionActive) { Debug.LogError("已有底盘动作执行中"); return false; }
+        if (ConfirmedMotionActive || ManualJogNeedsReview) { Debug.LogError("已有底盘动作执行中或手动状态待核对"); return false; }
         if (api != 3055 && api != 3056) throw new ArgumentOutOfRangeException(nameof(api));
         if (double.IsNaN(estimatedSeconds) || double.IsInfinity(estimatedSeconds) || estimatedSeconds < 0 || estimatedSeconds > 600)
             throw new ArgumentOutOfRangeException(nameof(estimatedSeconds));
@@ -173,7 +204,7 @@ public partial class RobokitController
     }
     public async Task<bool> ExecuteRelativeConfirmedAsync(ushort api, string json)
     {
-        if (ConfirmedMotionActive) { Debug.LogError("已有底盘闭环动作执行中"); return false; }
+        if (ConfirmedMotionActive || ManualJogNeedsReview) { Debug.LogError("已有底盘闭环动作执行中或手动状态待核对"); return false; }
         if (api != 3055 && api != 3056) throw new ArgumentOutOfRangeException(nameof(api));
         var cancel = new CancellationTokenSource();
         chassisEpoch++;

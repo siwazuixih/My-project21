@@ -45,7 +45,11 @@ public class ArmController : MonoBehaviour
 
     public void StartArmSequence()
     {
-        if (externalControlActive) return;
+        if (externalControlActive)
+        {
+            Debug.LogWarning("[仿真机械臂] 实时反馈跟随仍占用模型，未播放规划轨迹；关闭实时反馈后重新开始仿真");
+            return;
+        }
         CalculateObservationPose(mgr.refs.targetObject.position, mgr.chassisCtrl.GetRobotPosition(), transform.forward, out lockedArmTargetPos, out lockedArmTargetRot);
 
         List<double[]> cachedPlan = null;
@@ -54,6 +58,7 @@ public class ArmController : MonoBehaviour
         }
 
         if (mgr.arm.usePrecalculatedSolution && cachedPlan != null) {
+            Debug.Log($"[仿真机械臂] 目标{mgr.currentMissionIndex + 1}：开始播放预计算轨迹，共{cachedPlan.Count}点（不是实物下发）");
             StartCoroutine(ExecutePath(cachedPlan, true)); 
         } else if (mgr.arm.useBitStarPlanner && mgr.refs.bitPlanner != null) {
             StartCoroutine(RunBitStarPlanning());
@@ -135,6 +140,7 @@ public class ArmController : MonoBehaviour
         }
 
         debug_PlannerStatus = "Success";
+        Debug.Log($"[仿真机械臂] 目标{mgr.currentMissionIndex + 1}：模型轨迹播放结束");
         mgr.OnArmTaskFinished();
     }
 

@@ -23,6 +23,15 @@ namespace UnityEngine
     }
     public static class JsonUtility
     {
+        public static void FromJsonOverwrite(string json, object target)
+        {
+            using var doc = JsonDocument.Parse(json);
+            foreach(var p in doc.RootElement.EnumerateObject())
+            {
+                var field = target.GetType().GetField(p.Name);
+                if(field != null) field.SetValue(target, JsonSerializer.Deserialize(p.Value.GetRawText(),field.FieldType,new JsonSerializerOptions { IncludeFields=true }));
+            }
+        }
         static readonly JsonSerializerOptions options = new() { IncludeFields = true };
         public static string ToJson(object value) => JsonSerializer.Serialize(value, options);
         public static T FromJson<T>(string value) => JsonSerializer.Deserialize<T>(value, options);
@@ -30,6 +39,9 @@ namespace UnityEngine
 }
 public partial class DobotController : IDisposable
 {
+    public string robotIP = "127.0.0.1";
+    public int dashboardPort = 29999, feedbackPort = 30005;
+    public bool ViewConnecting;
     private TcpClient tcpClient, feedbackClient;
     private NetworkStream networkStream;
     private bool controlModeConfirmed = true;
@@ -47,6 +59,12 @@ public partial class DobotController : IDisposable
     public void OverrideMotionId(ulong id) { lock(feedbackLock) currentCommandId=id; }
     public double ServoFraction = 1;
     public bool RotateToolAxis;
+    public bool ChangeToolDuringForce;
+    public string ForcePayload = "0,0,0,0,0,0";
+    public void SetToolForProbe(int tool) { lock(feedbackLock) actualTool=tool; }
+    public Task ContactProbe(int tool=1, int user=0) => HandleRobotRequestAsync(algorithm, new RobotRequest {op="contact_probe", tool=tool, user=user});
+    public void StartGatewayForSmoke(int port) { robotGatewayPort=port; OnEnable(); }
+    public void EndGatewayForSmoke() { OnDisable(); }
     public void SetNoisySpeed() { lock(feedbackLock) protocolJointSpeeds[0]=0.067851; }
     public async Task OriginalStep(bool stop)
     {
@@ -63,7 +81,7 @@ public partial class DobotController : IDisposable
         if(result.benchmark_schema!="latency-v1-2026-10-08" || result.values.Length!=6 || result.dashboard_transport_ms<0)
             throw new Exception("invalid benchmark response");
     }
-    public Task MeasuredStep() => HandleRobotRequestAsync(algorithm, new RobotRequest { op="move_relative", token=ownerToken, delta=new[]{-0.2,0.0,0.0}, duration=0.05, original_timing=true, stop_at_end=false });
+    public Task MeasuredStep() => HandleRobotRequestAsync(algorithm, new RobotRequest { op="move_relative", token=ownerToken, delta=new[]{0.2,0.0,0.0}, duration=0.05, original_timing=true, stop_at_end=false });
     public bool CheckMeasurementStale()
     {
         var s=CopyRobotState(); s.age_s=1; return MeasurementValid(s);
@@ -178,7 +196,11 @@ public partial class DobotController : IDisposable
                 }
                 else if (command.StartsWith("GetPose(")) data=Numbers(actualToolPose);
                 else if (command=="GetAngle()") data=Numbers(actualJoints);
-                else if (command.StartsWith("GetForce(")) data="0,0,0,0,0,0";
+                else if (command=="GetForce()")
+                {
+                    data=ForcePayload;
+                    if(ChangeToolDuringForce) lock(feedbackLock) actualTool=2;
+                }
                 else if (command.StartsWith("RelPointTool("))
                 {
                     var groups=Regex.Matches(command,@"\{([^}]+)\}");
@@ -221,9 +243,30 @@ class Program
     static void Check(bool result, string name) { if (!result) throw new Exception(name); Console.WriteLine("PASS " + name); count++; }
     static async Task Reject(Func<Task> action, string name)
     { try { await action(); } catch { Check(true, name); return; } throw new Exception("Accepted " + name); }
-    static FieldCommissioningSettings Settings() => new() { jointMinDeg=Enumerable.Repeat(-90f,6).ToArray(), jointMaxDeg=Enumerable.Repeat(90f,6).ToArray(), jointTimeoutSeconds=1 };
-    static async Task Main()
+    static FieldCommissioningSettings Settings() => new() { positiveXInsertionConfirmed=true, jointMinDeg=Enumerable.Repeat(-90f,6).ToArray(), jointMaxDeg=Enumerable.Repeat(90f,6).ToArray(), jointTimeoutSeconds=1 };
+    static async Task Main(string[] args)
     {
+        if(args.Length==2 && args[0]=="--contact-gateway")
+        {
+            using var robot=new DobotController();
+            await robot.Open();
+            var config=Settings(); config.positiveXInsertionConfirmed=true; config.feedbackPort=30004;
+            robot.BeginFieldWorkflow(config); robot.PermitFieldContact(true);
+            robot.StartGatewayForSmoke(int.Parse(args[1]));
+            Console.WriteLine("CONTACT_GATEWAY_READY");
+            try
+            {
+                string line;
+                while((line=Console.ReadLine())!=null && line!="quit")
+                    if(line=="end-field") { await robot.EndFieldWorkflowAsync(); Console.WriteLine("FIELD_IDLE"); }
+            }
+            finally { robot.EndGatewayForSmoke(); }
+            return;
+        }
+        count += await DobotController.TestConnectionSettings();
+        string archive=Path.Combine(Path.GetTempPath(),"robot-data-hook-"+Guid.NewGuid().ToString("N"));
+        var capture=new RunDataSession(archive,new RunDataSession.Info {runId="robot-hook",projectId="fake",source="loopback test, not hardware"});
+        RunDataCapture.Begin(capture);
         using (var history = new DobotController())
         {
             Check(!history.HistoryCollisionObserved, "history does not invent collision without feedback");
@@ -283,13 +326,33 @@ class Program
         var s = Settings(); var goal = new double[]{1,1,0,0,0,0};
         using(var r=new DobotController())
         {
-            await r.Open(); await r.ProbeLatency("pose"); await r.ProbeLatency("angle"); await r.ProbeLatency("force");
+            await r.Open();
+            await Reject(()=>r.ContactProbe(), "V2 probe wrong global Tool rejected before GetForce");
+            Check(r.Commands.Count==0,"wrong Tool probe sends no command");
+            r.SetToolForProbe(1);
+            await r.ProbeLatency("pose"); await r.ProbeLatency("angle"); await r.ProbeLatency("force");
+            await r.ContactProbe();
+            Check(r.Commands.Contains("GetForce()") && !r.Commands.Contains("GetForce(1)"), "V2 global GetForce query used");
             Check(r.Commands.All(c=>c.StartsWith("Get")),"latency probe only sends read queries, without acquire/Stop/frame changes");
             int sent=r.Commands.Count;
             await Reject(()=>r.ProbeLatency("ServoP"),"arbitrary benchmark command rejected");
             Check(r.Commands.Count==sent,"rejected probe sends no robot command");
             r.BeginFieldWorkflow(s);
             await Reject(()=>r.ProbeLatency("pose"),"latency probe cannot interfere with active workflow");
+        }
+        using(var r=new DobotController { ChangeToolDuringForce=true })
+        {
+            await r.Open(); r.SetToolForProbe(1);
+            await Reject(()=>r.ContactProbe(),"V2 Tool changed during read discards wrench");
+            Check(r.Commands.SequenceEqual(new[]{"GetForce()"}),"failed read-only probe sends no Stop/motion/frame commands");
+        }
+        using(var r=new DobotController { ForcePayload="NaN,0,0,0,0,0" })
+        {
+            await r.Open(); r.SetToolForProbe(1);
+            await Reject(()=>r.ContactProbe(),"V2 nonfinite force rejected");
+            int before=r.Commands.Count; r.Feed=false; await Task.Delay(300);
+            await Reject(()=>r.ContactProbe(),"V2 stale feedback rejected before force query");
+            Check(r.Commands.Count==before,"stale probe sends zero additional commands");
         }
         foreach (var fraction in new[]{0.0,0.5,1.0})
         {
@@ -328,8 +391,9 @@ class Program
         }
         using (var r = new DobotController())
         {
-            await r.Open(); r.BeginFieldWorkflow(s); r.PermitFieldContact(true); await r.AcquireContact();
-            await Reject(()=>r.OriginalStep(false),"real original timing requires explicit Unity authorization");
+            var unconfirmed = Settings(); unconfirmed.positiveXInsertionConfirmed=false;
+            await r.Open(); r.BeginFieldWorkflow(unconfirmed);
+            await Reject(()=>{ r.PermitFieldContact(true); return Task.CompletedTask; },"legacy configuration cannot silently authorize reversed contact direction");
         }
         foreach(var pair in new[]{("speed","J3_speed"),("nan","J1_speed"),("age","feedback_age"),("mode","mode_not_5"),("error","robot_error"),("collision","collision"),("frame","no_new_frame")})
         {
@@ -484,6 +548,11 @@ class Program
         Check(UnityEngine.Debug.Logs.Any(l=>l.Contains("PRE_MOTION_STOP_FAILED")),"pre-motion failure stage captured");
         Check(UnityEngine.Debug.Logs.Any(l=>l.Contains("[TRANSPORT]") && !l.Contains("not_received")),"actual transport timestamps captured");
         Check(UnityEngine.Debug.Logs.Any(l=>l.Contains("[TIMEOUT]") && l.Contains("no_new_polls=") && l.Contains("rx_total=")),"timeout includes poll and receive counters");
+        await RunDataCapture.Finish("robot-hook","fake robot regression finished");
+        var evidence=File.ReadAllLines(Path.Combine(archive,"commands.jsonl")).Select(x=>JsonDocument.Parse(x).RootElement.Clone()).ToArray();
+        Check(evidence.Any(e=>e.GetProperty("payload").GetString().StartsWith("MovJ") && e.GetProperty("kind").GetString()=="accepted"),"production MovJ transport writes accepted command evidence");
+        Check(evidence.Any(e=>e.GetProperty("payload").GetString().StartsWith("ServoP") && e.GetProperty("kind").GetString()=="write_completed"),"Python-adapted ServoP captured at same physical transport");
+        Check(evidence.Any(e=>e.GetProperty("kind").GetString()=="failed") && evidence.Any(e=>e.GetProperty("payload").GetString()=="Stop()"),"failed exchanges and Stop retained independently of normal feedback logs");
         Console.WriteLine($"FIELD_ROBOT_TESTS_PASS {count}");
     }
 }

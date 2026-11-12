@@ -12,6 +12,15 @@ namespace UnityEngine
     public static class Debug { public static void Log(object o) { } }
     public static class JsonUtility
     {
+        public static void FromJsonOverwrite(string json, object target)
+        {
+            using var doc = JsonDocument.Parse(json);
+            foreach(var p in doc.RootElement.EnumerateObject())
+            {
+                var field = target.GetType().GetField(p.Name);
+                if(field != null) field.SetValue(target, JsonSerializer.Deserialize(p.Value.GetRawText(),field.FieldType,new JsonSerializerOptions { IncludeFields=true }));
+            }
+        }
         static JsonSerializerOptions options = new() { IncludeFields = true };
         public static string ToJson(object value) => JsonSerializer.Serialize(value, options);
         public static T FromJson<T>(string value) => JsonSerializer.Deserialize<T>(value, options);
@@ -65,6 +74,39 @@ class Program
     {
         count += ArmSamplingTests.Run();
         var s = Settings(); s.Validate(true); Check(true, "valid settings");
+        var migrated = FieldCommissioningSettings.Parse("{\"lateralLimitN\":20}");
+        Check(migrated.exitStageTimeoutSeconds==90 && migrated.contactLateralTrigger==18 && !migrated.positiveXInsertionConfirmed,"old JSON gets explicit new defaults but no opposite-direction permission");
+        Reject(()=>migrated.RequireContactDirection(),"new direction requires affirmative confirmation");
+        migrated.positiveXInsertionConfirmed=true; migrated.RequireContactDirection(); Check(true,"explicit new direction accepted");
+        Check(s.ContactCycleBudget==90+90+60+5+5+35,"V2 outer contact budget includes independent insert/exit and stop margins");
+        Check(s.EffectiveInsertionSpeed==.4 && s.EffectiveExitSpeed==.6,"V2 speeds capped independently");
+        Check(s.ContactEffectiveSummary.Contains("0.30mm") && s.ContactEffectiveSummary.Contains("8轮"),"V2 effective search/offset limits visible");
+        var oldBudget=s.Copy(); oldBudget.contactStageTimeoutSeconds=30;
+        Reject(()=>oldBudget.Validate(false),"old insertion budget refused at effective V2 speed");
+        oldBudget.Validate(false, false); oldBudget.Validate(true, false);
+        Check(true,"old insertion budget does not block saving/connections/joint-only workflow");
+        oldBudget.ValidateContactBudget(false, true);
+        Check(true,"withdraw-only ignores unused insert budget");
+        Reject(()=>oldBudget.ValidateContactBudget(true, false),"insert-only still refuses 20mm/30s before motion");
+        var oldExit=s.Copy(); oldExit.exitStageTimeoutSeconds=30;
+        oldExit.Validate(false, false); oldExit.ValidateContactBudget(true, false);
+        Check(true,"insert-only ignores unused exit budget");
+        Reject(()=>oldExit.ValidateContactBudget(false, true),"withdraw-only retains minimum exit runtime");
+        var repair=oldBudget.Copy(); repair.SupplementContactBudgets(); repair.Validate(true);
+        Check(repair.contactStageTimeoutSeconds==90 && repair.exitStageTimeoutSeconds==90,"explicit repair fills legacy 30s to V2 budget");
+        Check(repair.insertionMm==oldBudget.insertionMm && repair.withdrawalMm==oldBudget.withdrawalMm &&
+            repair.contactSpeedMmS==oldBudget.contactSpeedMmS && repair.forceLimitN==oldBudget.forceLimitN &&
+            repair.momentLimitNm==oldBudget.momentLimitNm && repair.lateralLimitN==oldBudget.lateralLimitN &&
+            repair.positiveXInsertionConfirmed==oldBudget.positiveXInsertionConfirmed,"repair never grants direction or changes motion/force authorization");
+        repair.contactStageTimeoutSeconds=400; repair.SupplementContactBudgets();
+        Check(repair.contactStageTimeoutSeconds==400,"repair never shortens an existing longer budget");
+        var oversized=s.Copy(); oversized.insertionMm=100; oversized.contactSpeedMmS=.1f;
+        Reject(()=>oversized.SupplementContactBudgets(),"repair over 600s requires explicit field distance review");
+        Check(oversized.contactStageTimeoutSeconds==90 && oversized.exitStageTimeoutSeconds==90,"failed repair is atomic in settings");
+        var invalidProfile=s.Copy(); invalidProfile.contactLateralTrigger=21;
+        Reject(()=>invalidProfile.Validate(false),"search trigger cannot exceed preserved hard lateral ceiling");
+        invalidProfile=s.Copy(); invalidProfile.exitStageTimeoutSeconds=30;
+        Reject(()=>invalidProfile.Validate(false),"legacy 30-second exit budget refused");
         Reject(() => new FieldCommissioningSettings().Validate(true), "default real limits locked");
         var bad = s.Copy(); bad.visionJ1Deg = float.NaN; Reject(() => bad.Validate(true), "NaN rejected");
         bad = s.Copy(); bad.contactSpeedMmS=.1f; Reject(() => bad.Validate(true), "oversized contact duration rejected");

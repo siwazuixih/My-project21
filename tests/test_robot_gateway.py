@@ -158,12 +158,8 @@ class GatewayTests(unittest.TestCase):
         cycle = ContactCycle(forbidden, forbidden, forbidden)
         # Keep real HybridExit search/feed code and gateway protocol; shorten total
         # distance in this test to avoid a 45-second repeated timing test.
-        from cr10af_hybrid_x import HybridExit
-        original_run = HybridExit.run
-        def short_run(obj):
-            obj.args.distance_mm = 0.1
-            return original_run(obj)
-        with patch.object(HybridExit, 'run', short_run), patch.object(cycle, '_wait', side_effect=lambda seconds, client: client.status()):
+        cycle.settings.update(insertionMm=.1, withdrawalMm=.1)
+        with patch.object(cycle, '_wait', side_effect=lambda seconds, client: client.status()):
             cycle.start(True)
             deadline = time.monotonic() + 10
             while cycle.snapshot()['cycle_active'] and time.monotonic() < deadline:
@@ -172,6 +168,30 @@ class GatewayTests(unittest.TestCase):
         self.assertFalse(status['cycle_active'])
         self.assertEqual(status['cycle_phase'], 'DONE', status)
         self.assertEqual(status['cycle_result'], 'SIMULATED_OK', status)
+
+    def test_preview_does_not_move_and_actual_step_uses_that_target(self):
+        client=UnityRobotClient(simulate=True).open()
+        try:
+            before=client.pose()
+            target=client.relative_target(.1,0,0)
+            self.assertEqual(client.pose(),before)
+            self.assertAlmostEqual(target[0]-before[0],.1)
+            client.move_original_interval(.1,0,0,.05,True,True)
+            self.assertEqual(client.pose(),target)
+            client.finish_stage()
+            self.assertTrue(client.status()['simulated'])
+        finally: client.close()
+
+    def test_changed_precomputed_target_is_rejected_without_motion(self):
+        client=UnityRobotClient(simulate=True).open()
+        try:
+            before=client.pose()
+            target=list(client.relative_target(.1,0,0)); target[0]+=1
+            client.preview=([.1,0,0],target)
+            with self.assertRaisesRegex(RuntimeError,'漂移'):
+                client.move_original_interval(.1,0,0,.05,True,True)
+            self.assertEqual(client.status()['pose'],list(before))
+        finally: client.close()
 
     def test_stop_interrupts_inflight_move(self):
         client = UnityRobotClient(simulate=True).open()

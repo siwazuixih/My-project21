@@ -662,6 +662,10 @@ class RealSenseVisionSource:
             processed_image = self._latest_processed_jpeg
             serial = self._serial
             usb_type = self._usb_type
+            frame_time = self._last_frame_time
+
+        if frame_time is None or time.time() - frame_time > 2.0:
+            raise RuntimeError("RealSense frame stale; check camera connection")
 
         processor_status = self._processor.status()
         if processor_status["ready"] and processed_image is not None:

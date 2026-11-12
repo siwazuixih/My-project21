@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../Assets/ChassisJogCommand.cs" />
+    <Compile Include="../../Assets/FieldCommissioningPanel.ChassisJog.cs" />
+  </ItemGroup>
+</Project>

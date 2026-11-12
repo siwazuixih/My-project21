@@ -1,12 +1,12 @@
 using UnityEngine;
 using TMPro;
-using System.Collections.Generic;
 using UnityEngine.UI;
 
 public class RuntimeConsole : MonoBehaviour
 {
     private const string ToggleButtonName = "RuntimeConsoleToggleButton";
     private const string ColliderToggleButtonName = "ColliderVisualizationToggleButton";
+    private const string RobotFeedbackFilterName = "RuntimeConsoleRobotFeedbackFilter";
 
     [Header("把刚刚建的 ConsoleLogText 拖到这里")]
     public TextMeshProUGUI logTextDisplay;
@@ -17,8 +17,10 @@ public class RuntimeConsole : MonoBehaviour
     [Header("启动时是否默认收起")]
     public bool startCollapsed = true;
 
-    // 用一个列表来缓存当前屏幕上的日志文字
-    private List<string> logLines = new List<string>();
+    [Header("只过滤运行时日志显示，不影响通信、文件日志或反馈数据")]
+    [SerializeField] private bool hideRobotFeedbackLogs;
+
+    private readonly RuntimeConsoleLogBuffer logBuffer = new RuntimeConsoleLogBuffer();
     private Image backgroundImage;
     private Mask panelMask;
     private GameObject titleObject;
@@ -27,6 +29,8 @@ public class RuntimeConsole : MonoBehaviour
     private Button colliderToggleButton;
     private Image colliderToggleButtonImage;
     private TextMeshProUGUI colliderToggleButtonText;
+    private Toggle robotFeedbackFilterToggle;
+    private RectTransform robotFeedbackFilterRect;
     private bool isCollapsed;
     private bool colliderVisualizationVisible = true;
     private float nextHiddenColliderRefreshTime;
@@ -36,8 +40,10 @@ public class RuntimeConsole : MonoBehaviour
         CachePanelParts();
         CreateToggleButton();
         CreateColliderToggleButton();
+        CreateRobotFeedbackFilterToggle();
         SetCollapsed(startCollapsed);
         UpdateColliderToggleButtonState();
+        RefreshLogDisplay();
     }
 
     private void Update()
@@ -64,6 +70,15 @@ public class RuntimeConsole : MonoBehaviour
         Application.logMessageReceived -= HandleLog;
     }
 
+    private void OnDestroy()
+    {
+        if (robotFeedbackFilterToggle != null)
+        {
+            robotFeedbackFilterToggle.onValueChanged.RemoveListener(SetRobotFeedbackLogFilter);
+            Destroy(robotFeedbackFilterToggle.gameObject);
+        }
+    }
+
     // 这就是我们的“窃听器”核心处理厂
     void HandleLog(string logString, string stackTrace, LogType type)
     {
@@ -78,20 +93,24 @@ public class RuntimeConsole : MonoBehaviour
         string timeStr = System.DateTime.Now.ToString("HH:mm:ss");
         string newLine = $"<color={colorHex}>[{timeStr}] {logString}</color>";
 
-        // 3. 塞进我们的笔记本里
-        logLines.Add(newLine);
+        bool feedback = RuntimeConsoleLogBuffer.IsRoutineRobotFeedback(logString, type == LogType.Log);
+        logBuffer.Append(newLine, feedback, maxLines);
+        // Hidden periodic feedback must not keep rebuilding the UI text or evict other logs.
+        if (!hideRobotFeedbackLogs || !feedback) RefreshLogDisplay();
+    }
 
-        // 4. 重点保护：如果日志太多，就把最老的一条删掉，防止程序卡死
-        if (logLines.Count > maxLines)
-        {
-            logLines.RemoveAt(0);
-        }
+    public void SetRobotFeedbackLogFilter(bool hidden)
+    {
+        hideRobotFeedbackLogs = hidden;
+        if (robotFeedbackFilterToggle != null)
+            robotFeedbackFilterToggle.SetIsOnWithoutNotify(hidden);
+        RefreshLogDisplay();
+    }
 
-        // 5. 把笔记本里的所有文字，拼成一个大字符串，塞给 UI 文本框
+    private void RefreshLogDisplay()
+    {
         if (logTextDisplay != null)
-        {
-            logTextDisplay.text = string.Join("\n", logLines);
-        }
+            logTextDisplay.text = logBuffer.Render(hideRobotFeedbackLogs, maxLines);
     }
 
     /// <summary>
@@ -114,8 +133,99 @@ public class RuntimeConsole : MonoBehaviour
             logTextDisplay.gameObject.SetActive(!collapsed);
         if (titleObject != null)
             titleObject.SetActive(!collapsed);
+        if (robotFeedbackFilterToggle != null)
+            robotFeedbackFilterToggle.gameObject.SetActive(!collapsed);
         if (toggleButtonText != null)
             toggleButtonText.text = collapsed ? "展开日志" : "收起日志";
+    }
+
+    private void CreateRobotFeedbackFilterToggle()
+    {
+        if (transform.parent == null || !(transform is RectTransform)) return;
+        Transform existing = transform.parent.Find(RobotFeedbackFilterName);
+        GameObject filterObject;
+        if (existing != null) filterObject = existing.gameObject;
+        else
+        {
+            filterObject = new GameObject(RobotFeedbackFilterName,
+                typeof(RectTransform), typeof(CanvasRenderer), typeof(Image), typeof(Toggle));
+            filterObject.layer = gameObject.layer;
+            filterObject.transform.SetParent(transform.parent, false);
+            var background = filterObject.GetComponent<Image>();
+            background.color = new Color(0.05f, 0.12f, 0.20f, 0.96f);
+
+            var box = new GameObject("Checkbox", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+            box.layer = gameObject.layer;
+            box.transform.SetParent(filterObject.transform, false);
+            var boxRect = box.GetComponent<RectTransform>();
+            boxRect.anchorMin = boxRect.anchorMax = new Vector2(0f, 0.5f);
+            boxRect.pivot = new Vector2(0f, 0.5f);
+            boxRect.anchoredPosition = new Vector2(8f, 0f);
+            boxRect.sizeDelta = new Vector2(22f, 22f);
+            var boxImage = box.GetComponent<Image>();
+            boxImage.color = new Color(0.75f, 0.82f, 0.88f, 1f);
+            boxImage.raycastTarget = false;
+
+            var check = new GameObject("Checkmark", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+            check.layer = gameObject.layer;
+            check.transform.SetParent(box.transform, false);
+            var checkRect = check.GetComponent<RectTransform>();
+            checkRect.anchorMin = checkRect.anchorMax = new Vector2(0.5f, 0.5f);
+            checkRect.sizeDelta = new Vector2(14f, 14f);
+            var checkImage = check.GetComponent<Image>();
+            checkImage.color = new Color(0.02f, 0.65f, 0.35f, 1f);
+            checkImage.raycastTarget = false;
+
+            var label = new GameObject("Text", typeof(RectTransform), typeof(CanvasRenderer), typeof(TextMeshProUGUI));
+            label.layer = gameObject.layer;
+            label.transform.SetParent(filterObject.transform, false);
+            var labelRect = label.GetComponent<RectTransform>();
+            labelRect.anchorMin = Vector2.zero;
+            labelRect.anchorMax = Vector2.one;
+            labelRect.offsetMin = new Vector2(38f, 0f);
+            labelRect.offsetMax = new Vector2(-6f, 0f);
+            var text = label.GetComponent<TextMeshProUGUI>();
+            text.text = "过滤机械臂反馈（仅日志）";
+            text.alignment = TextAlignmentOptions.MidlineLeft;
+            text.fontSize = 17f;
+            text.color = Color.white;
+            text.raycastTarget = false;
+            if (logTextDisplay != null && logTextDisplay.font != null) text.font = logTextDisplay.font;
+
+            var toggle = filterObject.GetComponent<Toggle>();
+            toggle.targetGraphic = background;
+            toggle.graphic = checkImage;
+            toggle.toggleTransition = Toggle.ToggleTransition.None;
+        }
+
+        robotFeedbackFilterRect = filterObject.GetComponent<RectTransform>();
+        robotFeedbackFilterRect.pivot = Vector2.zero;
+        robotFeedbackFilterRect.sizeDelta = new Vector2(260f, 30f);
+        robotFeedbackFilterToggle = filterObject.GetComponent<Toggle>();
+        if (robotFeedbackFilterToggle != null)
+        {
+            robotFeedbackFilterToggle.SetIsOnWithoutNotify(hideRobotFeedbackLogs);
+            robotFeedbackFilterToggle.onValueChanged.RemoveListener(SetRobotFeedbackLogFilter);
+            robotFeedbackFilterToggle.onValueChanged.AddListener(SetRobotFeedbackLogFilter);
+        }
+        PositionRobotFeedbackFilter();
+        filterObject.transform.SetAsLastSibling();
+    }
+
+    private void OnRectTransformDimensionsChange()
+    {
+        PositionRobotFeedbackFilter();
+    }
+
+    private void PositionRobotFeedbackFilter()
+    {
+        var panel = transform as RectTransform;
+        if (panel == null || robotFeedbackFilterRect == null) return;
+        // Sibling above the panel: avoid the log Mask clipping the checkbox.
+        robotFeedbackFilterRect.position = panel.TransformPoint(
+            new Vector3(panel.rect.xMin + 8f, panel.rect.yMax + 4f, 0f));
+        robotFeedbackFilterRect.localRotation = panel.localRotation;
+        robotFeedbackFilterRect.localScale = panel.localScale;
     }
 
     private void CachePanelParts()

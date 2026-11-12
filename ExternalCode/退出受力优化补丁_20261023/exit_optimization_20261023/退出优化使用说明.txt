@@ -1,0 +1,63 @@
+退出受力优化补丁 2026-10-23
+
+适用于当前 +X 卡入正常、-X 退出时容易受力触发保护的程序。
+本补丁安装在现有 ubuntu20_04 文件夹中，保留现有卡入算法、机械臂 IP 和力反馈读取接口。
+请关闭正在运行的控制程序后安装；安装器不连接设备、不发送运动指令，会先备份原文件。
+
+一、复制到真机
+解压压缩包，把整个 exit_optimization_20261023 文件夹复制到 Ubuntu 桌面。
+它应与原先的 ubuntu20_04 文件夹并列放置。无需覆盖整个旧程序目录。
+
+二、在真机终端输入
+cd "$(xdg-user-dir DESKTOP)/ubuntu20_04"
+python3 ../exit_optimization_20261023/install_exit_optimization.py --target .
+source .venv/bin/activate
+python3 ../exit_optimization_20261023/test_exit_optimization.py -v
+
+看到“已安装”和测试 OK 后，优化已生效。若提示 Unrecognized，请保留报错并提供当前程序文件，安装器不会套用不匹配的修改。
+默认 IP 沿用现有程序配置；以下独立命令明确使用 192.168.192.19。
+
+三、先查看退出计划，不运动
+python3 cr10af_hybrid_x.py --ip 192.168.192.19 --tool 1 --direction -1.0 --distance-mm 2
+
+输出中应包含："exit_strategy": "exit-small-step-20261023"。
+该命令不连接机械臂，不会运动。
+
+四、单独验证退出 2 mm
+先确认电批已停转、工具允许轴向脱离，以及工具编号 1 与现场设置一致，再输入：
+python3 cr10af_hybrid_x.py --ip 192.168.192.19 --tool 1 --direction -1.0 --distance-mm 2 --execute
+
+这里的 2 mm 是试运行距离，不是完整脱离距离。后续退出距离按当前实际位置确定，不要在多次执行后仍机械地重复完整行程。
+如果需要完整退出 20 mm，且当前位置确实需要 20 mm 行程，输入：
+python3 cr10af_hybrid_x.py --ip 192.168.192.19 --tool 1 --direction -1.0 --distance-mm 20 --max-runtime-s 90 --execute
+
+五、完整自动流程
+python3 servo_tcp_client_fault_control_v26_28Nm_abnormal_stop_only.py --execute
+点击 Auto Cycle 或按 f。卡入沿用现有逻辑；-X 退出自动使用优化策略。
+单独卡入和单独拧紧的操作方式沿用现有使用说明。
+
+六、这次改变了什么
+1. 正常退出速度上限 0.6 mm/s，每段最多 0.15 mm，每段结束检查载荷和实际位移。
+2. 横向综合载荷评价值达到 6，或工具 X 轴力绝对值达到 9 N 时提前减速；有载时每段最多 0.05 mm。
+3. 横向评价值达到 12 时进入 Y/Z 微调，目标降至约 8 以下（继承更严格设置时以实际计划为准）。该评价值沿用原程序力/力矩加权算法，不是纯横向力的牛顿值。
+4. Y/Z 每次试探不超过 0.05 mm，确认减载后留在改善位置；不再为了比较全部方向反复返回原接触位置。
+5. 横向偏移限制在起点周围 0.30 mm 内，每轮最多尝试四个方向，每次处理最多两轮，全程最多八轮。没有有效改善即停止。
+6. 工具 X 轴力绝对值达到 18 N 时提前停止；原有合力、力矩、横向硬限值及反馈超时保护仍生效。若现场设置更严格，会采用更严格的限制。
+7. 退出进度根据实际位置计算，不再仅累计下发的步长。位置不跟随命令、工具姿态改变或位移超界时停止。
+8. 未指定单独退出运行预算时默认 90 s；显式 --max-runtime-s 数值照常生效。自动退出内部预算至少 90 s，主程序等待预算至少为内部预算加 15 s。卡入预算沿用原值。
+
+七、如果停止，查看输出
+axial_load_stop：轴向载荷达到提前停止值，检查工具开口、脱离条件及残余约束，不继续加大拉力。
+lateral_jam：有限微调后横向载荷仍未降低，不再继续向外拉。
+tracking_error：实际位移未跟随目标，停止进一步退出。
+offset_limit / orientation_changed / travel_limit：横向偏移、工具姿态或轴向行程超出本策略范围。
+safety_stop：原有保护、接口或反馈检查触发，具体看 reason。
+请保留完整 JSON 输出，尤其是 result、reason、moved_mm、last_wrench 和 history。
+
+这版用于降低退出时的载荷积累，不保证消除所有卡滞。当前仅完成离线模拟和原程序回归测试，尚未进行真机验证。
+补丁不会自动反转电批、不会自动重新卡入，也不会修改现场已能正常使用的 GetForce 接口。
+
+八、恢复旧版
+安装器会打印 exit_backup_日期时间 目录。关闭控制程序后，将该备份目录中的原程序文件复制回 ubuntu20_04 并覆盖即可。
+备份中的主要文件是 cr10af_hybrid_x.py 和 servo_tcp_client_fault_control_v26_28Nm_abnormal_stop_only.py。
+恢复后原程序不再调用新增退出模块；保留该模块文件不会影响旧版运行。

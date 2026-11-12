@@ -21,7 +21,7 @@ def check_runtime():
         except Exception as exc:
             record(name, False, exc)
     for name in ('servo_tcp_client_fault_control_v26_28Nm_abnormal_stop_only.py',
-                 'servo_contact_cycle.py', 'unity_robot_client.py', 'cr10af_hybrid_x.py'):
+                 'servo_contact_cycle.py', 'contact_session.py', 'unity_robot_client.py', 'cr10af_hybrid_x.py', 'cr10af_exit_optimized.py'):
         path = root / name
         try:
             compile(path.read_text(encoding='utf-8-sig'), str(path), 'exec')

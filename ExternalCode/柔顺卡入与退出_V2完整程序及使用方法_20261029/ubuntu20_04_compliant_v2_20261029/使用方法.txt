@@ -1,0 +1,103 @@
+柔顺卡入与推出 V2 使用方法
+版本 compliant-v2-20261029
+
+1 复制与当前状态
+将整个 ubuntu20_04_compliant_v2_20261029 文件夹复制到 Ubuntu 桌面。使用一个固定目录运行，不要通过换目录或删除状态记录来重新试探卡住的工具。
+目前工具仍卡在工件上，先保持设备停止，由现场人员解除接触约束。当前仅执行以下只读命令：
+
+cd "$(xdg-user-dir DESKTOP)/ubuntu20_04_compliant_v2_20261029"
+python3 run.py probe
+
+该命令不发送运动、使能、清零、切换坐标或停止指令。它不会替你停止正在运行的设备。
+默认 IP 192.168.192.19；工具编号 1；电批默认 192.168.192.21:1200。
+工具 +X 卡入，-X 退出，Y/Z 是横向微调方向；工具必须事先标定并在控制器上实际选中。
+probe_ok 仅表示读取成功。查看 precheck_passed、blocked_reasons、feedback_wrench 和 wrench。读数正常也不代表工装机械约束已解除。
+
+2 安装依赖与离线验证
+首次安装需要网络。目标为 Ubuntu 20.04 和 Python 3.8。
+
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip python3-tk
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
+python3 run.py check
+python3 run.py test
+
+以后每次新开终端：
+cd "$(xdg-user-dir DESKTOP)/ubuntu20_04_compliant_v2_20261029"
+source .venv/bin/activate
+
+3 先检查计划，无运动
+python3 run.py insert --distance-mm 2
+python3 run.py exit --distance-mm 2
+
+计划应含 compliance_strategy: bounded-compliance-v2-20261029。
+独立动作的 run.py 默认行程为 2 mm。计划只验证参数，不验证实际设备状态。
+
+4 现场解除当前卡住状态后，单独短行程验证
+确认电批停转、工具开口和运动空间允许移动、坐标和方向已核对后，按需选择一条：
+
+python3 run.py insert --distance-mm 2 --execute
+python3 run.py exit --distance-mm 2 --execute
+
+不要机械地把两条依次执行。每次都从当前位置出发，2 mm 不代表已经卡入或完全脱离。
+不得把前次未完成动作当成没有移动。X 接近零时 Y/Z 也可能已经移动。
+run.py 保存独立机器人动作和诊断输出到 robot_logs。
+底层脚本仍可直接运行，但默认行程是 20 mm；推荐统一使用 run.py 并明确给出距离。
+
+5 异常后的保持与复位
+受力超限、横向搜索失败、位置不跟随、通信中断等将使 contact_session.json 保留下来。
+随后再次发运动命令会返回 contact_session_blocked，不会重新建立起点继续试探。
+
+先停止旧进程、确认现场机械接触已经解除，再执行：
+python3 cr10af_hybrid_x.py --ip 192.168.192.19 --tool 1 --reset-contact-session --confirm-tool-free
+
+此命令只读取并核对状态，然后清除运行记录，不发送运动。若工具编号、合力或其他软件检查不通过，会拒绝复位。
+--confirm-tool-free 是操作者对现场已经解除约束的确认，不会由程序自动判断。
+如果前次进程仍存在，会拒绝清除记录。不要通过删除记录、换目录、提高阈值或带载清零来绕过。
+不把每次重启当成新的搜索预算；八轮搜索和 0.30 mm 限制是在一次连续运行内生效的，异常后须先现场复核。
+
+6 只拧紧
+确认批头已正确卡入后：
+python3 run.py gui --execute
+点击 Tighten Only 或按 t。该入口不调度机械臂。
+GUI 打开时会连接电批并发送复位/停止/监控回传指令。
+
+7 完整自动周期
+先独立验证现场需要的卡入/退出距离，再设置行程。下列 2.0 是命令格式示例，只能在现场确认为 2 mm 时使用：
+export CR10AF_DISTANCE_MM="2.0"
+python3 run.py gui --execute
+点击 Auto Cycle 或按 f。
+未显式设置 CR10AF_DISTANCE_MM 时，本版拒绝开始自动周期。
+该参数同时指定卡入和退出距离；若工艺要求不同距离，需要进一步独立配置，不能直接套用本示例。
+完整周期：停转确认 → +X 卡入 → 等待5秒 → 电批拧紧 → 停转确认与保存 → 等待5秒 → -X 退出。
+位置完成不等于装配就位确认。自动运行前必须通过工装和工艺验证卡入的终点确实允许拧紧。
+
+8 本版控制策略与参数
+卡入：速度上限0.4 mm/s，每段上限0.10 mm。
+退出：速度上限0.6 mm/s，每段上限0.15 mm。
+载荷逐渐升高时连续降低速度；有载状态下每段最多0.05 mm。
+卡入轴向力绝对值提前停止值为12 N，退出为18 N，现场设置更严格时按更严格限制。
+原30 N合力、10 N·m合力矩、反馈超时及设备报警保护继续生效；未验证前不提高。
+横向评价值达到12时搜索，减到约7.8才允许恢复轴向移动。该评价值含力矩加权，不是纯牛顿数。
+每次Y/Z试探最多0.05 mm，最多八轮，实际横向偏移上限0.30 mm。
+每轮应真实减载；若减横向载荷却新增明显轴向力或力矩，则拒绝接受该方向。无改善、预算用完、偏移到界或达到保护条件就停止。
+两种方向都用实际位置计算轴向进度，并检查目标跟随、姿态和位移范围。
+卡入与退出的默认软件运行预算均为90秒，自动周期外部等待至少多15秒。预算到期停止，不保证20 mm一定在预算内完成。
+
+9 停止与结果
+主界面 Reset/Stop 或 s/Esc 请求停止；独立机器人终端 Ctrl+C 请求结束并停止。
+通信停止不能替代现场硬件急停。
+Reverse/r 是电批反转，不能作为自动脱困操作。
+axial_load_stop：轴向力达到提前停止值。
+lateral_jam：有界横向搜索未满足减载条件。
+tracking_error：实际位移未跟随指令。
+safety_stop：硬限值、反馈或设备状态检查触发，查看 reason。
+contact_session_blocked：前次操作异常或未结束，需先复核现场。
+
+10 适用范围
+本版是位置小步运动加力反馈约束，不是控制器原生连续力控，也没有自动识别螺母开口或齿形角度的能力。
+要达到工艺要求，需要在空载状态检查传感器零点与工具负载配置、标定TCP与工具方向、核实实际间隙和可用行程，再从短行程建立载荷/位移记录。
+不要在当前卡住、受力状态下做传感器清零。
+没有软件参数可以保证对所有工具与工装都获得最佳柔顺效果。当前只完成离线仿真与回归测试，必须在现场逐步验收。

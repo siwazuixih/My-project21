@@ -32,6 +32,8 @@ public partial class DobotController
     private readonly double[] protocolJointSpeeds = new double[6];
     private bool contactFrameConfirmed;
     private TcpListener robotListener;
+    private long dashboardConnectionGeneration;
+    private readonly System.Collections.Generic.HashSet<TcpClient> gatewayClients = new System.Collections.Generic.HashSet<TcpClient>();
     private TcpClient ownerClient;
     private string ownerToken;
     private bool ownerSimulation, gatewayClosing, motionBusy, stopLatched;
@@ -47,6 +49,7 @@ public partial class DobotController
         public double planned_distance_mm;
         public bool simulate;
         public double[] delta;
+        public double[] expected_target;
         public double duration = 0.5;
         public int tool = 1;
         public bool enforce_lateral;
@@ -55,7 +58,7 @@ public partial class DobotController
     }
     [Serializable] private sealed class RobotReply
     {
-        public string id, token, error, result;
+        public string id, token, error, result, contact_profile;
         public bool ok, simulated;
         public int mode, robot_error, collision;
         public int six_force_online, user, tool;
@@ -85,6 +88,7 @@ public partial class DobotController
         if (gatewayClosing) return;
         gatewayClosing = true;
         robotListener?.Stop();
+        foreach (var client in new System.Collections.Generic.List<TcpClient>(gatewayClients)) client.Close();
         ownerClient?.Close();
         if (ExternalControlActive) _ = AbortOwnerAsync();
     }
@@ -100,9 +104,10 @@ public partial class DobotController
     {
         try
         {
-            while (!gatewayClosing)
+            while (!gatewayClosing && ReferenceEquals(listener, robotListener))
             {
                 var client = await listener.AcceptTcpClientAsync();
+                if (gatewayClosing || !ReferenceEquals(listener, robotListener)) { client.Close(); break; }
                 _ = ServeAlgorithmAsync(client);
             }
         }
@@ -110,6 +115,7 @@ public partial class DobotController
     }
     private async Task ServeAlgorithmAsync(TcpClient client)
     {
+        gatewayClients.Add(client);
         // 一连接一会话；请求严格串行。断线或10秒无请求将停止并释放。
         using (client)
         using (var stream = client.GetStream())
@@ -156,7 +162,11 @@ public partial class DobotController
                 }
             }
             catch (Exception e) { if (!gatewayClosing) Debug.LogWarning("[RobotGateway] 会话结束: " + e.Message); }
-            finally { if (ownerClient == client) await AbortOwnerAsync(); }
+            finally
+            {
+                gatewayClients.Remove(client);
+                if (ownerClient == client) await AbortOwnerAsync();
+            }
         }
     }
     // 字节读取不接触Unity对象，不应每个字节等待一次Unity帧调度。
@@ -199,6 +209,17 @@ public partial class DobotController
     }
     private async Task<RobotReply> HandleRobotRequestAsync(TcpClient client, RobotRequest r)
     {
+        if (r.op == "contact_probe")
+        {
+            if (FieldWorkflowActive || ExternalControlActive || motionBusy) throw new InvalidOperationException("接触复核要求先结束机械臂流程");
+            var before = CopyRobotState();
+            if (before.user != r.user) throw new InvalidOperationException("接触复核User与实际反馈不同，不自动切换坐标系");
+            var wrench = await ReadGlobalToolWrenchAsync(r.tool, false);
+            var state = CopyRobotState();
+            if (state.user != r.user) throw new InvalidOperationException("接触复核期间User已改变");
+            state.values = wrench; state.result = "contact_probe";
+            return state; // No acquire, Tool/User change, Stop, enable or zeroing.
+        }
         // Diagnostic probes never acquire a motion lease, change frames or send motion commands.
         if (r.op == "latency_echo" || r.op == "latency_query")
         {
@@ -214,11 +235,12 @@ public partial class DobotController
                 {
                     case "pose": command = $"GetPose(user={r.user},tool={r.tool})"; break;
                     case "angle": command = "GetAngle()"; break;
-                    case "force": command = $"GetForce({r.tool})"; break;
+                    case "force": command = null; break;
                     default: throw new ArgumentException("延迟测试仅允许pose/angle/force只读查询");
                 }
                 var timing = new DashboardTiming();
-                result.values = ParseValues(await ExchangeDashboardAsync(command, false, 0, timing));
+                result.values = r.query == "force" ? await ReadGlobalToolWrenchAsync(r.tool, false, timing) :
+                    ParseValues(await ExchangeDashboardAsync(command, false, 0, timing));
                 result.dashboard_exchange_ms = timing.exchangeMs;
                 result.dashboard_gate_ms = timing.gateWaitMs;
                 result.dashboard_transport_ms = timing.transportMs;
@@ -272,7 +294,7 @@ public partial class DobotController
                 await AbortOwnerAsync();
                 throw;
             }
-            return new RobotReply { token = ownerToken, simulated = ownerSimulation, result = "acquired" };
+            return new RobotReply { token = ownerToken, simulated = ownerSimulation, result = "acquired", contact_profile = "contact-compliant-v2-20261029" };
         }
         if (r.op == "status") return CopyRobotState();
         if (client != ownerClient || r.token != ownerToken || ownerToken == null) throw new Exception("无当前阶段运动权限");
@@ -289,15 +311,26 @@ public partial class DobotController
         if (r.op == "end_stage") { await EndDiagnosticStageAsync(); return new RobotReply { result = "measurement_ended" }; }
         if (r.op == "finish_stage")
         {
-            if (!ownerSimulation && !OriginalContactTimingActive) throw new Exception("未启用原算法节奏测试模式");
             await StopOwnedRobotAsync();
             return new RobotReply { result = "stage_stopped", simulated = ownerSimulation };
         }
         if (r.op == "pose") return new RobotReply { values = await ReadPoseAsync(), simulated = ownerSimulation };
+        if (r.op == "relative_target")
+        {
+            if (r.delta == null || r.delta.Length != 3 || Array.Exists(r.delta, x => !Finite(x)) ||
+                Math.Sqrt(r.delta[0]*r.delta[0] + r.delta[1]*r.delta[1] + r.delta[2]*r.delta[2]) > maxRelativeStepMm)
+                throw new ArgumentException("工具系目标计算要求有限三维小位移");
+            if (!ownerSimulation) RequireRobotReady(true);
+            var origin = await ReadPoseAsync();
+            var target = (double[])origin.Clone();
+            if (ownerSimulation) for (int i = 0; i < 3; i++) target[i] += r.delta[i];
+            else target = ParseValues(await ExchangeDashboardAsync("RelPointTool(pose={" + Numbers(origin) + "},{" + Numbers(r.delta) + ",0,0,0})", true));
+            return new RobotReply { values = target, simulated = ownerSimulation };
+        }
         if (r.op == "wrench")
         {
             if (r.tool != contactTool) throw new Exception("算法工具编号与Unity contactTool不一致");
-            return new RobotReply { values = ownerSimulation ? new double[6] : ParseValues(await ExchangeDashboardAsync($"GetForce({contactTool})", true)), simulated = ownerSimulation };
+            return new RobotReply { values = ownerSimulation ? new double[6] : await ReadGlobalToolWrenchAsync(contactTool, true), simulated = ownerSimulation };
         }
         if (r.op == "move_relative") return await MoveRelativeAsync(r);
         throw new Exception("不支持的操作: " + r.op);
@@ -335,9 +368,24 @@ public partial class DobotController
     {
         return ownerSimulation ? (double[])simulatedPose.Clone() : ParseValues(await ExchangeDashboardAsync($"GetPose(user={contactUser},tool={contactTool})", true));
     }
+    private async Task<double[]> ReadGlobalToolWrenchAsync(int tool, bool owned, DashboardTiming timing = null)
+    {
+        if (tool < 0 || tool > 50) throw new ArgumentException("Tool编号必须为0~50");
+        void CheckFrame()
+        {
+            RequireRobotReady(owned);
+            RequireContactSensor();
+            if (CopyRobotState().tool != tool)
+                throw new InvalidOperationException("GetForce()使用全局工具系：实际Tool与请求不同，不自动切Tool或替代零力");
+        }
+        CheckFrame();
+        var values = ParseValues(await ExchangeDashboardAsync("GetForce()", owned, 0, timing));
+        CheckFrame(); // Discard the sample if tool/frame/feedback changed during IO.
+        return values;
+    }
     private async Task<RobotReply> MoveRelativeAsync(RobotRequest r)
     {
-        if (r.original_timing && !ownerSimulation && !OriginalContactTimingActive)
+        if (r.original_timing && !ownerSimulation && !OriginalContactTimingActive && !VendorContactTimingActive)
             throw new Exception("Unity未授权原算法节奏测试模式");
         if (motionBusy) throw new Exception("已有运动执行中");
         if (r.delta == null || r.delta.Length != 3 || !Finite(r.duration) || r.duration < 0.05 || r.duration > 5)
@@ -364,6 +412,18 @@ public partial class DobotController
             else
             {
                 target = ParseValues(await ExchangeDashboardAsync("RelPointTool(pose={" + Numbers(start) + "},{" + Numbers(r.delta) + ",0,0,0})", true));
+            }
+            if (r.expected_target != null)
+            {
+                if (r.expected_target.Length != 6 || Array.Exists(r.expected_target, x => !Finite(x)))
+                    throw new ArgumentException("预计算目标必须为有限六维数值");
+                for (int i = 0; i < 6; i++)
+                    if (Math.Abs(target[i] - r.expected_target[i]) > 0.01)
+                        throw new InvalidOperationException("预计算后实际位姿发生变化，拒绝使用漂移目标");
+                target = (double[])r.expected_target.Clone();
+            }
+            if (!ownerSimulation)
+            {
                 if (stopLatched || epoch != commandEpoch) throw new Exception("运动已取消");
                 string command = "ServoP(" + Numbers(target) + ",t=" + Number(r.duration) + ",aheadtime=50.0,gain=500.0)";
                 string reply = await ExchangeDashboardAsync(command, true);
@@ -382,8 +442,8 @@ public partial class DobotController
                     RequireRobotReady(true);
                     if (r.enforce_lateral)
                     {
-                        // 反馈表没有承诺ActualTCPForce与指定Tool的YZ轴等价，方向阈值使用显式工具系。
-                        var f = ParseValues(await ExchangeDashboardAsync($"GetForce({contactTool})", true));
+                        // V2 global-tool force requires fresh matching Tool before AND after IO.
+                        var f = await ReadGlobalToolWrenchAsync(contactTool, true);
                         double lateral = Math.Sqrt(f[1]*f[1]+f[2]*f[2]) + 0.25*Math.Sqrt(f[3]*f[3]+f[5]*f[5]);
                         if (lateral >= lateralTriggerN) throw new Exception("轴向运动横向负载超限");
                     }
@@ -464,10 +524,10 @@ public partial class DobotController
         int traceId = Interlocked.Increment(ref stopDiagnosticId);
         var timer = System.Diagnostics.Stopwatch.StartNew();
         string before = StopDiagnostic(out _, -1, out _);
-        bool positionPolicy = OriginalContactTimingActive;
+        bool positionPolicy = OriginalContactTimingActive || (VendorContactTimingActive && ExternalControlActive);
         Debug.Log($"[StopTrace#{traceId}][FEEDBACK_BEGIN] {FeedbackDiagnosticCounters()}");
         Debug.Log($"[StopTrace#{traceId}][REQUEST] utc={DateTime.UtcNow:O} command=Stop() {before} policy=age<=0.25,abs(QDActual)<=0.01,mode=5,error=0,collision=0,3_new_samples; 软件阈值非API完成判据");
-        if (positionPolicy) Debug.Log($"[StopTrace#{traceId}][POLICY_OVERRIDE] original-timing试验：QDActual仅诊断；新鲜空闲无报警+六轴位置跨度<=0.001deg持续0.5s且至少3个新样本。非硬件安全停止证明");
+        if (positionPolicy) Debug.Log($"[StopTrace#{traceId}][POLICY_OVERRIDE] 接触原算法节奏：QDActual仅诊断；新鲜空闲无报警+六轴位置跨度<=0.001deg持续0.5s且至少3个新样本。非硬件安全停止证明");
         try
         {
             string reply = await ExchangeDashboardAsync("Stop()", true, traceId);
@@ -639,13 +699,15 @@ public partial class DobotController
         await dashboardGate.WaitAsync();
         double gateMs = queued.Elapsed.TotalMilliseconds;
         if (timing != null) timing.gateWaitMs = gateMs;
+        var record = RunDataCapture.Command("robot",RunDataCapture.Endpoint(tcpClient,"not_connected"),
+            dashboardConnectionGeneration,command,"joint:deg; pose:mm,deg; speed:% unless explicit ServoP parameters; User/Tool as command/feedback",ensureManual:command!="Stop()");
         try
         {
             if (external && command != "Stop()" && (stopLatched || epoch != commandEpoch)) throw new Exception("当前阶段已停止");
             if (!external && (ExternalControlActive || FieldWorkflowActive || epoch != commandEpoch) && command != "Stop()") throw new Exception("当前阶段不允许普通运动指令");
             if (networkStream == null || tcpClient == null || !tcpClient.Connected) throw new IOException("机械臂未连接");
             var stream = networkStream;
-            var operation = ExchangePacketAsync(stream, command, timing);
+            var operation = ExchangePacketAsync(stream, command, timing, record);
             if (await Task.WhenAny(operation, Task.Delay(3000)) != operation)
             {
                 stream.Close();
@@ -653,27 +715,35 @@ public partial class DobotController
                 throw new TimeoutException("Dashboard应答超时，连接已关闭");
             }
             string reply = await operation;
+            record?.Reply(reply);
             var parsed = Regex.Match(reply, @"^\s*(-?\d+)\s*,\s*\{[^}]*\}\s*,\s*(.*?)\s*;\s*$", RegexOptions.Singleline);
             if (!parsed.Success) throw new IOException("Dashboard应答格式错误: " + reply);
             if (!string.Equals(Regex.Replace(parsed.Groups[2].Value, @"\s+", ""), Regex.Replace(command, @"\s+", ""), StringComparison.OrdinalIgnoreCase))
             { stream.Close(); throw new IOException("Dashboard应答与请求不匹配，连接已关闭: " + reply); }
             if (parsed.Groups[1].Value != "0") throw new IOException("机械臂拒绝命令: " + reply);
+            var nativeId = Regex.Match(reply,@"^\s*0\s*,\s*\{\s*(\d+)\s*\}");
+            bool queuedCommand = command.StartsWith("Mov",StringComparison.OrdinalIgnoreCase) ||
+                command.StartsWith("Servo",StringComparison.OrdinalIgnoreCase) || command.StartsWith("User(",StringComparison.OrdinalIgnoreCase) || command.StartsWith("Tool(",StringComparison.OrdinalIgnoreCase);
+            record?.Accepted(queuedCommand && nativeId.Success ? nativeId.Groups[1].Value : null);
             if (timing != null) timing.exchangeMs = queued.Elapsed.TotalMilliseconds;
             return reply;
         }
+        catch (Exception e) { record?.Failed(e); throw; }
         finally
         {
+            record?.Dispose();
             dashboardGate.Release();
             if (timing != null && stopTraceId != 0)
                 Debug.Log($"[StopTrace#{stopTraceId}][TRANSPORT] gate_wait_ms={Number(gateMs)} write_begin_utc={timing.writeBegin} write_complete_utc={timing.writeEnd} reply_complete_utc={timing.replyEnd} dispatch_utc={DateTime.UtcNow:O}");
         }
     }
-    private static async Task<string> ExchangePacketAsync(NetworkStream stream, string command, DashboardTiming timing = null)
+    private static async Task<string> ExchangePacketAsync(NetworkStream stream, string command, DashboardTiming timing = null, RunDataSession.Command record = null)
     {
         var transport = timing == null ? null : System.Diagnostics.Stopwatch.StartNew();
         byte[] bytes = Encoding.UTF8.GetBytes(command + "\n");
         if (timing != null) timing.writeBegin = DateTime.UtcNow.ToString("O");
         await stream.WriteAsync(bytes, 0, bytes.Length).ConfigureAwait(false);
+        record?.Written();
         if (timing != null) timing.writeEnd = DateTime.UtcNow.ToString("O");
         var reply = new StringBuilder();
         byte[] one = new byte[1];

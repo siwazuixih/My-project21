@@ -1,8 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../Assets/RunDataSession.cs" />
+    <Compile Include="../../Assets/DeviceTcpConnection.cs" />
     <Compile Include="../../Assets/RobokitController.cs" Link="Controller.cs" />
     <Compile Include="../../Assets/RobokitController.ConfirmedMotion.cs" Link="Confirmed.cs" />
+    <Compile Include="../../Assets/RobokitController.ManualJog.cs" />
+    <Compile Include="../../Assets/ChassisJogCommand.cs" />
     <Compile Include="../../Assets/RobokitProtocol.cs" Link="Protocol.cs" />
   </ItemGroup>
 </Project>

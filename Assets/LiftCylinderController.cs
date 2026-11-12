@@ -4,6 +4,8 @@ using System.Net.Sockets;
 using Modbus.Device;
 using Modbus.Message;
 using TMPro;
+using System.Threading;
+using System.Threading.Tasks;
 
 public class LiftCylinderController : MonoBehaviour
 {
@@ -11,6 +13,8 @@ public class LiftCylinderController : MonoBehaviour
     public string ipAddress = "192.168.192.88";
     public int port = 502;
     public byte slaveId = 1; 
+    [SerializeField] private float connectionTimeoutSeconds = 3f;
+    [SerializeField] private int ioTimeoutMilliseconds = 1000;
 
     [Header("仿真与真机单位转换")]
     public float simToRealScale = 1000f; // 1米 = 1000毫米
@@ -35,6 +39,16 @@ public class LiftCylinderController : MonoBehaviour
     private ModbusIpMaster modbusMaster; 
     private Coroutine monitorCoroutine;
     private int motionEpoch;
+    private CancellationTokenSource connectionCancellation;
+    private Task connectionTask;
+    private bool connecting;
+    public bool ViewConnecting => connecting;
+    public bool ViewHasConnection => DeviceTcpConnection.IsOpen(tcpClient);
+    public bool ViewEndpointsAligned => DeviceTcpConnection.AbsentOrMatches(tcpClient, ipAddress, port);
+    public string ViewConnectionDescription => "Modbus " + DeviceTcpConnection.Describe(tcpClient) + "；" +
+        (HasFreshFeedback(1f) ? "高度反馈正常" : "尚无新鲜高度反馈") + (ViewEndpointsAligned ? "" : "；实际连接与当前配置不一致");
+    private long connectionGeneration, dataSequence;
+    private long positionObserved = -1, velocityObserved = -1, torqueObserved = -1;
     public int StopVersion { get; private set; }
 
     private void Awake()
@@ -42,20 +56,53 @@ public class LiftCylinderController : MonoBehaviour
         RefreshDisconnectedUI();
     }
 
-    public void Connect()
+    public async void Connect()
     {
+        try { await ConnectAsync(); }
+        catch (Exception e) { Debug.LogWarning("升降缸连接未完成: " + e.Message); }
+    }
+
+    public Task ConnectAsync()
+    {
+        if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked) return Task.CompletedTask;
+        if (connecting) return connectionTask ?? Task.CompletedTask;
+        if (FieldConnectedTo(ipAddress, port)) return Task.CompletedTask;
+        connectionTask = ConnectCoreAsync();
+        return connectionTask;
+    }
+
+    private async Task ConnectCoreAsync()
+    {
+        connecting = true;
+        CloseLiftConnection(); // Invalidate pending motion before replacing the master.
+        var lifetime = new CancellationTokenSource();
+        connectionCancellation = lifetime;
         OperationLogTool.RecordLog(OperationType.真实运行, $"请求连接升降缸（IP：{ipAddress}）");
-        if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked) return;
         try {
-            tcpClient = new TcpClient();
-            tcpClient.Connect(ipAddress, port); 
+            Debug.Log($"升降缸正在连接（超时{connectionTimeoutSeconds}秒）");
+            var opened = await DeviceTcpConnection.OpenAsync(ipAddress, port, connectionTimeoutSeconds, lifetime.Token);
+            if (lifetime.IsCancellationRequested) { opened.Close(); lifetime.Token.ThrowIfCancellationRequested(); }
+            tcpClient = opened;
+            connectionGeneration++;
+            int timeout = Math.Max(100, ioTimeoutMilliseconds);
+            tcpClient.ReceiveTimeout = timeout; tcpClient.SendTimeout = timeout;
             modbusMaster = ModbusIpMaster.CreateIp(tcpClient); 
+            modbusMaster.Transport.ReadTimeout = timeout;
+            modbusMaster.Transport.WriteTimeout = timeout;
+            modbusMaster.Transport.Retries = 0; // Never silently retry a motion write.
             Debug.Log("<color=green>[升降缸] NModbus4 TCP 连接成功！</color>");
             RefreshUI();
             StartMonitor();
-        } catch (Exception e) {
+        } catch (OperationCanceledException) { Debug.Log("升降缸连接已取消"); }
+        catch (Exception e) {
+            CloseLiftConnection();
             RefreshDisconnectedUI();
             Debug.LogError($"[升降缸] 连接失败: {e.Message}");
+        }
+        finally
+        {
+            if (ReferenceEquals(connectionCancellation, lifetime)) connectionCancellation = null;
+            lifetime.Dispose(); connecting = false;
         }
     }
 
@@ -64,11 +111,9 @@ public class LiftCylinderController : MonoBehaviour
         OperationLogTool.RecordLog(OperationType.真实运行, "请求断开升降缸");
         if (FieldCommissioningPanel.Active != null && FieldCommissioningPanel.Active.MotionLocked)
         { FieldCommissioningPanel.Active.RequestStop(); return; }
-        motionEpoch++;
-        StopMonitor();
-        tcpClient?.Close();
-        modbusMaster?.Dispose();
+        CloseLiftConnection();
         RefreshDisconnectedUI();
+        RunDataCapture.EndManualSession?.Invoke();
         Debug.Log("<color=yellow>[升降缸] 连接已断开。</color>");
     }
 
@@ -77,8 +122,7 @@ public class LiftCylinderController : MonoBehaviour
     {
         try
         {
-            var endpoint = tcpClient?.Client.RemoteEndPoint as System.Net.IPEndPoint;
-            return IsConnected() && endpoint != null && endpoint.Address.Equals(System.Net.IPAddress.Parse(ip)) && endpoint.Port == targetPort;
+            return IsConnected() && DeviceTcpConnection.Matches(tcpClient, ip, targetPort);
         }
         catch { return false; }
     }
@@ -90,7 +134,7 @@ public class LiftCylinderController : MonoBehaviour
     {
         if (!IsConnected()) return;
         // 控制命令属于 INTEGER 类型，使用 WriteSingleRegister 发送标准功能码 0x06
-        modbusMaster.WriteSingleRegister(slaveId, 100, 1); 
+        WriteRegisterLogged(100, new ushort[] {1}, true);
         Debug.Log("[升降缸] 已下发使能指令");
     }
 
@@ -103,7 +147,7 @@ public class LiftCylinderController : MonoBehaviour
         motionEpoch++;
         if (!IsConnected()) return;
         // 使用 WriteSingleRegister 发送标准功能码 0x06
-        modbusMaster.WriteSingleRegister(slaveId, 105, 1);
+        WriteRegisterLogged(105, new ushort[] {1}, true);
         Debug.Log("[升降缸] 已下发急停指令");
     }
 
@@ -128,7 +172,7 @@ public class LiftCylinderController : MonoBehaviour
 
         // 第一步：确保电缸处于使能状态 (向 101 写入 1)
         // modbusMaster.WriteSingleRegister(slaveId, 101, 1);
-        modbusMaster.WriteMultipleRegisters(slaveId, 100, new ushort[] { 1 });
+        WriteRegisterLogged(100, new ushort[] {1}, false);
             
         // 等待 200 毫秒，给物理电机上电锁死的时间
         await System.Threading.Tasks.Task.Delay(200); 
@@ -139,10 +183,10 @@ public class LiftCylinderController : MonoBehaviour
         float targetRealPos = simHeightMeters * simToRealScale;
 
         // 2. 写入速度 (2001) -> SINGLE 类型，使用 CDAB 转换
-        modbusMaster.WriteMultipleRegisters(slaveId, 2001, FloatToCDABRegisters(velocity));
+        WriteRegisterLogged(2001, FloatToCDABRegisters(velocity), false);
 
         // 3. 写入目标位置 (2025) -> SINGLE 类型，使用 CDAB 转换
-        modbusMaster.WriteMultipleRegisters(slaveId, 2025, FloatToCDABRegisters(targetRealPos));
+        WriteRegisterLogged(2025, FloatToCDABRegisters(targetRealPos), false);
 
         // yield return new WaitForSeconds(0.5f); // 确保前面两个寄存器写入完成
         
@@ -151,23 +195,23 @@ public class LiftCylinderController : MonoBehaviour
         await System.Threading.Tasks.Task.Delay(100);
         if (epoch != motionEpoch || !IsConnected()) return;
 
-        modbusMaster.WriteSingleRegister(slaveId, 103, 0); // 先写入 0，确保每次都是从非触发状态开始
+        WriteRegisterLogged(103, new ushort[] {0}, true); // 先写入 0，确保每次都是从非触发状态开始
 
         await System.Threading.Tasks.Task.Delay(100);
         if (epoch != motionEpoch || !IsConnected()) return;
 
 
-        modbusMaster.WriteSingleRegister(slaveId, 103, 1); 
+        WriteRegisterLogged(103, new ushort[] {1}, true);
 
         await System.Threading.Tasks.Task.Delay(100);
         if (epoch != motionEpoch || !IsConnected()) return;
 
 
-        modbusMaster.WriteSingleRegister(slaveId, 103, 0); // 写回 0，完成触发
+        WriteRegisterLogged(103, new ushort[] {0}, true); // 写回 0，完成触发
         
         Debug.Log($"<color=cyan>[升降缸] 移动 -> 目标位置(Float): {targetRealPos} mm, 速度(Float): {velocity:F1}</color>");
         }
-        catch (Exception e) { motionEpoch++; Debug.LogError("[升降缸] 移动序列失败：" + e.Message); }
+        catch (Exception e) { HandleLiftIoFailure(e); Debug.LogError("[升降缸] 移动序列失败：" + e.Message); }
     }
 
     /// <summary>
@@ -183,8 +227,10 @@ public class LiftCylinderController : MonoBehaviour
             float heightMm = CDABRegistersToFloat(vals);
             UpdatePositionState(heightMm);
             lastFeedbackTime = Time.realtimeSinceStartup;
+            positionObserved = System.Diagnostics.Stopwatch.GetTimestamp(); dataSequence++;
             return heightMm;
-        } catch { 
+        } catch (Exception e) {
+            HandleLiftIoFailure(e);
             return 0f; 
         }
     }
@@ -202,8 +248,10 @@ public class LiftCylinderController : MonoBehaviour
             ushort[] vals = modbusMaster.ReadHoldingRegisters(slaveId, 2017, 2);
             currentVelocityMmPerSec = CDABRegistersToFloat(vals);
             estimatedVelocityMmPerSec = currentVelocityMmPerSec;
+            velocityObserved = System.Diagnostics.Stopwatch.GetTimestamp(); dataSequence++;
             return currentVelocityMmPerSec;
-        } catch {
+        } catch (Exception e) {
+            HandleLiftIoFailure(e);
             return 0f;
         }
     }
@@ -214,8 +262,10 @@ public class LiftCylinderController : MonoBehaviour
         try {
             ushort[] vals = modbusMaster.ReadHoldingRegisters(slaveId, 2021, 2);
             actualTorque = CDABRegistersToFloat(vals);
+            torqueObserved = System.Diagnostics.Stopwatch.GetTimestamp(); dataSequence++;
             return actualTorque;
-        } catch {
+        } catch (Exception e) {
+            HandleLiftIoFailure(e);
             return 0f;
         }
     }
@@ -260,10 +310,10 @@ public class LiftCylinderController : MonoBehaviour
             // 先复位为 0，确保等下能产生上升沿
             // modbusMaster.WriteSingleRegister(slaveId, 104, 0); 
             // await System.Threading.Tasks.Task.Delay(50);
-            modbusMaster.WriteMultipleRegisters(slaveId, 103, new ushort[] { 0 }); 
+            WriteRegisterLogged(103, new ushort[] {0}, false);
             await System.Threading.Tasks.Task.Delay(50);
             if (epoch != motionEpoch || !IsConnected()) return;
-            modbusMaster.WriteMultipleRegisters(slaveId, 103, new ushort[] { 1 });
+            WriteRegisterLogged(103, new ushort[] {1}, false);
             } catch (Exception e) { Debug.LogError("[升降缸] 启动失败：" + e.Message); }
     }
 
@@ -271,6 +321,7 @@ public class LiftCylinderController : MonoBehaviour
     {
         if (!autoMonitor || monitorCoroutine != null) return;
         monitorCoroutine = StartCoroutine(MonitorRoutine());
+        if (!IsConnected()) StopMonitor(); // The first synchronous read may fail before StartCoroutine returns.
     }
 
     private void StopMonitor()
@@ -287,6 +338,7 @@ public class LiftCylinderController : MonoBehaviour
             ReadCurrentPosition();
             ReadCurrentVelocity();
             ReadActualTorque();
+            if (!IsConnected()) break; // Do not overwrite the failure UI with cached measurements.
             RefreshUI();
             yield return wait;
         }
@@ -322,7 +374,52 @@ public class LiftCylinderController : MonoBehaviour
 
     void OnDestroy()
     {
-        motionEpoch++;
+        CloseLiftConnection();
+        RunDataCapture.EndManualSession?.Invoke();
+    }
+
+    private void WriteRegisterLogged(ushort address, ushort[] values, bool single)
+    {
+        string decoded = values.Length == 2 ? "; float_CDAB=" + CDABRegistersToFloat(values).ToString("R",System.Globalization.CultureInfo.InvariantCulture) : "";
+        string payload = "FC=" + (single ? "0x06" : "0x10") + "; slave=" + slaveId + "; address=" + address +
+            "; registers=[" + string.Join(",",values) + "]" + decoded;
+        using (var record = RunDataCapture.Command("lift",RunDataCapture.Endpoint(tcpClient,ipAddress + ":" + port),connectionGeneration,
+            payload,"2025:height_mm; 2001:velocity_mm/s; 100:enable; 103:trigger; 105:stop",ensureManual:address!=105))
+        {
+            try
+            {
+                if (single) modbusMaster.WriteSingleRegister(slaveId,address,values[0]);
+                else modbusMaster.WriteMultipleRegisters(slaveId,address,values);
+                // NModbus returns only after checking its response; no raw response bytes are exposed here.
+                record?.Emit("library_call_returned","Synchronous NModbus response completed; exact OS write time unavailable");
+                record?.Reply("NModbus call returned; response validated by library, raw bytes unavailable"); record?.Accepted();
+            }
+            catch (Exception e) { record?.Failed(e); throw; }
+        }
+    }
+    private static double DataAge(long tick) => tick < 0 ? double.NaN :
+        (System.Diagnostics.Stopwatch.GetTimestamp()-tick)/(double)System.Diagnostics.Stopwatch.Frequency;
+    private void Update()
+    {
+        RunDataCapture.CheckSaveError();
+        RunDataCapture.Current?.Lift(RunDataCapture.Endpoint(tcpClient,ipAddress + ":" + port),connectionGeneration,dataSequence,
+            currentHeightMm,currentVelocityMmPerSec,actualTorque,DataAge(positionObserved),DataAge(velocityObserved),DataAge(torqueObserved),IsConnected());
+    }
+
+    private void HandleLiftIoFailure(Exception error)
+    {
+        CloseLiftConnection(); RefreshDisconnectedUI();
+        Debug.LogWarning("[升降缸] 通信失败，连接已释放，请检查后重连（不会自动续跑）: " + error.Message);
+    }
+
+    private void CloseLiftConnection()
+    {
+        connectionCancellation?.Cancel();
+        motionEpoch++; lastFeedbackTime = -1f;
+        positionObserved = velocityObserved = torqueObserved = -1;
         StopMonitor();
+        var client = tcpClient; var master = modbusMaster;
+        tcpClient = null; modbusMaster = null;
+        try { master?.Dispose(); } finally { client?.Close(); }
     }
 }

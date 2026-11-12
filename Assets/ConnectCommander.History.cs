@@ -10,6 +10,7 @@ public partial class ConnectCommander
         if (!RunRecorder.IsCurrent(legacyHistoryId))
             legacyHistoryId = RunHistoryCapture.Begin(RunType.REALTIME, "原通讯下发", false, GetTargetOrder().Count, true);
         string id = legacyHistoryId;
+        RunDataCapture.Context(id,task.targetIndex + 1,task.taskName);
         if (RunRecorder.IsCurrent(id)) RunRecorder.RecordStep(task.taskName, "请求下发", id);
         bool ended = false;
         try

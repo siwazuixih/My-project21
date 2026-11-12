@@ -4,6 +4,7 @@ using System.Text;
 using UnityEngine;
 using TMPro; // 如果你在 UI 中使用了 TextMeshPro 的 InputField
 using System.Threading.Tasks; // 用于异步任务   
+using System.Threading;
 
 public partial class DobotController : MonoBehaviour
 {
@@ -16,12 +17,25 @@ public partial class DobotController : MonoBehaviour
     public string robotIP = "127.0.0.1"; // 默认指向本机，配合虚拟服务端测试
     public int dashboardPort = 29999;
     public int feedbackPort = 30005;
+    [SerializeField] private float connectionTimeoutSeconds = 3f;
     [Header("开发调试（实物部署保持关闭）")]
     [SerializeField] private bool enableDebugKeyboardShortcuts = false;
     [SerializeField] private bool enableLoopbackSimulatorCommands = false;
     private bool controlModeConfirmed, connecting;
+    public bool ViewConnecting => connecting;
+    public bool ViewHasConnection => DeviceTcpConnection.IsOpen(tcpClient) || DeviceTcpConnection.IsOpen(feedbackClient);
+    public bool ViewEndpointsAligned => DeviceTcpConnection.AbsentOrMatches(tcpClient, robotIP, dashboardPort) &&
+        DeviceTcpConnection.AbsentOrMatches(feedbackClient, robotIP, feedbackPort);
+    public bool ViewControlReady => controlModeConfirmed && DeviceTcpConnection.Matches(tcpClient, robotIP, dashboardPort);
+    public string ViewConnectionDescription => "控制 " + DeviceTcpConnection.Describe(tcpClient) +
+        "；反馈 " + DeviceTcpConnection.Describe(feedbackClient) + "；" +
+        (HasFreshFeedback(1f) ? "有效反馈正常" : "尚无新鲜有效反馈") + "；模式：" + currentRobotModeText +
+        (ViewEndpointsAligned ? "" : "；实际连接与当前配置不一致");
+    private CancellationTokenSource connectionCancellation;
+    private Task connectionTask;
     private long displayedFeedbackSequence;
     private string feedbackFailure;
+    private bool publishedFeedbackHealthy, publishedDashboardHealthy;
     private double feedbackClockOffset = double.PositiveInfinity;
 
     private TcpClient tcpClient;
@@ -41,7 +55,7 @@ public partial class DobotController : MonoBehaviour
     public TextMeshProUGUI velocityRatioTextDisplay;
     public TextMeshProUGUI[] actualJointTextDisplays;
 
-    [Header("机械臂实时状态 (30005反馈)")]
+    [Header("机械臂实时状态（端口按连接配置）")]
     public int currentRobotMode = 0;
     public string currentRobotModeText = "未知";
     public double speedScaling = 0;
@@ -96,29 +110,52 @@ public partial class DobotController : MonoBehaviour
 
     public async void Connect()
     {
-        if (ExternalControlActive || FieldWorkflowActive) { Debug.LogWarning("流程正在执行，不能重新连接机械臂。"); return; }
-        if (connecting || (tcpClient != null && tcpClient.Connected && controlModeConfirmed)) return;
+        try { await ConnectAsync(); }
+        catch (Exception e) { Debug.LogWarning("机械臂连接未完成: " + e.Message); }
+    }
+
+    public Task ConnectAsync()
+    {
+        if (ExternalControlActive || FieldWorkflowActive) { Debug.LogWarning("流程正在执行，不能重新连接机械臂。"); return Task.CompletedTask; }
+        if (connecting) return connectionTask ?? Task.CompletedTask;
+        connectionTask = ConnectCoreAsync();
+        return connectionTask;
+    }
+
+    private async Task ConnectCoreAsync()
+    {
         connecting = true;
-        controlModeConfirmed = false;
+        var lifetime = new CancellationTokenSource();
+        connectionCancellation = lifetime;
+        CancellationToken cancel = lifetime.Token;
         try
         {
-            tcpClient?.Close();
-            OperationLogTool.RecordLog(OperationType.真实运行, $"请求连接机器人（IP：{robotIP}，端口：{dashboardPort}）");
-            tcpClient = new TcpClient(robotIP, dashboardPort);
-            networkStream = tcpClient.GetStream();
-            Debug.Log("<color=green>TCP 连接成功！</color>");
-
-            // 🌟 新增：连接成功后，启动独立的异步监听任务！
-            // 所有请求共用一个串行请求/应答通道，不能另起读取循环抢走应答。
-
-            await ExchangeDashboardAsync("RequestControl()", false);
-            controlModeConfirmed = true;
-            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(
-                true, $"TCP控制模式已确认 {robotIP}:{dashboardPort}", "Dashboard"));
-            ConnectFeedback();
+            string host = robotIP;
+            int dashboard = dashboardPort, feedback = feedbackPort;
+            if (!controlModeConfirmed || networkStream == null || !networkStream.CanRead || !networkStream.CanWrite ||
+                !DeviceTcpConnection.Matches(tcpClient, host, dashboard))
+            {
+                CloseRobotConnections(false);
+                OperationLogTool.RecordLog(OperationType.真实运行, $"请求连接机器人（IP：{host}，端口：{dashboard}）");
+                Debug.Log($"机械臂正在连接 {host}:{dashboard}（超时{connectionTimeoutSeconds}秒，界面可继续操作）");
+                var opened = await DeviceTcpConnection.OpenAsync(host, dashboard, connectionTimeoutSeconds, cancel);
+                if (cancel.IsCancellationRequested) { opened.Close(); cancel.ThrowIfCancellationRequested(); }
+                tcpClient = opened;
+                dashboardConnectionGeneration++;
+                networkStream = opened.GetStream();
+                await ExchangeDashboardAsync("RequestControl()", false);
+                cancel.ThrowIfCancellationRequested();
+                controlModeConfirmed = true;
+                OnDobotEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(
+                    true, $"TCP控制模式已确认 {host}:{dashboard}", "Dashboard"));
+            }
+            if (!DeviceTcpConnection.Matches(feedbackClient, host, feedback) || !HasFreshFeedback(1f))
+                await ConnectFeedbackAsync(host, feedback, cancel);
         }
+        catch (OperationCanceledException) { Debug.Log("机械臂连接已取消"); }
         catch (Exception e)
         {
+            CloseRobotConnections(false);
             Debug.LogError("<color=red>TCP 连接失败: </color>" + e.Message);
 
             // 触发连接失败事件
@@ -127,11 +164,12 @@ public partial class DobotController : MonoBehaviour
 
             // 触发错误事件
             OnDobotEvent?.Invoke(this, DobotEventArgs.CreateErrorEvent(e.Message, "Connect"));
-            tcpClient?.Close();
-            controlModeConfirmed = false;
-            CloseFeedbackConnection();
         }
-        finally { connecting = false; }
+        finally
+        {
+            if (ReferenceEquals(connectionCancellation, lifetime)) connectionCancellation = null;
+            lifetime.Dispose(); connecting = false;
+        }
     }
     public void PowerOn()
     {
@@ -157,27 +195,13 @@ public partial class DobotController : MonoBehaviour
         {
             // 1. 先关闭数据流
             OperationLogTool.RecordLog(OperationType.真实运行, "请求断开机器人");
-            if (networkStream != null)
-            {
-                networkStream.Close();
-                networkStream = null;
-            }
-
-            // 2. 再关闭 TCP 客户端
-            if (tcpClient != null)
-            {
-                tcpClient.Close();
-                tcpClient = null;
-            }
-
-            CloseFeedbackConnection();
-            controlModeConfirmed = false;
-            bool isConnected = false;
-            Debug.Log("<color=yellow>TCP 连接已安全断开。</color>");
+            CloseRobotConnections();
+            RunDataCapture.EndManualSession?.Invoke();
+            Debug.Log("<color=yellow>机械臂控制口与反馈口均已断开（断线本身不是停稳证明）。</color>");
 
             // 触发断开连接事件
             OnDobotEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(
-                false, "连接已安全断开", "Dashboard"));
+                false, "控制口与反馈口已断开（不等于停稳确认）", "Dashboard"));
         }
         catch (System.Exception e)
         {
@@ -278,32 +302,45 @@ public partial class DobotController : MonoBehaviour
     private void OnApplicationQuit()
     {
         ShutdownRobotGateway();
-        // 确保退出 Unity 时释放端口
-        if (networkStream != null) networkStream.Close();
-        if (tcpClient != null) tcpClient.Close();
-        CloseFeedbackConnection();
+        CloseRobotConnections();
     }
 
+    private void OnDestroy() { CloseRobotConnections(); RunDataCapture.EndManualSession?.Invoke(); }
 
-    private void ConnectFeedback()
+    private void CloseRobotConnections(bool cancelConnecting = true)
+    {
+        if (cancelConnecting) connectionCancellation?.Cancel();
+        commandEpoch++;
+        controlModeConfirmed = false;
+        var stream = networkStream; var client = tcpClient;
+        networkStream = null; tcpClient = null;
+        try { stream?.Close(); }
+        finally { try { client?.Close(); } finally { CloseFeedbackConnection(); } }
+    }
+
+    private async Task ConnectFeedbackAsync(string host, int port, CancellationToken cancel)
     {
         try
         {
             CloseFeedbackConnection();
-            feedbackClient = new TcpClient(robotIP, feedbackPort);
+            var opened = await DeviceTcpConnection.OpenAsync(host, port, connectionTimeoutSeconds, cancel);
+            if (cancel.IsCancellationRequested) { opened.Close(); cancel.ThrowIfCancellationRequested(); }
+            feedbackClient = opened;
             feedbackStream = feedbackClient.GetStream();
             lock (feedbackLock)
-            { feedbackGeneration++; feedbackEndpoint = feedbackClient.Client.RemoteEndPoint.ToString(); feedbackReadError = "none"; }
+            { feedbackGeneration++; feedbackEndpoint = feedbackClient.Client.RemoteEndPoint.ToString(); feedbackReadError = "none"; feedbackFailure = null; }
             feedbackLoopRunning = true;
             _ = FeedbackLoopAsync();
-            Debug.Log($"<color=green>机械臂反馈端口 {feedbackPort} 连接成功。</color>");
+            Debug.Log($"<color=green>机械臂反馈端口 {port} 连接成功，等待有效反馈。</color>");
 
             // 触发反馈连接成功事件
             OnDobotEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(
                 true, $"成功连接到反馈端口 {robotIP}:{feedbackPort}", "Feedback"));
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception e)
         {
+            CloseFeedbackConnection();
             Debug.LogError($"<color=red>机械臂反馈端口 {feedbackPort} 连接失败: </color>{e.Message}");
 
             // 触发反馈连接失败事件
@@ -378,10 +415,18 @@ public partial class DobotController : MonoBehaviour
 
     private void RefreshFeedbackUI()
     {
+        RunDataCapture.CheckSaveError();
         DobotEventArgs feedbackEvent = null;
         string failure;
         lock (feedbackLock)
         {
+            var data = RunDataCapture.Current;
+            if (data != null && !data.Simulated)
+            {
+                double age = lastFeedbackUnixSeconds > 0 ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()/1000.0 - lastFeedbackUnixSeconds : double.NaN;
+                data.Robot(feedbackEndpoint,feedbackGeneration,feedbackSequence,robotTimestamp,age,
+                    feedbackClient != null && age >= 0 && age <= .25,currentRobotMode,actualUser,actualTool,actualJoints,actualJointSpeeds,actualToolPose,currentCommandId);
+            }
             failure = feedbackFailure; feedbackFailure = null;
             if (displayedFeedbackSequence != feedbackSequence)
             {
@@ -391,7 +436,27 @@ public partial class DobotController : MonoBehaviour
             }
         }
         if (feedbackEvent != null) OnDobotEvent?.Invoke(this, feedbackEvent);
-        if (failure != null) Debug.LogWarning("机械臂反馈失败: " + failure);
+        if (failure != null)
+        {
+            CloseFeedbackConnection();
+            Debug.LogWarning("机械臂反馈失败: " + failure);
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(false, "反馈中断，请检查网络后重连", "Feedback"));
+        }
+        bool healthy = HasFreshFeedback(1f);
+        if (healthy != publishedFeedbackHealthy)
+        {
+            publishedFeedbackHealthy = healthy;
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(healthy,
+                healthy ? "有效反馈已就绪" : "反馈已过期，不能作为设备就绪依据", "Feedback"));
+        }
+        bool dashboardHealthy = controlModeConfirmed && tcpClient != null && tcpClient.Connected &&
+            networkStream != null && networkStream.CanRead && networkStream.CanWrite;
+        if (dashboardHealthy != publishedDashboardHealthy)
+        {
+            publishedDashboardHealthy = dashboardHealthy;
+            OnDobotEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(dashboardHealthy,
+                dashboardHealthy ? "控制通道已就绪" : "控制通道不可用，请检查后重连", "Dashboard"));
+        }
         int mode;
         string modeText;
         double scaling;
@@ -457,11 +522,10 @@ public partial class DobotController : MonoBehaviour
     private void CloseFeedbackConnection()
     {
         feedbackLoopRunning = false;
-        feedbackStream?.Close();
-        feedbackClient?.Close();
-        feedbackStream = null;
-        feedbackClient = null;
+        var stream = feedbackStream; var client = feedbackClient;
+        feedbackStream = null; feedbackClient = null;
         lock (feedbackLock)
         { lastFeedbackUnixSeconds = 0; robotTimestamp = 0; protocolFeedbackSequence = 0; feedbackClockOffset = double.PositiveInfinity; }
+        try { stream?.Close(); } finally { client?.Close(); }
     }
 }

@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../Assets/DeviceConnectionPanel.cs" />
+    <Compile Include="../../Assets/FieldCommissioningSettings.cs" />
+    <Compile Include="../../Assets/ChassisLegacyTiming.cs" />
+  </ItemGroup>
+</Project>

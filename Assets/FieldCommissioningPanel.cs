@@ -8,11 +8,12 @@ using UnityEngine;
 using Debug = UnityEngine.Debug;
 
 // 运行时入口，不依赖Editor/场景YAML；所有实物按钮与原离线入口明确分开。
-public sealed class FieldCommissioningPanel : MonoBehaviour
+public sealed partial class FieldCommissioningPanel : MonoBehaviour
 {
     public static FieldCommissioningPanel Active { get; private set; }
     public bool Busy { get; private set; }
-    public bool MotionLocked => Busy || (robot != null && robot.FieldWorkflowActive);
+    public bool MotionLocked => Busy || (robot != null && robot.FieldWorkflowActive) ||
+        (commander != null && commander.chassisTCP != null && commander.chassisTCP.ManualJogLocked);
     private Simulation simulation;
     private ConnectCommander commander;
     private DobotController robot;
@@ -20,7 +21,7 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
     private CancellationTokenSource cancellation;
     private Task stopTask;
     private int chassisStopVersion, liftStopVersion;
-    private bool visible, confirmed, connectionBusy;
+    private bool visible, confirmed, connectionBusy, contactReleasedConfirmed;
     private Vector2 scroll, panelScroll;
     private string monitorFailure;
     private string configText, message = "默认锁定真实运动。请先保存参数、环境检查，再连接和分阶段验证。";
@@ -63,11 +64,20 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
         commander = simulation.ConnectCommander;
         robot = commander != null ? commander.dobotTCP : simulation.Dobot;
         servo = FindObjectOfType<ServoTighteningController>();
-        configPath = Path.Combine(Application.persistentDataPath, "field-commissioning.json");
+        configPath = Path.Combine(Application.persistentDataPath, FieldCommissioningSettings.FileName);
         configText = JsonUtility.ToJson(new FieldCommissioningSettings(), true);
         try { if (File.Exists(configPath)) configText = File.ReadAllText(configPath); }
         catch (Exception e) { SetMessage("读取配置失败：" + e.Message); }
         Application.logMessageReceived += CaptureLog;
+        Application.wantsToQuit += AllowQuitAfterStop;
+    }
+
+    private bool AllowQuitAfterStop()
+    {
+        if (!MotionLocked) return true;
+        RequestStop();
+        Debug.LogWarning("实物流程尚未停止确认，已暂缓退出；请等待停止/解除流程锁后再次退出。必要时使用硬件急停。");
+        return false;
     }
     private void CaptureLog(string text, string stack, LogType type)
     {
@@ -79,12 +89,13 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
             sessionLog.Remove(0, sessionLog.Length - 2000000);
             logTruncated = true;
         }
-        if (text.Contains("StopTrace") || text.Contains("[实物联调]") || text.Contains("[MotionTrace]") || text.Contains("[ContactCycle]") || text.Contains("[半自动轨迹]") || text.Contains("[底盘") ||
+        if (text.Contains("StopTrace") || text.Contains("[实物联调]") || text.Contains("[MotionTrace]") || text.Contains("[ContactCycle]") || text.Contains("[ToolTrace]") || text.Contains("[半自动轨迹]") || text.Contains("[底盘") ||
             text.Contains("PRE_MOTION_STOP") || text.Contains("MOVJ_REQUEST") || text.Contains("END_STOP") ||
             type == LogType.Error || type == LogType.Exception || type == LogType.Warning)
             journal?.Append(line);
     }
-    private void SetMessage(string value) { message = value; Debug.Log("[实物联调] " + value); }
+    private void SetMessage(string value)
+    { message = value; RunDataCapture.Context(historyId,historyTargetNumber,value); Debug.Log("[实物联调] " + value); }
     private void Update()
     {
         if (Busy) robot?.SampleMotionDiagnostics();
@@ -107,9 +118,9 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
     }
     private FieldCommissioningSettings ReadSettings(bool motion)
     {
-        var settings = JsonUtility.FromJson<FieldCommissioningSettings>(configText);
+        var settings = FieldCommissioningSettings.Parse(configText);
         if (settings == null) throw new ArgumentException("配置为空");
-        settings.Validate(motion);
+        settings.Validate(motion, false);
         return settings;
     }
     private void OnGUI()
@@ -122,8 +133,9 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
             if (GUI.Button(new Rect(400, 150, 150, 32), "停止离线模拟")) commander.CancelFullProcessValidation();
             return; // 不把实物参数/安全许可面板混进离线演示。
         }
-        if (GUI.Button(new Rect(10, 115, 150, 32), "现场联调 / 参数")) visible = !visible;
-        if (SemiAutomaticActive || WaitingForChassisConfirmation) GUI.Box(new Rect(170, 115, Mathf.Max(200, Screen.width - 510), 32), message);
+        if (GUI.Button(new Rect(10, 115, 150, 32), "现场联调 / 参数")) { visible = !visible; if (visible) chassisJogVisible = false; }
+        DrawChassisJogEntry();
+        if (SemiAutomaticActive || WaitingForChassisConfirmation) GUI.Box(new Rect(330, 115, Mathf.Max(100, Screen.width - 670), 32), message);
         if (!visible) return;
         float width = Mathf.Min(780, Screen.width - 20), height = Mathf.Min(850, Screen.height - 160);
         GUILayout.BeginArea(new Rect(10, 150, width, height), GUI.skin.box);
@@ -150,6 +162,15 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
         }
         GUI.enabled = !MotionLocked && !connectionBusy;
         DrawChassisModeSelector();
+        DrawContactDirectionSelector();
+        if (servo != null && servo.ContactSessionBlocked)
+        {
+            GUILayout.Label("V2接触记录未解除：禁止重新开始实物流程。先人工解除接触，确认机械臂/电批已停止；不能靠重启或改行程续跑。", GUI.skin.box);
+            contactReleasedConfirmed = GUILayout.Toggle(contactReleasedConfirmed, "我已现场确认批头脱离工件、机械约束解除（软件读数正常不能代替此确认）");
+            GUI.enabled = !MotionLocked && !connectionBusy && contactReleasedConfirmed;
+            if (GUILayout.Button("已人工解除接触：检查停止/受力并清除接触记录（不运动、不清零）")) _ = RecoverContactAsync();
+            GUI.enabled = !MotionLocked && !connectionBusy;
+        }
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("保存参数")) TryAction(() => { var s = ReadSettings(false); AtomicWrite(configPath, JsonUtility.ToJson(s, true)); SetMessage("参数已保存：" + configPath); });
         if (GUILayout.Button("环境检查（无设备）")) _ = CheckEnvironmentFromUIAsync();
@@ -157,13 +178,25 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
         if (GUILayout.Button("连接底盘/升降")) TryAction(() => ConnectDevices(true));
         if (GUILayout.Button("检查机械臂反馈")) TryAction(() => SetMessage(robot.InspectFieldFeedback()));
         GUILayout.EndHorizontal();
+        try
+        {
+            var preview = FieldCommissioningSettings.Parse(configText);
+            GUILayout.Label(preview.ContactEffectiveSummary, GUI.skin.box);
+            GUILayout.Label($"卡入：{preview.insertionMm:F2}mm / {preview.EffectiveInsertionSpeed:F2}mm/s，理论≥{preview.insertionMm / preview.EffectiveInsertionSpeed:F1}s，预算{preview.contactStageTimeoutSeconds:F1}s；" +
+                $"退出：{preview.withdrawalMm:F2}mm / {preview.EffectiveExitSpeed:F2}mm/s，理论≥{preview.withdrawalMm / preview.EffectiveExitSpeed:F1}s，预算{preview.exitStageTimeoutSeconds:F1}s。");
+            try { preview.ValidateContactBudget(true, true); }
+            catch (Exception e) { GUILayout.Label("接触预算待修正（不影响保存/连接/仅J1/J2）：" + e.Message, GUI.skin.box); }
+        }
+        catch { /* Keep invalid JSON editable. */ }
+        if (GUILayout.Button("补足V2预算并保存（只延长时间，不改行程/速度/力限）")) TryAction(SupplementContactBudgets);
         scroll = GUILayout.BeginScrollView(scroll, GUILayout.Height(Mathf.Clamp(height - 350, 120, 470)));
-        GUILayout.Label("JSON参数：角度deg，距离mm（底盘速度m/s），时间s。六轴限位必须现场填写。\nmaxJointStepDeg是规划采样步长（通常5°），不是整段转角上限。\n下方确认不保存；修改参数后请重新核对。firstTarget为从1开始的目标编号。");
+        if (GUILayout.Button("从文件重新读取JSON（覆盖未保存内容）")) TryAction(ReloadConfigurationFile);
+        GUILayout.Label("JSON参数：角度deg，距离mm（底盘速度m/s），时间s。六轴限位必须现场填写。\n机械臂连接统一采用已保存JSON的robotIp/dashboardPort/feedbackPort；修改后先保存再连接。\nmaxJointStepDeg是规划采样步长（通常5°），不是整段转角上限。\n下方确认不保存；修改参数后请重新核对。firstTarget为从1开始的目标编号。");
         float textHeight = GUI.skin.textArea.CalcHeight(new GUIContent(configText), Mathf.Max(100, width - 65));
         string edited = GUILayout.TextArea(configText, GUILayout.Height(Mathf.Max(680, textHeight + 20)));
-        if (edited != configText) { configText = edited; confirmed = false; }
+        if (edited != configText) { configText = edited; confirmed = false; contactReleasedConfirmed = false; }
         GUILayout.EndScrollView();
-        confirmed = GUILayout.Toggle(confirmed, "本次确认：人员远离/急停可用；底盘当前停稳/无其他任务；已核对限位、工具方向及路径；接受升降超时仍继续的既有规则");
+        confirmed = GUILayout.Toggle(confirmed, "本次确认：人员远离/急停可用；底盘停稳/无任务；已核对限位、+X卡入/-X退出及路径；接受升降超时仍继续的既有规则");
         GUI.enabled = !MotionLocked && !connectionBusy && confirmed;
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("仅机械臂插入（电批不转）")) _ = RunAsync(RunMode.InsertOnly);
@@ -188,7 +221,7 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
     {
         try
         {
-            var s = JsonUtility.FromJson<FieldCommissioningSettings>(configText);
+            var s = FieldCommissioningSettings.Parse(configText);
             if (s == null) throw new ArgumentException("JSON为空");
             bool legacy = GUILayout.Toggle(s.useLegacyChassisTiming, "底盘旧模式：定时等待（不查询任务完成状态）");
             if (legacy != s.useLegacyChassisTiming) TryAction(() => SetLegacyChassisMode(legacy));
@@ -196,17 +229,54 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
         }
         catch (Exception e) { GUILayout.Label("底盘模式暂不可编辑，请先修正JSON：" + e.Message); }
     }
+    private void DrawContactDirectionSelector()
+    {
+        try
+        {
+            var s = FieldCommissioningSettings.Parse(configText);
+            if (s == null) return;
+            bool selected = GUILayout.Toggle(s.positiveXInsertionConfirmed, "新版方向：已现场核对工具+X卡入/-X退出（与旧版相反；勾选后保存）");
+            if (selected != s.positiveXInsertionConfirmed)
+            {
+                s.positiveXInsertionConfirmed = selected;
+                configText = JsonUtility.ToJson(s, true); confirmed = false;
+                SetMessage("方向许可已更新；请保存参数并重新核对本次安全确认。优化退出最长预算为exitStageTimeoutSeconds。");
+            }
+        }
+        catch { /* Invalid JSON stays editable; no direction permission is granted. */ }
+    }
     private void SetLegacyChassisMode(bool legacy)
     {
         if (MotionLocked || connectionBusy || (commander != null && commander.AnyTaskRunning))
             throw new InvalidOperationException("流程执行中不能切换底盘模式，请先停止并确认");
-        var s = JsonUtility.FromJson<FieldCommissioningSettings>(configText);
+        var s = FieldCommissioningSettings.Parse(configText);
         if (s == null) throw new ArgumentException("配置为空");
-        s.useLegacyChassisTiming = legacy; s.Validate(false);
+        s.useLegacyChassisTiming = legacy; s.Validate(false, false);
         configText = JsonUtility.ToJson(s, true); confirmed = false;
         SetMessage(legacy ? "已选择底盘旧模式：估时后须人工确认停稳；请保存参数并重新安全确认" : "已选择底盘新模式：任务状态确认；请保存参数并重新安全确认");
     }
     private void TryAction(Action action) { try { action(); } catch (Exception e) { SetMessage(e.Message); } }
+    private void SupplementContactBudgets()
+    {
+        if (MotionLocked || connectionBusy) throw new InvalidOperationException("流程/连接中不能改预算");
+        var settings = ReadSettings(false);
+        settings.SupplementContactBudgets();
+        string text = JsonUtility.ToJson(settings, true);
+        AtomicWrite(configPath, text);
+        configText = text; confirmed = false; contactReleasedConfirmed = false;
+        SetMessage($"仅补足并保存V2预算：卡入{settings.contactStageTimeoutSeconds:F0}s、退出{settings.exitStageTimeoutSeconds:F0}s；" +
+            "没有运动/改变行程/速度/力限。理论时间加余量不保证完成，仍须现场核对短行程并重新安全确认。");
+    }
+    private void ReloadConfigurationFile()
+    {
+        if (MotionLocked || connectionBusy || (robot != null && robot.ViewConnecting) ||
+            (commander != null && commander.AnyTaskRunning))
+            throw new InvalidOperationException("任务/连接进行中不能重载JSON，请先结束或取消操作");
+        string text = File.ReadAllText(configPath);
+        FieldCommissioningSettings.Parse(text); // 解析失败保留原文本，不覆盖或回退旧端口。
+        configText = text; confirmed = false;
+        SetMessage("已从文件重新读取JSON，未改变已有连接；IP/端口改变时请先断开再连接，并重新安全确认。");
+    }
     private void ConnectDevices(bool mobile)
     {
         var s = ReadSettings(false);
@@ -214,9 +284,11 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
         if (commander.AnyTaskRunning) throw new InvalidOperationException("已有任务运行");
         if (!mobile)
         {
-            if (robot.IsDashboardConnected && (robot.robotIP != s.robotIp || robot.dashboardPort != s.dashboardPort || robot.feedbackPort != s.feedbackPort))
-                throw new InvalidOperationException("先通过原界面断开旧机械臂连接，再连接新地址");
-            robot.robotIP = s.robotIp; robot.dashboardPort = s.dashboardPort; robot.feedbackPort = s.feedbackPort;
+            var saved = FieldCommissioningSettings.ReadRobotConnectionFile(configPath);
+            if (s.robotIp != saved.robotIp || s.dashboardPort != saved.dashboardPort || s.feedbackPort != saved.feedbackPort)
+                throw new InvalidOperationException("当前编辑的机械臂IP/端口与已保存JSON不同，请先保存参数；若在外部改文件，请先重新读取JSON。");
+            robot.ConfigureFieldConnection(saved);
+            confirmed = false;
             robot.Connect(); // 不自动上电/使能；保留原界面的人工操作。
         }
         else
@@ -261,7 +333,7 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
     private async Task RunAsync(RunMode mode)
     {
         if (MotionLocked || connectionBusy || !confirmed) return;
-        historyId = null; monitorFailure = null;
+        historyId = null; monitorFailure = null; sessionSettings = null;
         bool acquired = false, contactPrepared = false, success = false;
         string outcome = "未启动";
         try
@@ -270,13 +342,17 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
             if (commander.AnyTaskRunning) throw new InvalidOperationException("已有任务运行");
             if (servo == null) servo = FindObjectOfType<ServoTighteningController>();
             if (servo == null) throw new InvalidOperationException("未找到电批控制器");
+            if (servo.ContactSessionBlocked) throw new InvalidOperationException("存在V2未解除接触记录：请先现场解除接触并使用面板复核，不能开始新目标/偏移/粗定位。");
             servo.ClearCycleFailure();
             sessionSettings = ReadSettings(true).Copy();
             var s = sessionSettings;
+            if (mode != RunMode.Vision)
+            {
+                s.RequireContactDirection();
+                s.ValidateContactBudget(mode != RunMode.WithdrawOnly, mode != RunMode.InsertOnly);
+            }
             bool semi = mode == RunMode.SemiSingle || mode == RunMode.SemiMultiple;
             var frozenTiming = semi ? commander.CaptureArmTrajectoryTiming() : null;
-            if (s.originalContactTiming && (mode == RunMode.Single || mode == RunMode.Multiple))
-                throw new InvalidOperationException("原节奏测试版先使用①精调/②接触单测；粗定位连续轨迹尚未改造，不开放③④");
             List<List<TrajectoryTask>> plan = semi ? commander.SnapshotSemiAutomaticPlan(s, mode == RunMode.SemiMultiple) :
                 mode == RunMode.Single || mode == RunMode.Multiple ? commander.SnapshotFieldPlan(s, mode == RunMode.Multiple) : null;
             simulation.PrepareFieldMode();
@@ -284,20 +360,21 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
             semiAutomatic = semi; trajectoryTiming = frozenTiming; continueRequestPending = false;
             if (semi) simulation.SetRealRunInputsLocked(true);
             cancellation = new CancellationTokenSource(); stopTask = null; monitorFailure = null; servo.ClearCycleFailure();
+            BeginReport(mode.ToString(), null, plan);
             historyId = RunHistoryCapture.Begin(RunType.REALTIME, semi ? "真实运行/半自动人工跳过视觉" : "现场联调/" + mode, false, plan?.Count ?? 1, false,
-                $"机器人:{s.robotIp}，User:{s.userNumber}，Tool:{s.toolNumber}，接触速度:{s.contactSpeedMmS}mm/s，" +
+                $"机器人:{s.robotIp}，User:{s.userNumber}，Tool:{s.toolNumber}，{s.ContactEffectiveSummary}，" +
                 (s.useLegacyChassisTiming ? "底盘旧模式：估时+人工确认；" : "底盘新模式：任务状态确认；") +
-                (semi ? $"视觉由人工确认跳过；发送估速:{frozenTiming.EstimatedSpeedDeg}°/s，缓冲:{frozenTiming.BufferSeconds}s，最小/最大:{frozenTiming.MinSeconds}/{frozenTiming.MaxSeconds}s" : $"模拟视觉J1/J2:{s.visionJ1Deg}/{s.visionJ2Deg}°"));
+                (semi ? $"视觉由人工确认跳过；发送估速:{frozenTiming.EstimatedSpeedDeg}°/s，缓冲:{frozenTiming.BufferSeconds}s，最小/最大:{frozenTiming.MinSeconds}/{frozenTiming.MaxSeconds}s" : $"模拟视觉J1/J2:{s.visionJ1Deg}/{s.visionJ2Deg}°"),
+                reportPath, JsonUtility.ToJson(s));
             historyWasUserStop = historyCollision = false; historyTargetNumber = s.firstTarget;
             OperationLogTool.RecordLog(OperationType.真实运行, "请求实物流程 - " + mode + (semi ? "（视觉人工跳过，每目标暂停）" : "（视觉为模拟偏移）"));
-            BeginReport(mode.ToString(), null, plan);
             RunRecorder.SetReportDirectory(reportPath, historyId);
             robot.BeginMotionDiagnostics(reportPath);
             SetMessage("启动 " + mode + "；参数已冻结");
             await CheckEnvironmentAsync(s);
             cancellation.Token.ThrowIfCancellationRequested();
             if (!robot.FieldConnectedTo(s))
-                throw new InvalidOperationException("机械臂连接与本次配置不一致");
+                throw new InvalidOperationException("机械臂连接与本次配置不一致；" + robot.DescribeFieldConnection(s));
             if (plan != null)
             {
                 foreach (var group in plan) foreach (var task in group)
@@ -344,6 +421,8 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
         }
         catch (Exception e)
         {
+            // 配置/计划预检拒绝也要留报告；之前在Busy之前失败只显示一行，现场拿不到日志。
+            if (!Busy) BeginReport(mode.ToString(), null);
             outcome = "流程中止：" + FailureCause(e.Message, acquired);
             if (RunRecorder.IsCurrent(historyId) && !(historyWasUserStop && monitorFailure == null &&
                 (e is OperationCanceledException || servo?.LastCycleFirstError == "Cycle cancelled")))
@@ -390,7 +469,12 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
                 Busy = false; semiAutomatic = false; continueRequestPending = false;
                 cancellation.Dispose(); cancellation = null;
             }
-            else SetMessage(outcome);
+            else
+            {
+                confirmed = false;
+                SetMessage(outcome);
+                ExportReport(false, mode.ToString(), outcome, true);
+            }
         }
     }
     private async Task VisionAsync(FieldCommissioningSettings s, CancellationToken cancel)
@@ -491,7 +575,7 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
         try
         {
             var result = await servo.RunContactCycleAsync(false, cancel,
-                2 * s.contactStageTimeoutSeconds + s.tightenTimeoutSeconds + s.beforeTightenSeconds + s.beforeExitSeconds + 20);
+                s.ContactCycleBudget);
             if (!result.Success) throw new IOException(result.Error);
             if (RunRecorder.IsCurrent(historyId)) RunRecorder.RecordStep($"目标{historyTargetNumber} / 卡入—拧紧—退出", "周期成功返回；力矩/角度未采集到历史", historyId);
         }
@@ -499,7 +583,7 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
     }
     private string FailureCause(string fallback, bool acquired)
     {
-        if (!string.IsNullOrEmpty(servo?.LastCycleFirstError))
+        if (acquired && !string.IsNullOrEmpty(servo?.LastCycleFirstError))
             return servo.LastCycleFirstError == "Cycle cancelled" && monitorFailure != null ? monitorFailure : servo.LastCycleFirstError;
         if (acquired && !string.IsNullOrEmpty(robot.ContactWorkflowError)) return robot.ContactWorkflowError;
         if (acquired && !string.IsNullOrEmpty(robot.ContactAcquisitionError)) return robot.ContactAcquisitionError;
@@ -511,7 +595,7 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
         robot.PermitFieldContact(true); servo.SetRealToolMotionEnabled(false);
         try
         {
-            var result = await servo.RunRobotOnlyCycleAsync(insert, cancel, s.contactStageTimeoutSeconds + 20);
+            var result = await servo.RunRobotOnlyCycleAsync(insert, cancel, (insert ? s.contactStageTimeoutSeconds : s.exitStageTimeoutSeconds) + 20);
             if (!result.Success) throw new IOException(result.Error);
             if (RunRecorder.IsCurrent(historyId)) RunRecorder.RecordStep(insert ? "机械臂单独插入" : "机械臂单独退出", robot.MotionDiagnosticSummary, historyId);
         }
@@ -519,6 +603,8 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
     }
     public void RequestStop()
     {
+        if (!Busy && (robot == null || !robot.FieldWorkflowActive) && commander != null && commander.chassisTCP != null && commander.chassisTCP.ManualJogLocked)
+        { _ = commander.chassisTCP.StopManualJogAsync(); return; }
         if (!Busy && (robot == null || !robot.FieldWorkflowActive)) return;
         if (monitorFailure == null) historyWasUserStop = true;
         cancellation?.Cancel();
@@ -534,9 +620,10 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
         // 先启动机器人/电批异步停止，再执行同步Modbus，避免它阻塞前两者。
         Task arm = robot.StopFieldMotionAsync();
         Task<ServoTighteningController.CommandResult> tool = stopTool && servo.ProgramReady ? servo.StopToolAsync() : null;
-        try { commander.chassisTCP?.StopMovement(); } catch (Exception e) { failures.Add(e.Message); }
+        Task chassis = commander.chassisTCP != null ? commander.chassisTCP.StopMovementAsync() : Task.CompletedTask;
         try { commander.liftTCP?.StopCylinder(); } catch (Exception e) { failures.Add(e.Message); }
         try { await arm; } catch (Exception e) { failures.Add(e.Message); }
+        try { await chassis; } catch (Exception e) { failures.Add(e.Message); }
         if (tool != null) { try { var r = await tool; if (!r.Success) failures.Add(r.Error); } catch (Exception e) { failures.Add(e.Message); } }
         if (failures.Count > 0) throw new IOException(string.Join("; ", failures));
     }
@@ -559,6 +646,36 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
         }
         catch (Exception e) { outcome = "仍保持锁定：" + e.Message; SetMessage(outcome); }
         finally { ExportReport(success, "Recovery", outcome); connectionBusy = false; }
+    }
+    private async Task RecoverContactAsync()
+    {
+        if (MotionLocked || connectionBusy || !contactReleasedConfirmed) return;
+        connectionBusy = true;
+        confirmed = false; contactReleasedConfirmed = false;
+        bool success = false;
+        string outcome = "接触复核未完成";
+        BeginReport("ContactRecovery", reportPath);
+        try
+        {
+            var s = ReadSettings(false);
+            if (robot == null || servo == null || !robot.FieldConnectedTo(s) || commander.AnyTaskRunning)
+                throw new InvalidOperationException("先按本次JSON连接正确机械臂并结束其他任务，再复核");
+            SetMessage("仅执行停止确认及只读受力复核；不会运动/使能/切工具/清零");
+            Task armStop = robot.StopFieldMotionAsync();
+            var toolStopping = servo.ProgramReady ? servo.StopToolAsync() : null;
+            await armStop;
+            if (toolStopping != null)
+            {
+                var toolStop = await toolStopping;
+                if (!toolStop.Success) throw new IOException(toolStop.Error);
+            }
+            if (servo.ProgramReady) await servo.WaitFieldCycleIdleAsync();
+            await robot.EndFieldWorkflowAsync();
+            await servo.ResetContactSessionAsync(s);
+            success = true; outcome = "接触记录已解除；未执行运动。请重新核对并勾选本次安全确认。";
+        }
+        catch (Exception e) { outcome = "接触记录保持锁定：" + e.Message; }
+        finally { SetMessage(outcome); ExportReport(success, "ContactRecovery", outcome); connectionBusy = false; }
     }
     [Serializable] private sealed class RunReport { public string timeUtc, mode, outcome, motionSummary, motionIoError, cleanupErrors; public bool success, completed; }
     [Serializable] private sealed class BuildReport { public string diagnosticSchema, applicationVersion, unityVersion, assemblyId, parentReport; }
@@ -585,7 +702,7 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
             string directory = Path.Combine(Application.persistentDataPath, "CommissioningReports", DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N").Substring(0, 8));
             Directory.CreateDirectory(directory);
             reportPath = directory;
-            File.WriteAllText(Path.Combine(directory, "configuration.json"), JsonUtility.ToJson(sessionSettings, true));
+            File.WriteAllText(Path.Combine(directory, "configuration.json"), sessionSettings != null ? JsonUtility.ToJson(sessionSettings, true) : configText);
             if (semiAutomatic && trajectoryTiming != null)
                 File.WriteAllText(Path.Combine(directory, "trajectory-timing.json"), JsonUtility.ToJson(new TimingReport {
                     estimatedSpeedDeg = trajectoryTiming.EstimatedSpeedDeg, bufferSeconds = trajectoryTiming.BufferSeconds,
@@ -608,18 +725,19 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
         }
         catch (Exception e) { SetMessage("诊断报告初始化失败：" + e.Message); }
     }
-    private void ExportReport(bool success, string mode, string outcome)
+    private void ExportReport(bool success, string mode, string outcome, bool preflightOnly = false)
     {
         try
         {
             if (reportPath == null) throw new IOException("报告目录未创建");
-            robot?.EndMotionDiagnostics();
+            if (!preflightOnly) robot?.EndMotionDiagnostics();
             journal?.Dispose();
             if (journal?.Error != null) SetMessage("增量诊断写入失败：" + journal.Error);
             File.WriteAllText(Path.Combine(reportPath, "run.log"), (logTruncated ? "[日志超过200万字符，仅保留尾部]\n" : "") + sessionLog);
-            if (!string.IsNullOrEmpty(servo?.LastCycleFailureJson)) AtomicWrite(Path.Combine(reportPath, "cycle-failure.json"), servo.LastCycleFailureJson);
+            if (!preflightOnly && !string.IsNullOrEmpty(servo?.LastCycleFailureJson)) AtomicWrite(Path.Combine(reportPath, "cycle-failure.json"), servo.LastCycleFailureJson);
             AtomicWrite(Path.Combine(reportPath, "result.json"), JsonUtility.ToJson(new RunReport { timeUtc = DateTime.UtcNow.ToString("O"), mode = mode, outcome = outcome, success = success, completed = true,
-                motionSummary = robot?.MotionDiagnosticSummary, motionIoError = robot?.MotionIoError, cleanupErrors = servo?.LastCycleCleanupErrors }, true));
+                motionSummary = preflightOnly ? "预检拒绝，未进入设备执行阶段" : robot?.MotionDiagnosticSummary,
+                motionIoError = preflightOnly ? null : robot?.MotionIoError, cleanupErrors = preflightOnly ? null : servo?.LastCycleCleanupErrors }, true));
         }
         catch (Exception e) { SetMessage(message + "；报告导出失败：" + e.Message); }
         finally { captureSession = false; journal?.Dispose(); journal = null; }
@@ -634,6 +752,7 @@ public sealed class FieldCommissioningPanel : MonoBehaviour
     private void OnDestroy()
     {
         RequestStop(); Application.logMessageReceived -= CaptureLog;
+        Application.wantsToQuit -= AllowQuitAfterStop;
         robot?.EndMotionDiagnostics();
         captureSession = false; journal?.Dispose(); journal = null;
         if (Active == this) Active = null;

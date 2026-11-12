@@ -39,13 +39,19 @@ namespace TMPro { public class TMP_InputField { public string text = ""; } }
 public delegate void DobotEventHandler(object sender, DobotEventArgs args);
 public class DobotEventArgs : EventArgs
 {
-    public static DobotEventArgs CreateConnectionEvent(params object[] v) => new DobotEventArgs();
+    public bool IsConnected;
+    public string Message;
+    public static DobotEventArgs CreateConnectionEvent(params object[] v) => new DobotEventArgs { IsConnected=(bool)v[0],Message=(string)v[1] };
     public static DobotEventArgs CreateErrorEvent(params object[] v) => new DobotEventArgs();
     public static DobotEventArgs CreateChassisPositionEvent(params object[] v) => new DobotEventArgs();
     public static DobotEventArgs CreateChassisNavStatusEvent(params object[] v) => new DobotEventArgs();
 }
 public partial class RobokitController
 {
+    public void TestDispose() => CloseChassisConnections();
+    public bool TestNavOpen => navStream != null && navStream.CanRead && navStream.CanWrite;
+    public void TestConnectionState(bool status, bool control, bool nav)
+    { isStatusOn=status; isControlOn=control; isNavOn=nav; PublishChassisConnection(); }
     public async Task TestConnect(int port)
     {
         navClient = new TcpClient();
@@ -128,14 +134,32 @@ class Program
         try
         {
             await robot.TestConnect(((IPEndPoint)listener.LocalEndpoint).Port);
+            if (kind == "success" && motionApi == 3055 && !legacy)
+            {
+                if (!robot.ViewHasConnection || robot.ViewAllPortsConnected || robot.ViewEndpointsAligned || !robot.ViewConnectionDescription.Contains("导航 127.0.0.1:"))
+                    throw new Exception("read-only chassis view hid partial/random-endpoint connection");
+                Console.WriteLine("PASS chassis view exposes actual partial ports without false ready");
+            }
             if (legacy && (!robot.FieldConnectedTo("127.0.0.1", false) || robot.FieldConnectedTo("127.0.0.1") || robot.FieldConnectedTo("127.0.0.2", false)))
                 throw new Exception("legacy requires the correct navigation endpoint, not the status port");
             var elapsed = System.Diagnostics.Stopwatch.StartNew();
             var motion = legacy ? robot.ExecuteRelativeLegacyTimedAsync(motionApi, "{}", .65) : robot.ExecuteRelativeConfirmedAsync(motionApi, "{}");
-            if (legacy && (kind == "stop" || kind == "extra"))
+            if (legacy && (kind == "stop" || kind == "extra" || kind == "disconnectbutton" || kind == "owneddisconnect"))
             {
                 await Task.Delay(260);
                 if (kind == "stop") robot.StopMovement();
+                else if (kind == "disconnectbutton")
+                {
+                    robot.DisConnect();
+                    if (!robot.TestNavOpen) throw new Exception("disconnect closed stop transport while motion active");
+                }
+                else if (kind == "owneddisconnect")
+                {
+                    FieldCommissioningPanel.Active = new FieldCommissioningPanel(); robot.FieldWorkflowOwned=true;
+                    robot.DisConnect();
+                    if (!robot.TestNavOpen || FieldCommissioningPanel.Active.Stops != 1)
+                        throw new Exception("workflow disconnect must request owner stop, not close TCP");
+                }
                 else
                 {
                     robot.SendCommand(3056, "{}");
@@ -150,10 +174,19 @@ class Program
             if (!expected && kind != "disconnect" && kind != "wrongseq" && kind != "noack" && stopCount == 0) throw new Exception(kind + " stop not requested");
             Console.WriteLine("PASS " + (legacy ? "legacy " : "status ") + kind + " api=" + motionApi);
         }
-        finally { robot.DisConnect(); listener.Stop(); await server; }
+        finally { FieldCommissioningPanel.Active=null; robot.TestDispose(); listener.Stop(); await server; }
     }
     static async Task Run()
     {
+        string archive=Path.Combine(Path.GetTempPath(),"chassis-data-hook-"+Guid.NewGuid().ToString("N"));
+        RunDataCapture.Begin(new RunDataSession(archive,new RunDataSession.Info {runId="chassis-hook",projectId="fake",source="loopback only"}));
+        var ui = new RobokitController(); bool connected=true; string state="";
+        ui.OnRobokitEvent += (_,e) => { connected=e.IsConnected; state=e.Message; };
+        ui.TestConnectionState(false,false,true);
+        if(connected || !state.Contains("状态=False")) throw new Exception("partial chassis ports shown as fully connected");
+        ui.TestConnectionState(true,true,true);
+        if(!connected) throw new Exception("all chassis ports not reported connected");
+        Console.WriteLine("PASS chassis aggregate connection status");
         await Scenario("success", true);
         await Scenario("success", true, 3056);
         foreach (string kind in new[] { "stale", "failed", "paused", "canceled", "missing", "rejected", "running", "disconnect", "wrongseq", "wrongtype", "badstate" })
@@ -163,12 +196,21 @@ class Program
         await Scenario("extra", true, 3055, true);
         foreach (string kind in new[] { "stop", "rejected", "wrongseq", "disconnect", "noack" })
             await Scenario(kind, false, 3055, true);
-        Console.WriteLine("21 chassis tests PASS (loopback only, legacy never queries status)");
+        await Scenario("disconnectbutton", false, 3055, true);
+        await Scenario("owneddisconnect", true, 3055, true);
+        await ManualJogTests.Run();
+        await RunDataCapture.Finish("chassis-hook","fake chassis tests finished");
+        var evidence=Array.ConvertAll(File.ReadAllLines(Path.Combine(archive,"commands.jsonl")),line=>JsonDocument.Parse(line).RootElement.Clone());
+        if(!Array.Exists(evidence,e=>e.GetProperty("kind").GetString()=="packet_prepared" && e.GetProperty("native_sequence").GetString()!=""))
+            throw new Exception("chassis sequence/raw packet not recorded");
+        if(!Array.Exists(evidence,e=>e.GetProperty("payload").GetString().StartsWith("API=3056") && e.GetProperty("kind").GetString()=="accepted") ||
+            !Array.Exists(evidence,e=>e.GetProperty("kind").GetString()=="failed")) throw new Exception("chassis acceptance/failure missing from evidence");
+        Console.WriteLine("27 chassis tests PASS (loopback only, legacy never queries status, transport evidence captured)");
     }
     static int Main()
     {
         var pump = new Pump(); SynchronizationContext.SetSynchronizationContext(pump);
-        var run = Run(); var deadline = DateTime.UtcNow.AddSeconds(75);
+        var run = Run(); var deadline = DateTime.UtcNow.AddSeconds(120);
         while (!run.IsCompleted && DateTime.UtcNow < deadline) { pump.Tick(); Thread.Sleep(1); }
         if (!run.IsCompleted) throw new TimeoutException("Test watchdog");
         run.GetAwaiter().GetResult(); return 0;

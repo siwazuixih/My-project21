@@ -40,6 +40,7 @@ public partial class RobokitController : MonoBehaviour
     [Header("底盘网络配置")]
     public string robotIP = "192.168.1.100";
     [SerializeField] private bool enableDebugKeyboardShortcuts = false;
+    [SerializeField] private float connectionTimeoutSeconds = 3f;
 
     [Header("底盘实时数据监测 (可在面板查看)")]
     public float currentX;
@@ -59,6 +60,20 @@ public partial class RobokitController : MonoBehaviour
     private TcpClient statusClient, controlClient, navClient;
     private NetworkStream statusStream, controlStream, navStream;
     private bool isStatusOn, isControlOn, isNavOn;
+    private System.Threading.CancellationTokenSource connectionCancellation;
+    private Task connectionTask;
+    private Task stopRequestTask;
+    private bool connecting;
+    public bool ViewConnecting => connecting;
+    public bool ViewHasConnection => DeviceTcpConnection.IsOpen(statusClient) || DeviceTcpConnection.IsOpen(controlClient) || DeviceTcpConnection.IsOpen(navClient);
+    public bool ViewEndpointsAligned => DeviceTcpConnection.AbsentOrMatches(statusClient, robotIP, 19204) &&
+        DeviceTcpConnection.AbsentOrMatches(controlClient, robotIP, 19205) && DeviceTcpConnection.AbsentOrMatches(navClient, robotIP, 19206);
+    public bool ViewAllPortsConnected => DeviceTcpConnection.Matches(statusClient, robotIP, 19204) &&
+        DeviceTcpConnection.Matches(controlClient, robotIP, 19205) && DeviceTcpConnection.Matches(navClient, robotIP, 19206);
+    public string ViewConnectionDescription => "状态 " + DeviceTcpConnection.Describe(statusClient) + "；控制 " +
+        DeviceTcpConnection.Describe(controlClient) + "；导航 " + DeviceTcpConnection.Describe(navClient) +
+        (ViewEndpointsAligned ? "" : "；实际连接与当前配置不一致");
+    private long connectionGeneration;
 
     void Update()
     {
@@ -107,10 +122,19 @@ public partial class RobokitController : MonoBehaviour
         SendCommand(2002, json); 
     }
 
-    public void StopMovement()
+    public async void StopMovement()
+    {
+        try { await StopMovementAsync(); }
+        catch (Exception e) { Debug.LogError("底盘停止请求失败（不能认为已停稳）: " + e.Message); }
+    }
+
+    public Task StopMovementAsync()
     {
         CancelConfirmedMotion();
-        SendCommand(3003, ""); 
+        if (stopRequestTask != null && !stopRequestTask.IsCompleted) return stopRequestTask;
+        if (navStream == null) return Task.CompletedTask; // No connected command channel to stop.
+        stopRequestTask = RequestConfirmedAsync(3003, "", System.Threading.CancellationToken.None);
+        return stopRequestTask;
     }
 
     public void FindPositon()
@@ -156,47 +180,84 @@ public partial class RobokitController : MonoBehaviour
     // 4. 底层网络封装 (连接、路由、接收)
     // ==========================================
 
-    public  void ConnectAll()
+    public async void ConnectAll()
     {
-        if (FieldWorkflowOwned) { Debug.LogWarning("实物流程占用底盘，禁止重连"); return; }
-        if (ConfirmedMotionActive) { Debug.LogWarning("底盘动作确认中，拒绝重新连接"); return; }
-        DisConnect();
-        ConnectPort(ref statusClient, ref statusStream, 19204, out isStatusOn);
-        ConnectPort(ref controlClient, ref controlStream, 19205, out isControlOn);
-        ConnectPort(ref navClient, ref navStream, 19206, out isNavOn);
-
-        if (isStatusOn) _ = ReceiveLoopAsync(statusStream, 19204);
-        if (isControlOn) _ = ReceiveLoopAsync(controlStream, 19205);
-        if (isNavOn) _ = ReceiveLoopAsync(navStream, 19206);
+        try { await ConnectAllAsync(); }
+        catch (Exception e) { Debug.LogWarning("底盘连接未完成: " + e.Message); }
     }
 
-    private void ConnectPort(ref TcpClient c, ref NetworkStream s, int p, out bool ok)
+    public Task ConnectAllAsync()
     {
-        try {
-            c = new TcpClient();  c.Connect(robotIP, p); s = c.GetStream(); ok = true;
-            Debug.Log($"<color=green>已连接底盘端口: {p}</color>");
-            
-            // 触发连接成功事件
-            OnRobokitEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(true, 
-                $"成功连接到底盘端口 {p}", "Chassis"));
-        } catch (Exception e) { 
-            ok = false; Debug.LogError($"端口 {p} 连接失败"); 
-            
-            // 触发连接失败事件
-            OnRobokitEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(false, 
-                $"底盘端口 {p} 连接失败: {e.Message}", "Chassis"));
-            
-            // 触发错误事件
-            OnRobokitEvent?.Invoke(this, DobotEventArgs.CreateErrorEvent(e.Message, 
-                $"ConnectPort_{p}"));
+        if (FieldWorkflowOwned || ConfirmedMotionActive || ManualJogActive || manualJogRecoveryBusy || manualJogStopBusy || (stopRequestTask != null && !stopRequestTask.IsCompleted))
+        { Debug.LogWarning("底盘流程/停止确认中，禁止重连"); return Task.CompletedTask; }
+        if (connecting) return connectionTask ?? Task.CompletedTask;
+        if (DeviceTcpConnection.Matches(statusClient, robotIP, 19204) &&
+            DeviceTcpConnection.Matches(controlClient, robotIP, 19205) && DeviceTcpConnection.Matches(navClient, robotIP, 19206))
+            return Task.CompletedTask;
+        connectionTask = ConnectChassisAsync();
+        return connectionTask;
+    }
+
+    private async Task ConnectChassisAsync()
+    {
+        connecting = true;
+        CloseChassisConnections();
+        var lifetime = new System.Threading.CancellationTokenSource();
+        connectionCancellation = lifetime;
+        string host = robotIP;
+        var attempts = new[] { ConnectPortAsync(host, 19204, lifetime.Token),
+            ConnectPortAsync(host, 19205, lifetime.Token), ConnectPortAsync(host, 19206, lifetime.Token) };
+        bool transferred = false;
+        Debug.Log($"底盘三端口并行连接中（每端口超时{connectionTimeoutSeconds}秒）");
+        try
+        {
+            var clients = await Task.WhenAll(attempts);
+            lifetime.Token.ThrowIfCancellationRequested();
+            statusClient = clients[0]; controlClient = clients[1]; navClient = clients[2];
+            connectionGeneration++;
+            statusStream = statusClient?.GetStream(); controlStream = controlClient?.GetStream(); navStream = navClient?.GetStream();
+            isStatusOn = statusStream != null; isControlOn = controlStream != null; isNavOn = navStream != null;
+            transferred = true; stopRequestTask = null;
+            if (isStatusOn) _ = ReceiveLoopAsync(statusStream, 19204);
+            if (isControlOn) _ = ReceiveLoopAsync(controlStream, 19205);
+            if (isNavOn) _ = ReceiveLoopAsync(navStream, 19206);
+            PublishChassisConnection();
         }
+        catch (OperationCanceledException) { Debug.Log("底盘连接已取消"); }
+        finally
+        {
+            if (!transferred) foreach (var attempt in attempts)
+                if (attempt.Status == TaskStatus.RanToCompletion) attempt.Result?.Close();
+            if (ReferenceEquals(connectionCancellation, lifetime)) connectionCancellation = null;
+            lifetime.Dispose(); connecting = false;
+        }
+    }
+
+    private async Task<TcpClient> ConnectPortAsync(string host, int port, System.Threading.CancellationToken cancel)
+    {
+        try { return await DeviceTcpConnection.OpenAsync(host, port, connectionTimeoutSeconds, cancel); }
+        catch (OperationCanceledException) { return null; }
+        catch (Exception e)
+        {
+            Debug.LogWarning($"底盘端口 {port} 连接失败: {e.Message}");
+            OnRobokitEvent?.Invoke(this, DobotEventArgs.CreateErrorEvent(e.Message, $"ConnectPort_{port}"));
+            return null;
+        }
+    }
+
+    private void PublishChassisConnection()
+    {
+        bool complete = isStatusOn && isControlOn && isNavOn;
+        string state = complete ? "底盘三端口已连接" :
+            $"底盘部分连接/未连接：状态={isStatusOn}，控制={isControlOn}，导航={isNavOn}";
+        OnRobokitEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(complete, state, "Chassis"));
     }
 
     public async void SendCommand(ushort apiNum, string jsonPayload)
     {
         try {
             if (apiNum == 3003) CancelConfirmedMotion();
-            if ((ConfirmedMotionActive || FieldWorkflowOwned) && apiNum >= 2000 && apiNum != 3003)
+            if ((ConfirmedMotionActive || FieldWorkflowOwned || ManualJogLocked) && apiNum >= 2000 && apiNum != 3003)
                 throw new InvalidOperationException("底盘闭环任务中，禁止额外运动或重定位");
             await RequestConfirmedAsync(apiNum, jsonPayload, System.Threading.CancellationToken.None);
         } catch (Exception e) {
@@ -277,30 +338,37 @@ public partial class RobokitController : MonoBehaviour
 
     public void DisConnect()
     {
+        if (ManualJogLocked)
+        { _ = StopManualJogAsync(); Debug.LogWarning("底盘手动状态待核对，请停稳/解除手动锁后再断开"); return; }
+        if (FieldWorkflowOwned)
+        { FieldCommissioningPanel.Active?.RequestStop(); Debug.LogWarning("先停止实物流程并确认，再断开底盘"); return; }
+        if (ConfirmedMotionActive || (stopRequestTask != null && !stopRequestTask.IsCompleted))
+        { StopMovement(); Debug.LogWarning("底盘正在停止，请确认后再次断开"); return; }
+        if (stopRequestTask != null && stopRequestTask.IsFaulted)
+        { Debug.LogWarning("底盘停止请求未获确认，保留连接；请重试停止或检查现场急停"); return; }
+        CloseChassisConnections();
+        RunDataCapture.EndManualSession?.Invoke();
+        Debug.Log("底盘所有连接已断开（不等于物理停止确认）");
+        PublishChassisConnection();
+    }
+
+    private void CloseChassisConnections()
+    {
+        connectionCancellation?.Cancel();
         CancelConfirmedMotion();
-        FailChassisStream(statusStream, new System.IO.IOException("底盘断开"));
-        FailChassisStream(controlStream, new System.IO.IOException("底盘断开"));
-        FailChassisStream(navStream, new System.IO.IOException("底盘断开"));
-        statusStream?.Close(); statusClient?.Close();
-        controlStream?.Close(); controlClient?.Close();
-        navStream?.Close(); navClient?.Close();
+        var status = statusStream; var control = controlStream; var nav = navStream;
+        var statusSocket = statusClient; var controlSocket = controlClient; var navSocket = navClient;
         statusStream = controlStream = navStream = null;
-        Debug.Log("<color=red>已断开底盘所有连接</color>");
-        
-        // 触发断开连接事件
-        OnRobokitEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(false, 
-            "已断开底盘所有连接", "Chassis"));
+        statusClient = controlClient = navClient = null;
+        isStatusOn = isControlOn = isNavOn = false;
+        FailChassisStream(status, new System.IO.IOException("底盘断开"));
+        FailChassisStream(control, new System.IO.IOException("底盘断开"));
+        FailChassisStream(nav, new System.IO.IOException("底盘断开"));
+        statusSocket?.Close(); controlSocket?.Close(); navSocket?.Close();
     }
     void OnDestroy()
     {
-        DisConnect();
-        // 脚本销毁时，切断所有连接，安全退出协程
-        statusStream?.Close(); statusClient?.Close();
-        controlStream?.Close(); controlClient?.Close();
-        navStream?.Close(); navClient?.Close();
-        
-        // 触发断开连接事件
-        OnRobokitEvent?.Invoke(this, DobotEventArgs.CreateConnectionEvent(false, 
-            "脚本销毁，已断开底盘所有连接", "Chassis"));
+        CloseChassisConnections();
+        RunDataCapture.EndManualSession?.Invoke();
     }
 }

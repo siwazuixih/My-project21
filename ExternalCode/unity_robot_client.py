@@ -19,13 +19,17 @@ class UnityRobotClient:
         self.reader = None
         self.lock = threading.Lock()
         self.last_status = {}
+        self.preview = None
 
     def open(self):
         self.sock = socket.create_connection((self.host, self.port), timeout=3)
         self.sock.settimeout(12)
         self.reader = self.sock.makefile('rb')
         try:
-            self.token = self.request('acquire', simulate=self.simulate)['token']
+            acquired = self.request('acquire', simulate=self.simulate)
+            self.token = acquired['token']
+            if acquired.get('contact_profile') != 'contact-compliant-v2-20261029':
+                raise RuntimeError('Unity gateway version differs from contact-compliant-v2-20261029; deploy complete build')
             return self
         except Exception:
             self.close()
@@ -42,7 +46,7 @@ class UnityRobotClient:
                 mode = 'CURRENT_OWNER'
             if traced:
                 safe = {k: v for k, v in kwargs.items()
-                        if k in ('simulate', 'delta', 'duration', 'tool', 'enforce_lateral', 'original_timing', 'stop_at_end', 'stage', 'planned_distance_mm')}
+                        if k in ('simulate', 'delta', 'duration', 'tool', 'enforce_lateral', 'original_timing', 'stop_at_end', 'stage', 'planned_distance_mm', 'expected_target')}
                 print('[RobotTrace][Python][TX] id=%s op=%s mode=%s params=%s units=mm,s,N,Nm,deg'
                       % (request_id, op, mode, json.dumps(safe, ensure_ascii=False)), flush=True)
             try:
@@ -86,6 +90,12 @@ class UnityRobotClient:
     def pose(self):
         return tuple(self.request('pose')['values'])
 
+    def relative_target(self, dx, dy, dz):
+        delta = [dx, dy, dz]
+        reply = self.request('relative_target', delta=delta)
+        self.preview = (delta, reply['values'])
+        return tuple(reply['values'])
+
     def wrench(self, tool):
         return tuple(self.request('wrench', tool=tool)['values'])
 
@@ -100,9 +110,15 @@ class UnityRobotClient:
         return self.request('stop')
 
     def move_original_interval(self, dx, dy, dz, duration, stop_at_end, enforce_lateral):
+        delta = [dx, dy, dz]
+        expected = self.preview[1] if self.preview and self.preview[0] == delta else None
+        self.preview = None
+        # Unity JsonUtility turns an explicit null array into []. Omit an absent
+        # preview; real six-value previews still get the gateway's strict check.
+        preview = {} if expected is None else {'expected_target': expected}
         result = self.request('move_relative', delta=[dx, dy, dz], duration=duration,
                               original_timing=True, stop_at_end=stop_at_end,
-                              enforce_lateral=enforce_lateral)
+                              enforce_lateral=enforce_lateral, **preview)
         if result.get('result') != 'interval_elapsed':
             raise RuntimeError('Gateway does not support original interval semantics')
         return result
@@ -125,11 +141,25 @@ class UnityRobotClient:
                 self.request('release')
         finally:
             self.token = ''
-            if self.reader:
-                self.reader.close()
-            if self.sock:
-                self.sock.close()
+            reader, sock = self.reader, self.sock
             self.sock = self.reader = None
+            try:
+                if reader:
+                    reader.close()
+            finally:
+                if sock:
+                    sock.close()
+
+    @classmethod
+    def read_only_probe(cls, tool, user):
+        client = cls()
+        try:
+            client.sock = socket.create_connection((client.host, client.port), timeout=3)
+            client.sock.settimeout(8)
+            client.reader = client.sock.makefile('rb')
+            return client.request('contact_probe', tool=tool, user=user)
+        finally:
+            client.close()
 
     @classmethod
     def emergency_stop(cls):

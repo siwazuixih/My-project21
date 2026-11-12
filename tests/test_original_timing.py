@@ -19,7 +19,7 @@ class OriginalTimingTests(unittest.TestCase):
             tree = ast.parse(path.read_text())
             cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'HybridExit')
             return ast.dump(next(n for n in cls.body if n.name == 'lateral_search'), include_attributes=False)
-        self.assertEqual(method(ROOT/'ExternalCode/original/cr10af_hybrid_x.py'),
+        self.assertEqual(method(ROOT/'ExternalCode/程序和使用文档_X方向修订版_192.168.192.19/ubuntu20_04/cr10af_hybrid_x.py'),
                          method(ROOT/'ExternalCode/cr10af_hybrid_x.py'))
 
     def test_stop_flag_and_running_state_preserved(self):
@@ -32,12 +32,12 @@ class OriginalTimingTests(unittest.TestCase):
             algorithm.safety_ok.assert_called_with(allow_running=not stop, enforce_lateral=True)
         algorithm.dashboard.move_relative.assert_not_called()
 
-    def test_old_mode_preserved(self):
+    def test_new_vendor_timing_does_not_depend_on_legacy_flag(self):
         algorithm = HybridExit(SimpleNamespace())
         algorithm.dashboard = Mock(); algorithm.safety_ok = Mock()
         algorithm.servo_relative(0, .1, 0, .25)
-        algorithm.dashboard.move_relative.assert_called_once()
-        algorithm.dashboard.move_original_interval.assert_not_called()
+        algorithm.dashboard.move_original_interval.assert_called_once_with(0, .1, 0, .25, True, False)
+        algorithm.dashboard.move_relative.assert_not_called()
 
     def test_interval_is_not_arrival(self):
         client = UnityRobotClient(simulate=True)
@@ -49,6 +49,8 @@ class OriginalTimingTests(unittest.TestCase):
 
     def test_config_echo_and_type(self):
         cycle = ContactCycle(Mock(), Mock(), Mock())
+        cycle.session = Mock()
+        cycle.session.snapshot.return_value = dict(contact_session_blocked=False)
         settings = dict(cycle.settings, configuration_id='original-test', originalContactTiming=True)
         cycle.configure(settings)
         self.assertTrue(cycle.snapshot()['original_contact_timing'])
@@ -57,13 +59,19 @@ class OriginalTimingTests(unittest.TestCase):
     def test_stage_stop_failure_prevents_tightening(self):
         client = Mock()
         client.finish_stage.side_effect = RuntimeError('stop unconfirmed')
+        client.wrench.return_value = (0.,)*6
+        client.pose.return_value = (0.,)*6
+        client.relative_target.return_value = (1.,0.,0.,0.,0.,0.)
         cycle = ContactCycle(Mock(), Mock(), Mock())
+        cycle.session = Mock()
         cycle.settings.update(originalContactTiming=True, insertionMm=0)
         with patch('servo_contact_cycle.UnityRobotClient', return_value=Mock(open=Mock(return_value=client))), \
+             patch.object(cycle, '_tool_stopped'), \
              patch.object(HybridExit, 'safety_ok'):
             cycle._run(False)
         self.assertEqual(cycle.result, 'FAILED')
         cycle.start_tool.assert_not_called()
         client.finish_stage.assert_called_once()
+        self.assertIn('stop unconfirmed', cycle.first_error)
 
 if __name__ == '__main__': unittest.main()

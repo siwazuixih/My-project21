@@ -24,6 +24,7 @@ public partial class DobotController
 {
     public bool FieldWorkflowActive => false;
     private bool OriginalContactTimingActive => false;
+    private bool VendorContactTimingActive => false;
     private NetworkStream networkStream;
     private TcpClient tcpClient;
     private readonly object feedbackLock = new object();

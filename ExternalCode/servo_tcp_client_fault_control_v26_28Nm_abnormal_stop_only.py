@@ -138,7 +138,7 @@ def state_display_name(value):
 # 每次拧紧结束会生成同名 CSV 和 PNG，例如：
 #   20250610_164501_OK.csv
 #   20250610_164501_OK.png
-BASE_SAVE_DIR = Path(__file__).resolve().parent / "servo_logs"
+BASE_SAVE_DIR = Path(os.environ.get('SERVO_LOG_DIR', str(Path(__file__).resolve().parent / 'servo_logs'))).expanduser().resolve()
 
 # =========================
 # 结果指令
@@ -256,7 +256,7 @@ latest_curve_content_type = "image/jpeg"
 curve_render_count = 0
 curve_render_error = ""
 
-start_time = time.time()
+start_time = time.monotonic()
 state = "IDLE"
 fault_latched = False
 slip_counter = 0
@@ -272,10 +272,65 @@ last_save_time = 0.0
 run_id = time.strftime("%Y%m%d_%H%M%S")
 save_done = False
 stop_requested = threading.Event()
+shutdown_event = threading.Event()
+operation_busy = threading.Event()
+operation_done = threading.Event()
+command_active = threading.Event()
+result_busy = threading.Event()
+stop_in_progress = threading.Event()
+cycle_lock = threading.RLock()
+save_lock = threading.Lock()
+worker_threads = []
+tool_stop_confirmed = False
+SERVO_FEEDBACK_TIMEOUT_S = 1.0
+TIGHTEN_MAX_RUNTIME_S = 60.0
+EXIT_STOP_DWELL_S = .30
+EXIT_STOP_TIMEOUT_S = 3.0
+
 last_feedback = None
 last_feedback_time = 0.0
 last_saved_csv = ""
 last_saved_png = ""
+tool_io_lock = threading.Lock()
+tool_io = dict(connection_id=0, rx_bytes=0, feedback_frames=0, framing_rejects=0,
+               parse_rejects=0, filter_rejects=0, last_rx_hex='', last_tx_hex='',
+               last_error='', last_rx_time=0.)
+
+
+def record_tool_io(event, raw=b'', error='', count=1):
+    """Bounded diagnostics only; counters never authorize motion or fake feedback."""
+    with tool_io_lock:
+        if event == 'connected':
+            generation = tool_io['connection_id'] + 1
+            tool_io.update(connection_id=generation, rx_bytes=0, feedback_frames=0,
+                framing_rejects=0, parse_rejects=0, filter_rejects=0,
+                last_rx_hex='', last_tx_hex='', last_error='', last_rx_time=0.)
+        elif event == 'rx':
+            tool_io['rx_bytes'] += len(raw)
+            tool_io['last_rx_time'] = time.monotonic()
+            tool_io['last_rx_hex'] = raw[:96].hex()
+        elif event == 'tx':
+            tool_io['last_tx_hex'] = raw[:32].hex()
+        elif event == 'error':
+            tool_io['last_error'] = str(error)[:240]
+        elif event in ('feedback_frames', 'framing_rejects', 'parse_rejects', 'filter_rejects'):
+            tool_io[event] += count
+
+
+def tool_io_snapshot():
+    with tool_io_lock:
+        values = dict(tool_io)
+    stamp = values.pop('last_rx_time')
+    values['last_rx_age_s'] = round(max(0., time.monotonic() - stamp), 3) if stamp else None
+    return values
+
+
+def trace_tool_io(event):
+    try:
+        print('[ToolTrace] ' + json.dumps(dict(event=event, **tool_io_snapshot()),
+              ensure_ascii=True, allow_nan=False), flush=True)
+    except (OSError, ValueError):
+        pass  # stdout diagnostics must not block stop cleanup
 
 # =========================
 # CRC16/MODBUS
@@ -323,14 +378,18 @@ def send_cmd(cmd: bytes, name: str = "CMD") -> bool:
     if SIMULATION_ONLY:
         return False
     with sock_lock:
+        if stop_requested.is_set() and cmd in (CMD_FORWARD, CMD_FORWARD_NO_FEEDBACK, CMD_REVERSE_WITH_FEEDBACK, CMD_REVERSE_NO_FEEDBACK):
+            return False  # cancel at actual IO boundary; Stop/Reset must still pass
         if client_socket is None:
             print(f"发送失败：TCP 未连接，{name} = {hexstr(cmd)}")
             return False
         try:
             client_socket.sendall(cmd)
+            record_tool_io('tx', raw=cmd)
             print(f"发送 {name}: {hexstr(cmd)}")
             return True
         except Exception as e:
+            record_tool_io('error', error='send: ' + str(e))
             print(f"发送失败 {name}: {e}")
             try:
                 client_socket.close()
@@ -385,38 +444,20 @@ def mark_all_rows_state(result_state: str):
 
 
 def finish_result(result_state: str, message: str, signal_func=None, stop_after=True, return_home=False):
-    """统一结束流程：设置状态 -> 输出提示/指令 -> 保存同名CSV和PNG -> 停止；V26默认异常后不自动回转。
-
-    V26 关键修正：
-    - 检测到 NG_SLIP / JAM / NG_DEVICE 后，只保存、报警、硬停止；
-    - 不再自动启动反转回位线程，避免异常后持续回转；
-    - 如需回到开口向前位置，由人工确认后点击 Reverse 手动执行回位。
-    """
+    """锁存结果，后台先停止再保存，接收线程继续更新停转反馈。"""
     global state, fault_latched
     with lock:
+        if fault_latched:
+            return
         state = result_state
         fault_latched = True
+        result_busy.set()
     mark_all_rows_state(result_state)
-    print(message)
-    if signal_func is not None:
-        signal_func()
-    saved = save_run_outputs(force=True)
-    if saved is None:
-        print("⚠️ 没有保存成功：当前没有采集到数据或保存函数返回空")
-
-    if return_home and AUTO_RETURN_HOME_AFTER_FAULT:
-        # 注意：不要 close socket；否则下一步反转指令可能因 client_socket=None 发送失败。
-        quick_stop_for_home(f"{result_state} 后回初始位前停止")
-        stop_requested.clear()
-        threading.Thread(
-            target=_reverse_to_home,
-            args=(f"RETURN_HOME_AFTER_{result_state}", False),
-            daemon=True,
-        ).start()
-    elif stop_after:
-        hard_stop_driver(f"{result_state} 后停止", repeat=4, delay=0.035, close_socket_after=True, try_new_connection=True)
-        stop_requested.clear()
-    return saved
+    thread = threading.Thread(target=_finish_result_worker,
+                              args=(result_state, message, signal_func),
+                              name="finish-result", daemon=True)
+    worker_threads.append(thread)
+    thread.start()
 
 
 def send_result_signal(text: str, cmd: bytes, name: str):
@@ -467,7 +508,8 @@ def hard_stop_driver(
     如果终端看到这些发送日志但电批仍不停，说明当前 TCP 协议不支持运行中中断，
     需要使用驱动器专用急停/伺服OFF/使能关闭指令，或接入硬件IO急停。
     """
-    stop_requested.set()
+    # Device stop/reset is not user cancellation. Do not set OR clear the latch;
+    # explicit stop entry points own it, including a stop arriving during reset.
     ok = False
     print(f"\n{reason}: V22 停止序列开始，repeat={repeat}, close={close_socket_after}, new_conn={try_new_connection}")
 
@@ -536,7 +578,6 @@ def send_cmd_burst(commands, name: str = "BURST") -> bool:
 
 def quick_stop_for_home(reason: str = "回位前快速停止") -> bool:
     """回位流程专用停止：不锁电批、不断开 TCP，避免影响随后的反转回位。"""
-    stop_requested.set()
     print(f"\n{reason}: 快速停止开始")
     wait_for_tcp_connected(timeout=2.0)
     ok = False
@@ -555,7 +596,6 @@ def quick_stop_for_home(reason: str = "回位前快速停止") -> bool:
 
 def fast_stop_after_home_reverse(reason: str = "回位后快速停止") -> bool:
     """反转定时结束后的快速停止。目标是尽快停住，保证开口方向重复性。"""
-    stop_requested.set()
     print(f"\n{reason}: 到时停止")
     ok = False
     for i in range(max(1, REVERSE_HOME_POST_STOP_REPEAT)):
@@ -569,21 +609,23 @@ def fast_stop_after_home_reverse(reason: str = "回位后快速停止") -> bool:
 def clear_run(new_state: str):
     global start_time, state, fault_latched, slip_counter, jam_counter, jam_warned, ok_start_time
     global last_filtered_torque, last_valid_torque, median_buf, run_id, save_done, last_save_time
+    global tool_stop_confirmed
     with lock:
+        tool_stop_confirmed = False
         time_data.clear()
         torque_raw_data.clear()
         torque_data.clear()
         speed_data.clear()
         angle_data.clear()
         status_data.clear()
-        start_time = time.time()
+        start_time = time.monotonic()
         state = new_state
         fault_latched = False
         slip_counter = 0
         jam_counter = 0
         jam_warned = False
         ok_start_time = None
-        run_id = time.strftime("%Y%m%d_%H%M%S")
+        run_id = time.strftime("%Y%m%d_%H%M%S") + "_%06d" % (time.time_ns() // 1000 % 1000000)
         save_done = False
         last_save_time = 0.0
         last_filtered_torque = None
@@ -593,11 +635,11 @@ def clear_run(new_state: str):
 
 def _sleep_interruptible(duration: float, step: float = 0.02) -> bool:
     """可被停止按钮打断的睡眠。返回 True 表示被 stop_requested 中断。"""
-    end_time = time.time() + max(0.0, duration)
-    while time.time() < end_time:
-        if stop_requested.is_set():
+    end_time = time.monotonic() + max(0.0, duration)
+    while time.monotonic() < end_time:
+        if stop_requested.is_set() or shutdown_event.is_set():
             return True
-        time.sleep(min(step, max(0.0, end_time - time.time())))
+        time.sleep(min(step, max(0.0, end_time - time.monotonic())))
     return stop_requested.is_set()
 
 
@@ -613,14 +655,29 @@ def clear_pending_commands():
 
 def enqueue_command(cmd_name: str):
     """按钮/快捷键只入队，不直接执行耗时TCP操作，避免Matplotlib界面假死。"""
-    if 'contact_cycle' in globals() and contact_cycle.snapshot()['cycle_active']:
-        print("自动接触流程执行中，拒绝额外的手动启动指令")
+    if SIMULATION_ONLY:
+        print("离线模式不会执行设备指令")
         return
+    if cmd_name in ('FORWARD', 'REVERSE_HOME') and contact_cycle.session.snapshot()['contact_session_blocked']:
+        print('contact_session_blocked: inspect contact and use field recovery before manual tool movement')
+        return False
+    with cycle_lock:
+        if (shutdown_event.is_set() or operation_busy.is_set()
+                or result_busy.is_set() or stop_in_progress.is_set()):
+            print("当前操作尚未结束，忽略重复或冲突指令:", cmd_name)
+            return
+        operation_busy.set()
+        operation_done.clear()
+        # Only a new explicit user action may clear a manual-stop latch.
+        stop_requested.clear()
     try:
         command_queue.put_nowait(cmd_name)
         print(f"按钮指令已接收: {cmd_name}")
+        return True
     except Exception as e:
         print(f"按钮指令入队失败 {cmd_name}: {e}")
+        operation_busy.clear()
+        return False
 
 
 def start_forward(event=None):
@@ -633,29 +690,43 @@ def start_reverse(event=None):
 
 
 def stop_driver(event=None):
-    if 'contact_cycle' in globals() and contact_cycle.snapshot()['cycle_active']:
-        threading.Thread(target=contact_cycle.stop, daemon=True).start()
-        return
     stop_cycle_tool()
 
 
 def stop_cycle_tool():
-    # V19：停止按钮立即置位，并在后台连续发送两种停止帧。
-    stop_requested.set()
-    clear_pending_commands()
-    threading.Thread(target=_do_stop_driver, args=("手动立即停止",), daemon=True).start()
+    with cycle_lock:
+        stop_requested.set()
+        clear_pending_commands()
+        if stop_in_progress.is_set():
+            return
+        stop_in_progress.set()
+    threading.Thread(target=_do_stop_driver, args=('手动立即停止',), daemon=True).start()
+
+
+def _launch_tightening(label):
+    global state, fault_latched
+    with cycle_lock:
+        if stop_requested.is_set() or shutdown_event.is_set():
+            return False
+        clear_run('RUN_FORWARD')
+        if send_cmd(CMD_FORWARD, label):
+            return True
+        with lock:
+            state, fault_latched = 'START_FAILED', True
+        return False
 
 
 def _do_start_forward():
-    stop_requested.clear()
+    if not wait_for_tcp_connected() or stop_requested.is_set():
+        return False
     print("\n准备正转：先硬停止/复位，再启动")
-    hard_stop_driver("正转前复位", repeat=2, delay=0.03, close_socket_after=False, try_new_connection=False)
-    stop_requested.clear()
+    if not hard_stop_driver("正转前复位", repeat=2, delay=0.03,
+                            close_socket_after=False, try_new_connection=False):
+        return False
     if _sleep_interruptible(0.20):
         hard_stop_driver("正转启动被中断", repeat=4, delay=0.035, close_socket_after=True, try_new_connection=True)
-        return
-    clear_run("RUN_FORWARD")
-    return send_cmd(CMD_FORWARD, "正转")
+        return False
+    return _launch_tightening("正转")
 
 
 def _reverse_to_home(reason: str = "RETURN_HOME", save_after: bool = False):
@@ -673,9 +744,10 @@ def _reverse_to_home(reason: str = "RETURN_HOME", save_after: bool = False):
     global state, fault_latched
 
     print(f"\n开始反馈式反转回初始位：{reason}")
-    quick_stop_for_home("反转回初始位前")
-    stop_requested.clear()
-    wait_for_tcp_connected(timeout=3.0)
+    if not quick_stop_for_home("反转回初始位前") or stop_requested.is_set():
+        return
+    if not wait_for_tcp_connected(timeout=3.0) or stop_requested.is_set():
+        return
 
     with lock:
         state = reason
@@ -691,14 +763,14 @@ def _reverse_to_home(reason: str = "RETURN_HOME", save_after: bool = False):
         fast_stop_after_home_reverse("反转发送失败后停止")
         return
 
-    t0 = time.time()
+    t0 = time.monotonic()
     seen_motion = False
     stable_since = None
     last_report = 0.0
     finish_reason = "MAX_TIME"
 
     while not stop_requested.is_set():
-        now = time.time()
+        now = time.monotonic()
         elapsed = now - t0
         if elapsed > REVERSE_HOME_MAX_TIME:
             finish_reason = "MAX_TIME"
@@ -709,6 +781,9 @@ def _reverse_to_home(reason: str = "RETURN_HOME", save_after: bool = False):
             fb_time = last_feedback_time
 
         if fb is None or now - fb_time > 0.6:
+            if elapsed > 0.6:
+                finish_reason = "FEEDBACK_STALE"
+                break
             if now - last_report > 0.5:
                 print("等待反转回传数据...")
                 last_report = now
@@ -731,7 +806,7 @@ def _reverse_to_home(reason: str = "RETURN_HOME", save_after: bool = False):
         )
 
         # 有些驱动器回位结束会给 OK 状态；该条件只作为辅助，不单独依赖。
-        if released or (seen_motion and elapsed >= REVERSE_HOME_MIN_RUN_TIME and status == DRIVE_OK_STATUS and speed <= REVERSE_HOME_STOP_SPEED_TH):
+        if released:
             if stable_since is None:
                 stable_since = now
             if now - stable_since >= REVERSE_HOME_STABLE_DWELL:
@@ -748,7 +823,8 @@ def _reverse_to_home(reason: str = "RETURN_HOME", save_after: bool = False):
     fast_stop_after_home_reverse(f"反转回初始位结束({finish_reason})")
 
     with lock:
-        state = "STOP" if stop_requested.is_set() else "HOME_READY"
+        state = ("STOP" if stop_requested.is_set() else
+                 "RELEASE_CONFIRMED" if finish_reason == "FEEDBACK_RELEASED" else "REVERSE_FAILED")
 
     if save_after:
         save_run_outputs(force=True)
@@ -765,25 +841,36 @@ def _do_start_reverse():
     _reverse_to_home("MANUAL_REVERSE_HOME", save_after=False)
 
 
-def _do_stop_driver(source: str = "停止"):
+def _do_stop_driver(source: str = "停止", stop_robot: bool = False):
     global state
     stop_requested.set()
-    clear_pending_commands()
     print(f"\n{source}：立即硬停止")
-    hard_stop_driver(source, repeat=5, delay=0.035, close_socket_after=True, try_new_connection=True)
-    with lock:
-        if state not in ("OK", "NG_SLIP", "JAM", "NG_DEVICE"):
-            state = "STOP"
-    if STOP_SAVE_CURRENT_CURVE:
-        save_run_outputs(force=True)
-    print("已发送硬停止")
+    # 自动流程可能同时在执行 CR10AF 直线动作。
+    try:
+        hard_stop_driver(source, repeat=3, delay=0.025, close_socket_after=True, try_new_connection=True)
+        with lock:
+            if state not in ("OK", "NG_SLIP", "JAM", "NG_DEVICE"):
+                state = "STOP"
+        if STOP_SAVE_CURRENT_CURVE:
+            save_run_outputs(force=False)
+        print("已发送停止请求；设备是否停稳应核验实际反馈")
+    finally:
+        stop_in_progress.clear()
+        if not result_busy.is_set():
+            operation_done.set()
 
 
 def command_worker():
     """后台执行按钮命令，防止按钮点击后因TCP发送/保存阻塞界面。"""
-    while True:
-        cmd_name = command_queue.get()
+    while not shutdown_event.is_set():
         try:
+            cmd_name = command_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        command_active.set()
+        try:
+            if stop_requested.is_set() or shutdown_event.is_set():
+                continue
             if cmd_name == "FORWARD":
                 _do_start_forward()
             elif cmd_name == "REVERSE_HOME":
@@ -792,9 +879,18 @@ def command_worker():
                 _do_stop_driver()
             else:
                 print(f"未知按钮指令: {cmd_name}")
+            with lock:
+                await_result = state in ("RUN_FORWARD", "JAM_WARN") or result_busy.is_set()
+            if await_result:
+                while not operation_done.wait(0.1):
+                    if shutdown_event.is_set() and not result_busy.is_set():
+                        break
         except Exception as e:
             print(f"执行按钮指令失败 {cmd_name}: {e}")
+            stop_driver()
         finally:
+            command_active.clear()
+            operation_busy.clear()
             command_queue.task_done()
 
 # =========================
@@ -805,7 +901,7 @@ def u16_le(buf: bytes, idx: int) -> int:
 
 
 def parse_feedback_frame(frame: bytes):
-    if len(frame) < 41:
+    if len(frame) < 41 or frame[-2:] != b"\r\n" or len(frame) != frame[2] + 4:
         return None
     if frame[0] != 0x55 or frame[1] != 0xAA or frame[3] != 0x81:
         return None
@@ -853,10 +949,13 @@ def parse_feedback_frame(frame: bytes):
 
 def feed_receive_buffer(buffer: bytearray):
     frames = []
+    rejected = 0
     while True:
         start = buffer.find(b"\x55\xAA")
         if start < 0:
-            buffer.clear()
+            # Keep a split 0x55/0xAA header across TCP recv calls.
+            keep = buffer[-1:] == b"\x55"
+            buffer[:] = b"\x55" if keep else b""
             break
         if start > 0:
             del buffer[:start]
@@ -864,12 +963,22 @@ def feed_receive_buffer(buffer: bytearray):
             break
         length = buffer[2]
         total_len = 2 + length + 2
+        if total_len < 41:
+            rejected += 1
+            del buffer[0]
+            continue
         if len(buffer) < total_len:
             break
         frame = bytes(buffer[:total_len])
+        if (not frame.endswith(b"\x0D\x0A")
+                or crc16_modbus(frame[:-4]) != int.from_bytes(frame[-4:-2], "little")):
+            rejected += 1
+            del buffer[0]
+            continue
         del buffer[:total_len]
-        if frame.endswith(b"\x0D\x0A"):
-            frames.append(frame)
+        frames.append(frame)
+    if rejected:
+        record_tool_io('framing_rejects', count=rejected)
     return frames
 
 # =========================
@@ -910,12 +1019,13 @@ def update_last_feedback(parsed, filtered_torque):
         last_feedback["filtered_torque"] = float(filtered_torque)
         last_feedback["abs_torque"] = abs(float(parsed.get("torque", 0.0)))
         last_feedback["abs_speed"] = abs(float(parsed.get("speed", 0.0)))
-        last_feedback_time = time.time()
+        last_feedback_time = time.monotonic()
 
 
 def should_begin_physical_run(parsed):
     """检测工具物理开关启动：当前处于空闲/监控状态，且速度或扭矩出现明显变化。"""
-    if not ENABLE_PHYSICAL_SWITCH_CAPTURE:
+    if (not ENABLE_PHYSICAL_SWITCH_CAPTURE or operation_busy.is_set()
+            or result_busy.is_set() or stop_requested.is_set() or shutdown_event.is_set()):
         return False
     with lock:
         current_state = state
@@ -929,7 +1039,11 @@ def should_begin_physical_run(parsed):
 def begin_physical_run(parsed):
     """物理开关启动后自动开始一条新曲线。"""
     print("\n检测到工具物理开关启动：开始同步绘制本次拧紧曲线")
-    clear_run("RUN_PHYSICAL")
+    with cycle_lock:
+        if operation_busy.is_set() or stop_requested.is_set():
+            return
+        operation_busy.set()
+        clear_run("RUN_PHYSICAL")
 
 
 def enable_monitor_feedback(reason="进入监控回传模式"):
@@ -951,10 +1065,13 @@ def detect_state(parsed):
     if fault_latched or not ENABLE_FAULT_DETECT:
         return
 
-    now = time.time()
+    now = time.monotonic()
     with lock:
         current_state = state
         if current_state not in ("RUN_FORWARD", "RUN_REVERSE", "RUN_PHYSICAL", "JAM_WARN"):
+            return
+        if parsed.get("tighten_status") == 0x02 or parsed.get("error_code", 0):
+            finish_result("NG_DEVICE", "驱动器故障，停止周期", send_device_ng_signal)
             return
         if len(torque_data) < 15:
             return
@@ -991,9 +1108,12 @@ def detect_state(parsed):
 
     # 2) 拧紧完成：达到 98% 目标扭矩，并在 0.5s 内稳定
     if ENABLE_OK_AUTO_STOP and torque_now >= OK_TORQUE_TH:
+        ok_start_time = now if ok_start_time is None else ok_start_time
         recent_mask = t_arr >= (t_arr[-1] - OK_HOLD_TIME)
         y_recent = y_arr[recent_mask]
-        if len(y_recent) >= 5 and (float(np.max(y_recent)) - float(np.min(y_recent))) <= OK_STABLE_BAND:
+        if (now - ok_start_time >= OK_HOLD_TIME and len(y_recent) >= 5
+                and float(np.min(y_recent)) >= OK_TORQUE_TH
+                and (float(np.max(y_recent)) - float(np.min(y_recent))) <= OK_STABLE_BAND):
             finish_result(
                 "OK",
                 f"\n✅✅✅ 拧紧成功 OK：torque={torque_now:.2f} Nm，稳定保持 {OK_HOLD_TIME:.1f}s ✅✅✅",
@@ -1001,7 +1121,6 @@ def detect_state(parsed):
                 stop_after=True,
             )
             return
-        ok_start_time = now if ok_start_time is None else ok_start_time
     else:
         ok_start_time = None
 
@@ -1039,7 +1158,7 @@ def detect_state(parsed):
         recent_mask = t_arr >= (t_arr[-1] - JAM_WINDOW_TIME)
         y_recent = y_arr[recent_mask]
         speed_recent = speed_arr[recent_mask]
-        if len(y_recent) >= 8:
+        if len(y_recent) >= 8 and t_arr[-1] - t_arr[recent_mask][0] >= 0.9 * JAM_WINDOW_TIME:
             rise = float(y_recent[-1] - y_recent[0])
             fluct = float(np.max(y_recent) - np.min(y_recent))
             mean_speed = abs(float(np.mean(speed_recent)))
@@ -1075,7 +1194,179 @@ def _safe_state_name(name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in name)
 
 
-def save_run_outputs(force: bool = False):
+def save_run_outputs(force=False):
+    with save_lock, plot_render_lock:
+        return _save_run_outputs(force)
+
+
+# 兼容旧调用名称
+def save_csv():
+    return save_run_outputs()
+
+# =========================
+# TCP 接收线程
+# =========================
+def tcp_receive():
+    if SIMULATION_ONLY:
+        return
+    global client_socket, recv_frame_count, last_print_recv_time
+
+    recv_buffer = bytearray()
+    while True:
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(CONNECT_TIMEOUT)
+            s.connect((IP, PORT))
+            s.settimeout(1.0)  # Bound sendall too; idle receive timeout is not a disconnect.
+            recv_buffer.clear()  # Partial frames belong to the old TCP connection.
+            with sock_lock:
+                client_socket = s
+
+            record_tool_io('connected')
+            trace_tool_io('connected')
+            next_io_trace = time.monotonic() + 1.
+            print(f"TCP连接成功：{IP}:{PORT}")
+            reset_driver()
+            time.sleep(0.05)
+            if ENABLE_PHYSICAL_SWITCH_CAPTURE:
+                enable_monitor_feedback("空闲监控/保持回传 01/00")
+
+            while True:
+                try:
+                    data = s.recv(1024)
+                except socket.timeout:
+                    if time.monotonic() >= next_io_trace:
+                        trace_tool_io('idle_wait')
+                        next_io_trace = time.monotonic() + 1.
+                    continue  # Reverse/idle modes can legitimately suppress feedback.
+                if not data:
+                    raise ConnectionError("连接断开")
+                record_tool_io('rx', raw=data)
+                recv_buffer.extend(data)
+                frames = feed_receive_buffer(recv_buffer)
+
+                for frame in frames:
+                    parsed = parse_feedback_frame(frame)
+                    if parsed is None:
+                        record_tool_io('parse_rejects')
+                        continue
+
+                    # 如果使用工具本体物理开关启动，程序在第一帧运动数据到来时自动开始新曲线。
+                    if should_begin_physical_run(parsed):
+                        begin_physical_run(parsed)
+
+                    raw_torque = parsed["torque"]
+                    filtered_torque = filter_torque(raw_torque)
+                    if filtered_torque is None:
+                        record_tool_io('filter_rejects')
+                        continue
+                    update_last_feedback(parsed, filtered_torque)
+                    record_tool_io('feedback_frames')
+
+                    recv_frame_count += 1
+                    t = time.monotonic() - start_time
+
+                    now = time.time()
+                    if now - last_print_recv_time > 1.0:
+                        print(
+                            f"收到数据#{recv_frame_count}: t={t:.3f}s, "
+                            f"raw={raw_torque:.2f} Nm, filt={filtered_torque:.2f} Nm, "
+                            f"speed={parsed['speed']}, angle={parsed['tighten_angle']}, "
+                            f"status={parsed['tighten_status']}, err={parsed['error_code']}, "
+                            f"unit={parsed['torque_unit']}, raw_count={parsed['torque_raw_count']}"
+                        )
+                        last_print_recv_time = now
+
+                    with lock:
+                        time_data.append(t)
+                        torque_raw_data.append(raw_torque)
+                        torque_data.append(filtered_torque)
+                        speed_data.append(parsed["speed"])
+                        angle_data.append(parsed["tighten_angle"])
+                        status_data.append(state)
+
+                    detect_state(parsed)
+                if time.monotonic() >= next_io_trace:
+                    trace_tool_io('rx_progress')
+                    next_io_trace = time.monotonic() + 1.
+
+        except Exception as e:
+            record_tool_io('error', error='receive/connect: ' + str(e))
+            trace_tool_io('connection_error')
+            print("TCP重连:", e)
+            with lock:
+                running = state in ('RUN_FORWARD', 'RUN_PHYSICAL', 'JAM_WARN')
+            if running:
+                finish_result('COMM_LOST', '电批通信中断，终止周期')
+            elif contact_cycle.active:
+                threading.Thread(target=contact_cycle.stop, args=('Tool communication lost: ' + str(e),), daemon=True).start()
+            with sock_lock:
+                if client_socket is s:
+                    client_socket = None
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+            time.sleep(RECONNECT_DELAY)
+
+
+# =========================
+# Unity 内部控制口
+# =========================
+def _latest_or_none(values):
+    return None if len(values) == 0 else values[-1]
+
+
+
+def prepare_cycle_tool():
+    with cycle_lock:
+        if shutdown_event.is_set() or result_busy.is_set() or stop_in_progress.is_set() or operation_busy.is_set():
+            raise RuntimeError('Tool result/stop still in progress')
+        operation_busy.set()
+        stop_requested.clear()  # only an explicit new cycle clears a manual stop
+
+def finish_cycle_tool():
+    if not result_busy.is_set() and not command_active.is_set():
+        operation_busy.clear()
+
+def hold_cycle_tool():
+    if not hard_stop_driver('自动周期卡入前停止', repeat=2, delay=.02) or not send_cmd(CMD_STOP_WITH_FEEDBACK, '卡入前保持停转反馈'):
+        raise RuntimeError('Tool pre-insertion stop request failed')
+
+def _finish_result_worker(result_state, message, signal_func):
+    global state, tool_stop_confirmed
+    with lock:
+        result_run = run_id
+    try:
+        print(message)
+        sent = hard_stop_driver(result_state + ' 后停止', repeat=2, delay=.02)
+        sent = send_cmd(CMD_STOP_WITH_FEEDBACK, '停止反馈确认') and sent
+        stopped = sent and wait_tool_stopped()
+        with lock:
+            if run_id != result_run:
+                raise RuntimeError('Result worker belongs to an old run')
+            tool_stop_confirmed = bool(stopped)
+            if not stopped and result_state in ('OK', 'NG_SLIP', 'JAM'):
+                state = 'EXIT_BLOCKED'
+        if signal_func:
+            signal_func()
+        save_run_outputs(force=True)
+    except Exception as exc:
+        stop_requested.set()
+        with lock:
+            tool_stop_confirmed = False
+            state = 'EXIT_BLOCKED'
+        print('[ContactCycle][TOOL_RESULT_FAILURE] ' + str(exc), flush=True)
+    finally:
+        result_busy.clear()
+        operation_done.set()
+        if not command_active.is_set() and not contact_cycle.active:
+            operation_busy.clear()
+
+
+def _save_run_outputs(force: bool = False):
     """
     保存本次拧紧的 CSV 和 PNG。
     关键点：
@@ -1100,7 +1391,6 @@ def save_run_outputs(force: bool = False):
             states = list(status_data)
             current_state = _safe_state_name(state)
             current_run_id = run_id
-            save_done = True
             last_save_time = time.time()
 
         day_dir = BASE_SAVE_DIR / time.strftime("%Y%m%d")
@@ -1117,138 +1407,67 @@ def save_run_outputs(force: bool = False):
             w.writerows(zip(x, raw, filt, speed, angle, states))
 
         # 2) 用同一份数据快照生成 PNG，确保曲线和 CSV 一一对应
-        with plot_render_lock:
-            fig_save, ax_save = plt.subplots(figsize=(9, 5))
-            ax_save.plot(x, filt, lw=2, label="滤波力矩")
-            ax_save.plot(x, raw, lw=1, alpha=0.35, label="原始力矩")
-            ax_save.axhline(
-                OK_TORQUE_TH,
-                linestyle="--",
-                linewidth=1,
-                label=f"合格阈值 {OK_TORQUE_TH:.1f} N·m",
-            )
-            ax_save.set_title(
-                "时间—力矩曲线"
-                f"｜状态：{state_display_name(current_state)}"
-                f"｜目标力矩：{TARGET_TORQUE:.0f} N·m",
-                fontproperties=CHINESE_FONT,
-            )
-            ax_save.set_xlabel("时间（秒）", fontproperties=CHINESE_FONT)
-            ax_save.set_ylabel("力矩（N·m）", fontproperties=CHINESE_FONT)
-            ax_save.set_ylim(0, 36)
-            ax_save.grid(True)
-            ax_save.legend(
-                loc="upper left",
-                prop=CHINESE_FONT,
-            )
-            fig_save.tight_layout()
-            fig_save.savefig(png_path, dpi=200)
-            plt.close(fig_save)
+        fig_save = Figure(figsize=(9, 5))
+        FigureCanvasAgg(fig_save)
+        ax_save = fig_save.subplots()
+        ax_save.plot(x, filt, lw=2, label="filtered")
+        ax_save.plot(x, raw, lw=1, alpha=0.35, label="raw")
+        ax_save.axhline(OK_TORQUE_TH, linestyle="--", linewidth=1, label=f"OK threshold {OK_TORQUE_TH:.1f} N.m")
+        ax_save.set_title(f"Time-Torque Curve | STATE: {current_state} | Target={TARGET_TORQUE:.0f} N.m")
+        ax_save.set_xlabel("Time (s)")
+        ax_save.set_ylabel("Torque (N.m)")
+        ax_save.set_ylim(0, 36)
+        ax_save.grid(True)
+        ax_save.legend(loc="upper left")
+        fig_save.tight_layout()
+        fig_save.savefig(png_path, dpi=200)
+        fig_save.clear()
+        with lock:
+            save_done = True
+            last_saved_csv, last_saved_png = str(csv_path), str(png_path)
 
         print(f"数据和曲线已保存到同一文件夹：{day_dir}")
         print(f"CSV: {csv_path}")
         print(f"PNG: {png_path}")
-        last_saved_csv = str(csv_path)
-        last_saved_png = str(png_path)
         return csv_path, png_path
 
     except Exception as e:
         print(f"保存数据/曲线失败: {e}")
         return None
 
+def wait_tool_stopped():
+    """要求停止指令之后的新鲜低速反馈持续达标；发送成功不是停转确认。"""
+    started = time.monotonic()
+    stable_since = None
+    while time.monotonic() - started < EXIT_STOP_TIMEOUT_S:
+        if stop_requested.is_set() or shutdown_event.is_set():
+            return False
+        now = time.monotonic()
+        with lock:
+            fb = dict(last_feedback) if last_feedback else None
+            stamp = last_feedback_time
+        valid = (fb is not None and stamp >= started and now - stamp <= 0.25
+                 and abs(fb["speed"]) <= 1.0 and fb.get("error_code", 0) == 0)
+        if valid:
+            stable_since = now if stable_since is None else stable_since
+            if now - stable_since >= EXIT_STOP_DWELL_S:
+                return True
+        else:
+            stable_since = None
+        time.sleep(0.02)
+    return False
 
-# 兼容旧调用名称
-def save_csv():
-    return save_run_outputs()
-
-# =========================
-# TCP 接收线程
-# =========================
-def tcp_receive():
-    if SIMULATION_ONLY:
-        return
-    global client_socket, recv_frame_count, last_print_recv_time
-
-    recv_buffer = bytearray()
-    while True:
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(CONNECT_TIMEOUT)
-            s.connect((IP, PORT))
-            s.settimeout(None)
-            with sock_lock:
-                client_socket = s
-
-            print(f"TCP连接成功：{IP}:{PORT}")
-            reset_driver()
-            time.sleep(0.05)
-            if ENABLE_PHYSICAL_SWITCH_CAPTURE:
-                enable_monitor_feedback("空闲监控/保持回传 01/00")
-
-            while True:
-                data = s.recv(1024)
-                if not data:
-                    raise ConnectionError("连接断开")
-                recv_buffer.extend(data)
-                frames = feed_receive_buffer(recv_buffer)
-
-                for frame in frames:
-                    parsed = parse_feedback_frame(frame)
-                    if parsed is None:
-                        continue
-
-                    # 如果使用工具本体物理开关启动，程序在第一帧运动数据到来时自动开始新曲线。
-                    if should_begin_physical_run(parsed):
-                        begin_physical_run(parsed)
-
-                    raw_torque = parsed["torque"]
-                    filtered_torque = filter_torque(raw_torque)
-                    if filtered_torque is None:
-                        continue
-                    update_last_feedback(parsed, filtered_torque)
-
-                    recv_frame_count += 1
-                    t = time.time() - start_time
-
-                    now = time.time()
-                    if now - last_print_recv_time > 1.0:
-                        print(
-                            f"收到数据#{recv_frame_count}: t={t:.3f}s, "
-                            f"raw={raw_torque:.2f} Nm, filt={filtered_torque:.2f} Nm, "
-                            f"speed={parsed['speed']}, angle={parsed['tighten_angle']}, "
-                            f"status={parsed['tighten_status']}, err={parsed['error_code']}, "
-                            f"unit={parsed['torque_unit']}, raw_count={parsed['torque_raw_count']}"
-                        )
-                        last_print_recv_time = now
-
-                    with lock:
-                        time_data.append(t)
-                        torque_raw_data.append(raw_torque)
-                        torque_data.append(filtered_torque)
-                        speed_data.append(parsed["speed"])
-                        angle_data.append(parsed["tighten_angle"])
-                        status_data.append(state)
-
-                    detect_state(parsed)
-
-        except Exception as e:
-            print("TCP重连:", e)
-            with sock_lock:
-                try:
-                    if client_socket is not None:
-                        client_socket.close()
-                except Exception:
-                    pass
-                client_socket = None
-            time.sleep(RECONNECT_DELAY)
-
-
-# =========================
-# Unity 内部控制口
-# =========================
-def _latest_or_none(values):
-    return None if len(values) == 0 else values[-1]
-
+def feedback_watchdog():
+    while not shutdown_event.wait(0.1):
+        with lock:
+            running = state in ("RUN_FORWARD", "RUN_PHYSICAL", "JAM_WARN") and not fault_latched
+            stamp = last_feedback_time
+            started = start_time
+        now = time.monotonic()
+        if running and now - max(stamp, started) > SERVO_FEEDBACK_TIMEOUT_S:
+            finish_result("FEEDBACK_STALE", "电批反馈超时，终止周期")
+        elif running and now - started > TIGHTEN_MAX_RUNTIME_S:
+            finish_result("TIGHTEN_TIMEOUT", "拧紧时间达到上限，终止周期")
 
 def unity_status(ok: bool = True, message: str = "status"):
     with lock:
@@ -1261,7 +1480,9 @@ def unity_status(ok: bool = True, message: str = "status"):
         current_run_id = run_id
         saved_csv = last_saved_csv
         saved_png = last_saved_png
-        feedback_age = None if last_feedback_time <= 0 else round(time.time() - last_feedback_time, 3)
+        feedback_age = None if last_feedback_time <= 0 else round(time.monotonic() - last_feedback_time, 3)
+        feedback_stamp = last_feedback_time
+        live_feedback = dict(last_feedback) if last_feedback else {}
 
     with sock_lock:
         connected = client_socket is not None
@@ -1281,23 +1502,40 @@ def unity_status(ok: bool = True, message: str = "status"):
         "speed": latest_speed,
         "angle": latest_angle,
         "feedback_age": feedback_age,
+        "feedback_time": feedback_stamp,
+        "live_speed": live_feedback.get('speed'),
+        "device_error": live_feedback.get('error_code', -1),
+        "result_processing": result_busy.is_set(),
+        "tool_stop_confirmed": tool_stop_confirmed,
+        "operation_busy": operation_busy.is_set(),
+        "stop_in_progress": stop_in_progress.is_set(),
         "queue_size": command_queue.qsize(),
+        "tool_io": tool_io_snapshot(),
         "csv": saved_csv,
         "png": saved_png,
     }
 
 
 def run_unity_command(cmd: str):
+    global TIGHTEN_MAX_RUNTIME_S
     normalized = (cmd or "").strip().lower()
     # 模拟服务保留相同编排算法，但启动和命令入口均不允许触碰实物。
     if SIMULATION_ONLY and normalized not in (
-            "", "status", "stop", "reset", "auto_cycle_sim", "robot_insert_sim", "robot_withdraw_sim"
+            "", "status", "cycle_report", "stop", "reset", "auto_cycle_sim", "robot_insert_sim", "robot_withdraw_sim"
     ) and not (cmd or '').startswith('configure_contact:'):
         return unity_status(False, "simulation_only:real_command_rejected")
+    if normalized == 'cycle_report':
+        return {**unity_status(), **contact_cycle.report()}
+    if (cmd or '').startswith('reset_contact_session:'):
+        if operation_busy.is_set() or result_busy.is_set() or stop_in_progress.is_set() or not command_queue.empty():
+            return unity_status(False, 'tool_busy')
+        contact_cycle.reset_contact_session(json.loads(cmd.split(':', 1)[1]).get('confirm_tool_free'))
+        return {**unity_status(True, 'contact_session_reset'), **contact_cycle.snapshot()}
     if (cmd or '').startswith('configure_contact:'):
-        if state in ('RUN_FORWARD', 'RUN_REVERSE') or not command_queue.empty():
+        if state in ('RUN_FORWARD', 'RUN_REVERSE', 'RUN_PHYSICAL', 'JAM_WARN') or result_busy.is_set() or operation_busy.is_set() or not command_queue.empty():
             return unity_status(False, 'tool_busy')
         contact_cycle.configure(json.loads(cmd.split(':', 1)[1]))
+        TIGHTEN_MAX_RUNTIME_S = contact_cycle.settings['tightenTimeoutSeconds']
         return {**unity_status(True, 'contact_configured'), **contact_cycle.snapshot()}
     normalized = (cmd or "").strip().lower()
 
@@ -1306,7 +1544,7 @@ def run_unity_command(cmd: str):
         return {**unity_status(True, "cycle_started"), **contact_cycle.snapshot()}
 
     if normalized in ("robot_insert", "robot_withdraw", "robot_insert_sim", "robot_withdraw_sim"):
-        if state in ('RUN_FORWARD', 'RUN_REVERSE') or not command_queue.empty():
+        if state in ('RUN_FORWARD', 'RUN_REVERSE', 'RUN_PHYSICAL', 'JAM_WARN') or result_busy.is_set() or operation_busy.is_set() or not command_queue.empty():
             return unity_status(False, 'tool_busy')
         contact_cycle.start(simulated=normalized.endswith('_sim'),
                             workflow='insert' if normalized.startswith('robot_insert') else 'withdraw')
@@ -1318,6 +1556,8 @@ def run_unity_command(cmd: str):
 
     if normalized in ("connect", "forward", "reverse") and contact_cycle.snapshot()['cycle_active']:
         return unity_status(False, "contact_cycle_busy")
+    if normalized in ('forward', 'reverse') and contact_cycle.session.snapshot()['contact_session_blocked']:
+        return unity_status(False, 'contact_session_blocked: physical inspection and field recovery required')
 
     if normalized == "connect":
         ok = reset_driver()
@@ -1326,12 +1566,12 @@ def run_unity_command(cmd: str):
         return unity_status(ok, "connected" if ok else "connect_failed")
 
     if normalized == "forward":
-        enqueue_command("FORWARD")
-        return unity_status(True, "forward_queued")
+        queued = bool(enqueue_command("FORWARD"))
+        return unity_status(queued, "forward_queued" if queued else "tool_busy")
 
     if normalized == "reverse":
-        enqueue_command("REVERSE_HOME")
-        return unity_status(True, "reverse_home_queued")
+        queued = bool(enqueue_command("REVERSE_HOME"))
+        return unity_status(queued, "reverse_home_queued" if queued else "tool_busy")
 
     if normalized in ("stop", "reset"):
         if not SIMULATION_ONLY:
@@ -1345,13 +1585,14 @@ def run_unity_command(cmd: str):
 
 
 def start_cycle_tool():
-    # Synchronous transition clears any previous result before polling begins.
+    # prepare_cycle_tool owns the explicit stop-latch reset, before motion starts.
     sent = _do_start_forward()
-    if not sent or state != "RUN_FORWARD":
-        raise RuntimeError("Tool failed to start")
+    if not sent or state != 'RUN_FORWARD':
+        raise RuntimeError('Tool failed to start')
 
 
-contact_cycle = ContactCycle(start_cycle_tool, unity_status, stop_cycle_tool)
+contact_cycle = ContactCycle(start_cycle_tool, unity_status, stop_cycle_tool, prepare_cycle_tool, finish_cycle_tool, hold_cycle_tool)
+contact_cycle.isolation_only = SIMULATION_ONLY
 
 
 def handle_unity_client(conn: socket.socket, addr):
@@ -1368,11 +1609,19 @@ def handle_unity_client(conn: socket.socket, addr):
             file.flush()
 
 
-def unity_command_server():
+def create_unity_command_listener():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((UNITY_BRIDGE_HOST, UNITY_BRIDGE_PORT))
-    server.listen(5)
+    try:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind((UNITY_BRIDGE_HOST, UNITY_BRIDGE_PORT))
+        server.listen(5)
+        return server
+    except Exception:
+        server.close()
+        raise
+
+
+def unity_command_server(server):
     print(f"Unity控制口已启动：{UNITY_BRIDGE_HOST}:{UNITY_BRIDGE_PORT}")
 
     while True:
@@ -1763,13 +2012,16 @@ print("物理开关同步绘图: 已启用。空闲时发送 01/00 保持回传�
 print(f"异常后自动回位: {AUTO_RETURN_HOME_AFTER_FAULT}；手动Reverse仍可用于回位调试")
 print("快捷键: f=正转，r=定量反转回初始位，s/Esc=立即急停；若无效请看终端是否打印“按钮指令已接收/鼠标兜底触发”")
 
+# Bind first: an occupied bridge must fail before connecting/resetting the tool.
+unity_listener = create_unity_command_listener()
 if not SIMULATION_ONLY:
     threading.Thread(target=command_worker, daemon=True).start()
     threading.Thread(target=tcp_receive, daemon=True).start()
     threading.Thread(target=terminal_keyboard_worker, daemon=True).start()
+    threading.Thread(target=feedback_watchdog, daemon=True).start()
 else:
     print("隔离模拟模式：不连接电批、不启动实物命令线程，仅允许 *_sim 流程")
-threading.Thread(target=unity_command_server, daemon=True).start()
+threading.Thread(target=unity_command_server, args=(unity_listener,), daemon=True).start()
 
 if UNITY_EMBEDDED_MODE:
     threading.Thread(target=curve_render_worker, daemon=True).start()

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../Assets/RunDataSession.cs" />
+    <Compile Include="../../Assets/DeviceTcpConnection.cs" />
+    <Compile Include="../../Assets/DobotController.cs" />
+    <Compile Include="../../Assets/DobotController.Feedback.cs" />
+    <Compile Include="../../Assets/DobotEventArgs.cs" />
+    <Compile Include="../../Assets/LiftCylinderController.cs" />
+  </ItemGroup>
+</Project>

@@ -20,10 +20,12 @@ class OfflineIsolationTests(unittest.TestCase):
         nodes = [n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name in names]
         cycle = Mock()
         cycle.snapshot.return_value = {'cycle_active': False}
+        cycle.session.snapshot.return_value = {'contact_session_blocked': False}
         env = dict(SIMULATION_ONLY=simulation, socket=Mock(), client_socket=Mock(),
                    sock_lock=threading.Lock(), state='IDLE', contact_cycle=cycle,
                    command_queue=Mock(), unity_status=lambda ok=True, message='': {'ok': ok, 'message': message},
                    threading=Mock(), stop_driver=Mock(), reset_driver=Mock(return_value=True),
+                   result_busy=threading.Event(), operation_busy=threading.Event(),
                    enqueue_command=Mock(), ENABLE_PHYSICAL_SWITCH_CAPTURE=False)
         env['command_queue'].empty.return_value = True
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), 'exec'), env)
@@ -62,13 +64,13 @@ class OfflineIsolationTests(unittest.TestCase):
         node = next(n for n in TREE.body if isinstance(n, ast.If) and
                     isinstance(n.test, ast.UnaryOp) and isinstance(n.test.op, ast.Not) and
                     isinstance(n.test.operand, ast.Name) and n.test.operand.id == 'SIMULATION_ONLY')
-        for simulated, expected in ((True, []), (False, ['command_worker', 'tcp_receive', 'terminal_keyboard_worker'])):
+        for simulated, expected in ((True, []), (False, ['command_worker', 'tcp_receive', 'terminal_keyboard_worker', 'feedback_watchdog'])):
             started = []
             fake_threading = Mock()
             fake_threading.Thread.side_effect = lambda target, daemon: Mock(start=lambda: started.append(target))
             env = dict(SIMULATION_ONLY=simulated, threading=fake_threading,
                        command_worker='command_worker', tcp_receive='tcp_receive',
-                       terminal_keyboard_worker='terminal_keyboard_worker')
+                       terminal_keyboard_worker='terminal_keyboard_worker', feedback_watchdog='feedback_watchdog')
             exec(compile(ast.Module(body=[node], type_ignores=[]), str(SOURCE), 'exec'), env)
             self.assertEqual(started, expected)
 
